@@ -13,7 +13,12 @@
  *   - Every commit author/committer must resolve through the closed identity
  *     table in config/review-evidence.v1.json. Unresolved → failure
  *     (`identity-unresolved`). Owner-identity commits resolve only through an
- *     owner attestation at the exact head (`author-vendor:`).
+ *     owner attestation at the exact head (`author-vendor:`) or, with no
+ *     attestation, an owner-delegate review (#450): a registered single-vendor
+ *     model reviewer App's `VERDICT: APPROVE` at the exact head, from a vendor
+ *     that authored nothing on it. Then the relaxed rules (lane bots,
+ *     `Agent-Vendor` trailers) apply even on carve-out heads. Trailer-less
+ *     owner commits are never delegate-cleared: their vendor is unknowable.
  *   - Evidence: formal reviews at the exact head by a listed Bot identity
  *     (APPROVED / CHANGES_REQUESTED; DISMISSED, PENDING, COMMENTED ignored),
  *     an App-authored `review-evidence:v1` comment at the exact head, or an
@@ -72,7 +77,7 @@ const VENDORS = new Set(["grok", "codex", "claude", "devin", "coderabbit", "owne
 const AUTHOR_COMMIT_VENDORS = new Set(["grok", "codex", "claude", "devin"]);
 const ROLES = new Set(["author", "reviewer"]);
 const CONFIG_KEYS = new Set(["schemaVersion", "context", "ownerLogin", "attestationVendors", "identities"]);
-const IDENTITY_KEYS = new Set(["login", "appSlug", "appId", "vendor", "roles", "authorCommits"]);
+const IDENTITY_KEYS = new Set(["login", "appSlug", "appId", "vendor", "roles", "authorCommits", "ownerDelegate"]);
 // GitHub's own committer for web-UI edits; not a vendor, not an author of record.
 const GITHUB_WEB_FLOW = "web-flow";
 
@@ -189,6 +194,13 @@ export function validateConfig(cfg) {
     if (!VENDORS.has(id.vendor)) fail(`identity:vendor:${id.login}`);
     if (!Array.isArray(id.roles) || id.roles.length === 0 || id.roles.some((r) => !ROLES.has(r))) fail(`identity:roles:${id.login}`);
     if (id.roles.includes("reviewer") && id.login.endsWith("[bot]") && !id.appSlug) fail(`identity:reviewer-needs-appSlug:${id.login}`);
+    // Owner delegate (#450): only a single-vendor model reviewer bound to one
+    // GitHub App (slug AND id) that never authors may stand in for the owner.
+    if (Object.prototype.hasOwnProperty.call(id, "ownerDelegate")) {
+      const appBound = id.login.endsWith("[bot]") && Boolean(id.appSlug) && Number.isInteger(id.appId);
+      const reviewerOnly = id.roles.length === 1 && id.roles[0] === "reviewer";
+      if (id.ownerDelegate !== true || !appBound || !reviewerOnly || !AUTHOR_COMMIT_VENDORS.has(id.vendor)) fail(`identity:ownerDelegate:${id.login}`);
+    }
     if (Object.prototype.hasOwnProperty.call(id, "authorCommits")) {
       const ac = id.authorCommits;
       if (!Array.isArray(ac) || ac.length === 0) fail(`identity:authorCommits:${id.login}`);
@@ -204,6 +216,43 @@ export function validateConfig(cfg) {
     }
   }
   return cfg;
+}
+
+// Mirror of second-opinion.sh parse_isolated_verdict (#290): "approve" |
+// "request-changes", or a named fail-closed state. [[:space:]] is the C-locale
+// set, so trimming does not use String.prototype.trim.
+const VWS = "[ \\t\\n\\v\\f\\r]";
+const VERDICTS = new Map([["VERDICT: APPROVE", "approve"], ["VERDICT: approve", "approve"], ["VERDICT: REQUEST_CHANGES", "request-changes"], ["VERDICT: changes-requested", "request-changes"]]);
+const vtrim = (s) => s.replace(new RegExp(`^${VWS}+|${VWS}+$`, "g"), "");
+const vstrip = (s) => { const m = new RegExp(`^[0-9]+\\.${VWS}+(.*)$`, "s").exec(s); return m ? vtrim(m[1]) : s; };
+const VSHAPED = new RegExp(`^VERDICT:${VWS}+[^ \\t\\n\\v\\f\\r]`);
+export function verdictOf(text) {
+  if (typeof text !== "string") return "empty";
+  let first = "", shaped = 0, permitted = 0, approve = false, changes = false;
+  for (const raw of text.split("\n")) {
+    const line = vtrim(raw.replace(/\r$/, ""));
+    if (!line) continue;
+    if (!first) first = line;
+    const c = vstrip(line);
+    const e = VERDICTS.get(c);
+    if (e) { permitted += 1; shaped += 1; if (e === "approve") approve = true; else changes = true; }
+    else if (VSHAPED.test(c)) shaped += 1;
+  }
+  if (!first) return "empty";
+  const fe = VERDICTS.get(vstrip(first));
+  if (!fe) return permitted > 0 ? "invalid" : "no-verdict";
+  if (shaped > 1) return approve && changes ? "contradictory" : permitted > 1 ? "duplicate" : "invalid";
+  return fe;
+}
+
+// An owner delegate's word is its VERDICT line (#450): a pass needs a
+// first-line `VERDICT: APPROVE`; any request-changes signal is a fail; anything
+// else carries no verdict (and, as the newest item, masks an older pass).
+function delegateResult(id, result, body) {
+  if (id.ownerDelegate !== true || result === "none") return result;
+  const v = verdictOf(body);
+  if (result === "fail" || v === "request-changes") return "fail";
+  return v === "approve" ? "pass" : "none";
 }
 
 function parseBlock(body, marker, fields) {
@@ -347,7 +396,9 @@ export function editedAtAll(c) {
  * real, machine-verified evidence itself.
  */
 function appReviewerVendors(identities) {
-  return new Set(identities.filter((i) => i.roles.includes("reviewer") && i.appSlug).map((i) => i.vendor));
+  // An owner-delegate App (#450) does not retire the owner's countersign path
+  // for its vendor: the owner's word stays an optional override (Mark, 2026-10-07).
+  return new Set(identities.filter((i) => i.roles.includes("reviewer") && i.appSlug && i.ownerDelegate !== true).map((i) => i.vendor));
 }
 
 // The identity key every `owner-attested-review:v1` item is filed under in
@@ -418,7 +469,7 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
     const at = timestamp(r);
     // `<=`: a retarget in the same second as the review is not provably after it (round 5, finding 4).
     if (notBefore > 0 && at <= notBefore) { staleBase += 1; continue; }
-    const result = state === "approved" ? "pass" : state === "changes_requested" ? "fail" : "none";
+    const result = delegateResult(id, state === "approved" ? "pass" : state === "changes_requested" ? "fail" : "none", r?.body);
     items.push({ identity: id, result, at, id: Number(r?.id ?? 0), source: "review" });
   }
   for (const c of comments ?? []) {
@@ -437,7 +488,7 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
         if (b && ["pass", "fail"].includes(b.result)) {
           if (b["head-sha"] !== headSha) { staleReceipts += 1; continue; }
           if (notBefore > 0 && at <= notBefore) { staleBase += 1; continue; }
-          items.push({ identity: id, result: b.result, at, id: Number(c?.id ?? 0), source: "comment" });
+          items.push({ identity: id, result: delegateResult(id, b.result, c?.body), at, id: Number(c?.id ?? 0), source: "comment" });
         }
         continue;
       }
@@ -475,6 +526,23 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
   return { newest: [...newest.values()].filter((e) => e.result !== "none"), staleReceipts, staleBase };
 }
 
+/**
+ * Owner-delegate path (#450). With no owner attestation, identity resolves
+ * through the relaxed rules (lane bots, Agent-Vendor trailers) when an
+ * `ownerDelegate` identity's newest evidence at this head is a VERDICT pass
+ * from a vendor that authored nothing here, and no cross-vendor reviewer
+ * failed. Anything still unresolved under the relaxed rules (a trailer-less
+ * owner commit, an unsigned non-lane bot, an unlisted login) keeps it null.
+ */
+export function ownerDelegateResolve(commits, identities, newest) {
+  const relaxed = resolveAuthors(commits, identities, null, { relaxed: true });
+  if (relaxed.unresolved.length > 0) return null;
+  const cross = newest.filter((e) => e.identity.vendor !== "unknown" && !relaxed.vendors.has(e.identity.vendor));
+  if (cross.some((e) => e.result === "fail")) return null;
+  const by = cross.filter((e) => e.identity.ownerDelegate === true && e.result === "pass").map((e) => e.identity.login);
+  return by.length > 0 ? { authors: relaxed, by } : null;
+}
+
 export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, commits, reviews, comments, timeline, config, files }) {
   const head = norm(headSha);
   if (head !== norm(expectedHead)) return { state: "failure", reason: "head-moved", detail: `pr head ${head.slice(0, 7)} != expected ${norm(expectedHead).slice(0, 7)}` };
@@ -500,18 +568,21 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   // Owner gate carve-outs (2026-10-05): relaxed identity resolution only when
   // the PR provably touches no carve-out path.
   const carveOut = carveOutPath(files);
-  const authors = resolveAuthors(commits ?? [], config.identities, att?.vendors ?? null, { relaxed: carveOut === null });
+  // A base retarget keeps the head SHA but changes the diff (round 4,
+  // finding 3): evidence created before the last base_ref_changed is stale.
+  // Collected before identity so an owner delegate can stand in (#450).
+  const notBefore = lastBaseChange(timeline);
+  const { newest, staleReceipts, staleBase } = collectEvidence({ reviews, comments, identities: config.identities, headSha: head, notBefore, ownerLogin: config.ownerLogin, attestationVendors: config.attestationVendors });
+  let authors = resolveAuthors(commits ?? [], config.identities, att?.vendors ?? null, { relaxed: carveOut === null });
+  const delegate = !att && authors.unresolved.length > 0 ? ownerDelegateResolve(commits ?? [], config.identities, newest) : null;
+  if (delegate) authors = delegate.authors;
   if (authors.unresolved.length > 0) {
     const why = carveOut && carveOut !== "<unknown>" ? `;owner-carve-out:${carveOut}` : "";
     return { state: "failure", reason: "identity-unresolved", detail: `${[...new Set(authors.unresolved)].join(",")}${why}`, authorVendors: [...authors.vendors], attestation: att, carveOut };
   }
-  // A base retarget keeps the head SHA but changes the diff (round 4,
-  // finding 3): evidence created before the last base_ref_changed is stale.
-  const notBefore = lastBaseChange(timeline);
-  const { newest, staleReceipts, staleBase } = collectEvidence({ reviews, comments, identities: config.identities, headSha: head, notBefore, ownerLogin: config.ownerLogin, attestationVendors: config.attestationVendors });
   const eligible = newest.filter((e) => e.identity.vendor !== "unknown" && !authors.vendors.has(e.identity.vendor));
   const ineligible = newest.filter((e) => !eligible.includes(e));
-  const base = { authorVendors: [...authors.vendors], attestation: att, evidence: newest.map((e) => `${e.identity.login}:${e.result}:${e.source}`) };
+  const base = { authorVendors: [...authors.vendors], attestation: att, ownerDelegate: delegate?.by ?? null, evidence: newest.map((e) => `${e.identity.login}:${e.result}:${e.source}`) };
   if (eligible.some((e) => e.result === "fail")) return { state: "failure", reason: "changes-requested", detail: eligible.filter((e) => e.result === "fail").map((e) => e.identity.login).join(","), ...base };
   if (eligible.some((e) => e.result === "pass")) {
     // A deleted comment is invisible to REST, so a writer could delete an

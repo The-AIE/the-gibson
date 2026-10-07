@@ -62,6 +62,16 @@
       ]
     },
     {
+      "login": "claude[bot]",
+      "appSlug": "claude",
+      "appId": 1236702,
+      "vendor": "claude",
+      "roles": [
+        "reviewer"
+      ],
+      "ownerDelegate": true
+    },
+    {
       "login": "mrhinkle",
       "appSlug": null,
       "appId": null,
