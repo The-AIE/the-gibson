@@ -160,12 +160,12 @@ yours to inherit or hide behind.
 ```bash
 node <path-to-gibson>/scripts/gibson-verify.mjs doctor
 node <path-to-gibson>/scripts/gibson-verify.mjs prove
-node <path-to-gibson>/scripts/gibson-verify.mjs report --agent <agent-id> --pr <N> --issue <N>
 ```
 
 `prove` fails a no-op diff, a dirty tree, a red gate, and a log that says NOT RUN, then
-writes `.gibson-receipts/<HEAD>.json`. Paste its summary in the PR body. No receipt at
-the PR head means the status is **claim-only**, and you say so ([docs/30](../docs/30-verification-lever.md)).
+writes `.gibson-receipts/<HEAD>.json`. Paste its summary in the PR body (step 5), then run
+`report` once the PR exists. No receipt at the PR head means the status is **claim-only**,
+and you say so ([docs/30](../docs/30-verification-lever.md)).
 
 ### 5. Open the PR
 
@@ -190,6 +190,12 @@ Closes #N
 A | B | C
 EOF
 )"
+```
+
+Then report the verification for the PR head, using the PR number `gh pr create` just assigned:
+
+```bash
+node <path-to-gibson>/scripts/gibson-verify.mjs report --agent <agent-id> --pr <PR-number> --issue <N>
 ```
 
 - Every acceptance criterion must be addressed (or mapped to a test that will cover it).
