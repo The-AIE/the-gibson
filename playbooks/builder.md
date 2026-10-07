@@ -155,6 +155,18 @@ Manual equivalent if the script is unavailable:
 Or manual per target AGENTS.md gate commands. Pre-existing baseline failures are not
 yours to inherit or hide behind.
 
+### 4b. Prove it before you say done (Law 8)
+
+```bash
+node <path-to-gibson>/scripts/gibson-verify.mjs doctor
+node <path-to-gibson>/scripts/gibson-verify.mjs prove
+node <path-to-gibson>/scripts/gibson-verify.mjs report --agent <agent-id> --pr <N> --issue <N>
+```
+
+`prove` fails a no-op diff, a dirty tree, a red gate, and a log that says NOT RUN, then
+writes `.gibson-receipts/<HEAD>.json`. Paste its summary in the PR body. No receipt at
+the PR head means the status is **claim-only**, and you say so ([docs/30](../docs/30-verification-lever.md)).
+
 ### 5. Open the PR
 
 ```bash
@@ -193,6 +205,7 @@ locally. Reviewer, test-engineer, and ux-evaluator are **other hats**.
 - [ ] Claim held, worktree used, canonical untouched
 - [ ] PR open with `Closes #N`
 - [ ] Green gate green (zero new failures vs. baseline)
+- [ ] `gibson-verify prove` verified at the PR head, summary in the PR body (else: claim-only)
 - [ ] Contract criteria implemented or explicitly deferred with reason in PR
 - [ ] Status reported (not silent)
 
