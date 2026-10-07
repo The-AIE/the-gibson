@@ -128,7 +128,8 @@ if (log) {
   if (/\bFAIL\b/.test(log) && /run-all:\s*RED/i.test(log)) {
     fail("log reports run-all RED under success claim");
   }
-  if (/gate:\s*RED/i.test(log) || /\bRED\b.*gate/i.test(log)) {
+  // \bgate\b: "RED with aggregate metrics" (run-all self-test) is not a red gate.
+  if (/gate:\s*RED/i.test(log) || /\bRED\b.*\bgate\b/i.test(log)) {
     fail("log reports gate RED under success claim");
   }
   if (/Process completed with exit code [1-9]/i.test(log)) {
