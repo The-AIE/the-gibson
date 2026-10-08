@@ -86,21 +86,20 @@ authors to the exclusion set, never remove one (a mixed Grok+Devin PR attested a
 ignored whole. An attestation resolves identity only; it is never a review, and it is
 trusted on the owner's word. The durable fix is per-lane bot identities (#67).
 
-**Owner gate carve-outs (Mark, 2026-10-05).** "Remove the owner gate everywhere except
-agent rule files, secrets/billing, and schema migrations." `carveOutPath()` in
-`scripts/pr-review-evidence.mjs` is the machine definition. A head that touches (a) an
-agent rule or control-plane file (`AGENTS.md`/`CLAUDE.md` anywhere, `.grok/`, `.codex/`,
-`.claude/`, `.agents/`, `.github/`, `config/review-evidence.v1.json`,
-`config/pr-size.v1.json`, `config/policy/`, the review-evidence, pr-size, claim-isolation,
-policy-manifest and contract-authority sensors, `scripts/loop-fleet.sh`,
-`docs/14-human-gates.md`), (b) a secrets, Stripe, billing, checkout, payments, api-key or
-`.env` path, or (c) a migration, `schema.prisma` or `*.sql` file needs the cross-vendor review **and** the owner attestation above at the exact head
-(`owner-attestation-required` until it lands), even when every commit is GitHub-signed.
-An unknown or truncated file list counts as a carve-out. Everything else is delegated:
-listed lane bots resolve without an attestation, owner-identity commits resolve through
-their `Agent-Vendor:` trailer, and an owner-identity commit with no trailer is cleared by
-an `independent` reviewer (`aie-independent-review[bot]`, a reviewer-only App that never
-authors, so it is cross-vendor to every author).
+**Owner out of the loop (Mark, 2026-10-08; D-014).** "Remove me from the loop." The owner
+is never a gate. Every head, including the former carve-outs (agent rule and control-plane
+files, secrets/billing/payments paths, schema and migrations), is cleared by the same
+thing: an independent cross-vendor review at the exact head plus the repository's
+required checks. Identity resolution is always relaxed: a listed lane bot resolves to its
+vendor even unsigned, an owner-identity commit resolves through its `Agent-Vendor:`
+trailer, and an owner-identity commit with no trailer is cleared only by an
+`independent` reviewer (`aie-independent-review[bot]`, reviewer-only, cross-vendor to
+every author). An owner attestation is still honoured as an identity statement (it
+unions vendors into the author set) but is never required. `carveOutPath()` survives
+only to name the class of file in the status description (`touches:<path>`) so a reviewer
+sees what it is signing. Agent commits name their vendor: lane-bot identity, or the
+owner identity with an `Agent-Vendor:` trailer (a branch-update merge commit needs the
+trailer too). The 2026-10-05 carve-out model (D-013) is superseded.
 
 **Residual window (documented, not hidden).** The workflow resolves the head via the
 API and falls back to the event's head so `pending` is stamped even when the API call
@@ -110,8 +109,7 @@ line. A prior `success` on that head survives until the next event. Making the
 context required does not widen this window; it only makes the stale success visible.
 
 **Reason tokens** (the status description, ≤140 chars): `pass` → success;
-`no-receipt-at-head`, `stale-head-only`, `owner-attestation-required` → pending (blocks
-merge, no red);
+`no-receipt-at-head`, `stale-head-only` → pending (blocks merge, no red);
 `same-vendor-reviewer`, `identity-unresolved`, `changes-requested`, `head-moved`,
 `ambiguous-head` (the head is the head of more than one open PR: a commit status is
 keyed by SHA, so no verdict is published rather than one PR overwriting another's),

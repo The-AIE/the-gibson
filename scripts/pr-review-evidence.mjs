@@ -12,11 +12,13 @@
  *     workflow runs trusted default-branch code and has no PR objects).
  *   - Every commit author/committer must resolve through the closed identity
  *     table in config/review-evidence.v1.json. Unresolved → failure
- *     (`identity-unresolved`). On owner carve-out heads (see CARVE_OUT_PATTERNS)
- *     owner-identity and unsigned commits resolve only through an owner
- *     attestation at the exact head (`author-vendor:`), and that attestation
- *     is required even when every commit is signed. Elsewhere lane bots,
- *     Agent-Vendor trailers, and an `independent` reviewer stand in for it.
+ *     (`identity-unresolved`). Since D-014 (2026-10-08) no head requires the
+ *     owner: the former carve-out classes (see CARVE_OUT_PATTERNS) are only
+ *     named in the status description. Lane bots resolve to their vendor even
+ *     unsigned, owner-identity commits resolve through their `Agent-Vendor:`
+ *     trailer, and an `independent` reviewer clears a trailerless owner
+ *     commit. An owner attestation (`author-vendor:`) is honoured as an
+ *     identity statement when present but is never required.
  *   - Evidence: formal reviews at the exact head by a listed Bot identity
  *     (APPROVED / CHANGES_REQUESTED; DISMISSED, PENDING, COMMENTED ignored),
  *     an App-authored `review-evidence:v1` comment at the exact head, or an
@@ -58,7 +60,6 @@ const execFileAsync = promisify(execFile);
 export const REASONS = Object.freeze({
   pass: "success",
   "no-receipt-at-head": "pending",
-  "owner-attestation-required": "pending",
   "stale-head-only": "pending",
   "stale-base": "pending",
   "evidence-deleted": "pending",
@@ -84,18 +85,19 @@ const IDENTITY_KEYS = new Set(["login", "appSlug", "appId", "vendor", "roles", "
 // GitHub's own committer for web-UI edits; not a vendor, not an author of record.
 const GITHUB_WEB_FLOW = "web-flow";
 
-// Owner gate carve-outs (Mark, 2026-10-05: "Remove the owner gate everywhere
-// except agent rule files, secrets/billing, and schema migrations"). The owner
-// (mrhinkle) is required ONLY when a PR touches one of these paths:
-// (a) agent rule and control-plane files, (b) secrets/billing, (c) schema and
-// migrations. On those heads an owner attestation at the exact head is
-// REQUIRED (`owner-attestation-required`), even when every commit is
-// GitHub-signed, on top of the cross-vendor review. Everywhere else the owner
-// is not a gate: a listed lane bot (aie-agent-lanes-*[bot]) resolves without an
-// attestation even when its CLI commit is unsigned, an owner-identity commit
-// resolves to the vendor named by its `Agent-Vendor:` trailer, and an
-// owner-identity commit with no trailer is cleared by an `independent`
-// reviewer. An unknown file list is treated as a carve-out (fail closed).
+// Owner out of the loop (Mark, 2026-10-08: "Remove me from the loop"). The owner
+// (mrhinkle) is never a gate. Every head, including the former carve-outs
+// (agent rule and control-plane files, secrets/billing, schema and
+// migrations), is cleared by the same thing: an independent cross-vendor
+// review at the exact head. Identity resolution is always relaxed: a listed
+// lane bot resolves to its vendor even unsigned, an owner-identity commit
+// resolves through its `Agent-Vendor:` trailer, and an owner-identity commit
+// with no trailer is cleared only by an `independent` reviewer. An owner
+// attestation is still honoured as an identity statement (it unions vendors
+// into the author set) but is never required. `carveOutPath()` is kept for
+// the status description so a reviewer can see what class of file a head
+// touches; it no longer changes the verdict. History: the 2026-10-05
+// carve-out model (D-013) is superseded by D-014.
 const LANE_BOT_LOGIN = /^aie-agent-lanes-[a-z0-9-]+\[bot\]$/;
 const AGENT_RULE_FILE_NAMES = new Set(["agents.md", "claude.md"]);
 const CARVE_OUT_PATTERNS = [
@@ -508,9 +510,17 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   // The commits/{sha}/pulls endpoint returns PRs *associated* with a commit
   // (ancestors included), so filter to PRs whose HEAD is this SHA (round 2,
   // finding 3): a stacked PR that merely contains this head is not a sibling.
-  const openForHead = (pullsForHead ?? [])
+  let openForHead = (pullsForHead ?? [])
     .filter((p) => norm(p?.state) === "open" && norm(p?.head?.sha) === head)
     .map((p) => Number(p?.number));
+  // A fork head is not a commit of the base repository, so the
+  // commits/{sha}/pulls listing returns nothing for it (#455). The PR under
+  // evaluation is, by its own record, one owner of its head: when the listing
+  // is EMPTY and the PR's own head matches, evaluate it as the sole owner.
+  // A non-empty listing that does not name this PR is still ambiguous.
+  if (openForHead.length === 0 && norm(pull?.state) === "open" && norm(pull?.head?.sha) === head) {
+    openForHead = [Number(prNumber)];
+  }
   if (openForHead.length !== 1 || openForHead[0] !== Number(prNumber)) {
     return { state: "failure", reason: "ambiguous-head", detail: `head is the head of open PRs [${openForHead.join(",")}], evaluating #${prNumber}` };
   }
@@ -521,12 +531,12 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
     return { state: "failure", reason: "api-error", detail: `commits-truncated: pr declares ${declared}, fetched ${(commits ?? []).length}, cap ${PR_COMMITS_API_CAP}` };
   }
   const att = ownerAttestation(comments ?? [], config.ownerLogin, head, config.attestationVendors);
-  // Owner gate carve-outs (2026-10-05): relaxed identity resolution only when
-  // the PR provably touches no carve-out path.
+  // Owner out of the loop (2026-10-08, D-014): identity resolution is always
+  // relaxed; the carve-out class is reported in the description only.
   const carveOut = carveOutPath(files);
-  const authors = resolveAuthors(commits ?? [], config.identities, att?.vendors ?? null, { relaxed: carveOut === null });
+  const authors = resolveAuthors(commits ?? [], config.identities, att?.vendors ?? null, { relaxed: true });
   if (authors.unresolved.length > 0) {
-    const why = carveOut && carveOut !== "<unknown>" ? `;owner-carve-out:${carveOut}` : "";
+    const why = carveOut && carveOut !== "<unknown>" ? `;touches:${carveOut}` : "";
     return { state: "failure", reason: "identity-unresolved", detail: `${[...new Set(authors.unresolved)].join(",")}${why}`, authorVendors: [...authors.vendors], attestation: att, carveOut };
   }
   // A base retarget keeps the head SHA but changes the diff (round 4,
@@ -538,7 +548,7 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   // provably cross-vendor. Without one, the identity stays unresolved.
   const unvendored = authors.unvendored.length > 0;
   if (unvendored && !newest.some((e) => e.identity.vendor === "independent")) {
-    return { state: "failure", reason: "identity-unresolved", detail: `${[...new Set(authors.unvendored)].join(",")};needs Agent-Vendor trailer, owner attestation, or independent review`, authorVendors: [...authors.vendors], attestation: att, carveOut };
+    return { state: "failure", reason: "identity-unresolved", detail: `${[...new Set(authors.unvendored)].join(",")};needs Agent-Vendor trailer or independent review`, authorVendors: [...authors.vendors], attestation: att, carveOut };
   }
   // With unvendored commits a pass counts only from an independent reviewer;
   // a cross-vendor fail still counts (fail closed).
@@ -555,10 +565,10 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
     const newestPass = Math.max(...eligible.filter((e) => e.result === "pass").map((e) => e.at));
     const deletedAfter = (timeline ?? []).filter((ev) => norm(ev?.event) === "comment_deleted" && (Date.parse(ev?.created_at ?? "") || 0) >= newestPass).length;
     if (deletedAfter > 0) return { state: "pending", reason: "evidence-deleted", detail: `${deletedAfter} comment(s) deleted at/after the newest pass; review again`, ...base };
-    // Carve-out heads need the owner on top of the review, even when every
-    // commit is GitHub-signed and resolved without an attestation.
-    if (carveOut !== null && !att) return { state: "pending", reason: "owner-attestation-required", detail: `owner-carve-out:${carveOut}; awaiting mrhinkle owner-review-attestation at this head`, ...base, carveOut };
-    return { state: "success", reason: "pass", detail: eligible.filter((e) => e.result === "pass").map((e) => e.identity.login).join(","), ...base };
+    // D-014: no owner attestation on any head. The class of file touched is
+    // surfaced in the description for the record, never as a gate.
+    const touched = carveOut && carveOut !== "<unknown>" ? `; touches:${carveOut}` : "";
+    return { state: "success", reason: "pass", detail: `${eligible.filter((e) => e.result === "pass").map((e) => e.identity.login).join(",")}${touched}`, ...base, carveOut };
   }
   if (ineligible.length > 0) return { state: "failure", reason: "same-vendor-reviewer", detail: ineligible.map((e) => `${e.identity.login}(${e.identity.vendor})`).join(","), ...base };
   if (staleBase > 0) return { state: "pending", reason: "stale-base", detail: `${staleBase} receipt(s) predate the last base retarget; review again`, ...base };
