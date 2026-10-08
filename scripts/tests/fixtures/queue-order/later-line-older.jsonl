@@ -1,0 +1,2 @@
+{"schema":"gibson.owner-order.v1","issued_at":"2026-10-03T16:00:00Z","repo":"The-AIE/the-gibson","order":[1],"source":"https://example.test/owner-order/early-physical"}
+{"schema":"gibson.owner-order.v1","issued_at":"2026-10-03T09:00:00Z","repo":"The-AIE/the-gibson","order":[2],"source":"https://example.test/owner-order/later-physical"}

@@ -1988,6 +1988,13 @@ fi
 
 gibson_metrics_init
 
+# #424: discovery already runs scripts/tests/queue-order.test.sh. This is the
+# non-test invocation the orphan ratchet counts (test-only names do not).
+if ! node "$REPO_ROOT/scripts/queue-order.mjs" --help >/dev/null 2>&1; then
+  echo "${RED}  FAIL${OFF} — scripts/queue-order.mjs --help failed"
+  FAILED="$FAILED queue-order-help"
+fi
+
 # --- 4. sensor suites -------------------------------------------------------
 echo "== sensors"
 

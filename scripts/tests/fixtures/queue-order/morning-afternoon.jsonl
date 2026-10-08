@@ -1,0 +1,2 @@
+{"schema":"gibson.owner-order.v1","issued_at":"2026-10-03T08:15:00Z","repo":"The-AIE/the-gibson","order":[11],"source":"https://example.test/owner-order/morning"}
+{"schema":"gibson.owner-order.v1","issued_at":"2026-10-03T18:45:00Z","repo":"The-AIE/the-gibson","order":[22],"source":"https://example.test/owner-order/afternoon"}
