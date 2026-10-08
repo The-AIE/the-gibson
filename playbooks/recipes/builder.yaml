@@ -1,7 +1,7 @@
 # Gibson builder role — Goose recipe mirror
 # Source of truth: playbooks/builder.md — do not fork doctrine text here.
 # playbook: playbooks/builder.md
-# playbook-sha256: cdcefea493e644aa2f16b7b9ea3a2d2b2b46725a0c1a1cae63148b9993d7cb7c
+# playbook-sha256: f4a4c2058533075bcf5fcbb7d59fe316de96946bdc828f0bdfbd5b31d6428227
 #
 # Goose schema version (version field below) is the official Recipe type
 # version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe
