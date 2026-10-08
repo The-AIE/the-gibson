@@ -275,9 +275,17 @@ jobs:
             echo "::error::review-evidence: at least one status write failed; the affected heads carry whatever was written before"
             exit 1
           fi
+          # A published `failure` verdict is this sensor's OUTPUT, not a crash of the
+          # sensor. Exiting 1 here made every pull_request_target run for a PR that
+          # fails its gate a red workflow run, and sensor-health (freshness mode,
+          # latest-non-success) then reported THIS workflow as FAILING whenever the
+          # most recent event happened to be such a PR (main was red 2026-10-01..08;
+          # L-087, L-092, #452). The verdict is already visible on the PR head's
+          # status and in the step summary; the run stays green so its conclusion
+          # means only "the sweep ran and published". Status-write failures above
+          # still exit 1, and a publish crash is still stamped by the next step.
           if [ "$event_fail" -eq 1 ]; then
-            echo "::error::review-evidence: this event's pull request failed closed (see published status)"
-            exit 1
+            echo "::warning::review-evidence: this event's pull request failed closed (see published status)"
           fi
 
       - name: Stamp error on the event head if publish crashed
