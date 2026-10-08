@@ -521,7 +521,9 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   // Only an actually EMPTY listing qualifies (Codex review of #458): a
   // non-empty listing that names other PRs or other heads, but not this one,
   // is an inconsistency and stays ambiguous (fail closed).
-  if ((pullsForHead ?? []).length === 0 && norm(pull?.state) === "open" && norm(pull?.head?.sha) === head) {
+  // A missing or malformed listing is not an empty one (Codex round 2): only an
+  // explicit successful empty array qualifies.
+  if (Array.isArray(pullsForHead) && pullsForHead.length === 0 && norm(pull?.state) === "open" && norm(pull?.head?.sha) === head) {
     openForHead = [Number(prNumber)];
   }
   if (openForHead.length !== 1 || openForHead[0] !== Number(prNumber)) {
