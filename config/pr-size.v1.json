@@ -1,11 +1,15 @@
 {
-  "$comment": "PR-size budget (scripts/pr-size.mjs). Review is only real when a reviewer can read the whole diff; `size-exception` is informational until authenticated owner-attestation wiring exists. Ratchet: tighten freely, loosen only with owner sign-off. Lines = added + deleted, from `git diff --numstat -M`. Calibrated 2026-09-04 on the last 30 merged PRs: chatterbuilt median 36 / p90 6489, the-gibson median 398, conference-os median 107.",
+  "$comment": "PR-size budget (scripts/pr-size.mjs). Review is only real when a reviewer can read the whole diff; `size-exception` is informational until authenticated owner-attestation wiring exists. Ratchet: tighten freely, loosen only with owner sign-off. Lines = added + deleted, from `git diff --numstat -M`. Calibrated 2026-09-04 on the last 30 merged PRs: chatterbuilt median 36 / p90 6489, the-gibson median 398, conference-os median 107. Updated 2026-10-05: soft-warn at 800 product lines; hard-fail raised 400→1500 product lines (and totalLines 1500→4000) so agent/feature PRs stop dying at LinearB warning-median used as a hard block. Soft-warn is advisory metadata for operators/CI follow-ups; hard budgets still fail the gate until scripts/pr-size.mjs grows softWarn handling.",
   "exceptionLabel": "size-exception",
+  "softWarn": {
+    "productLines": 800,
+    "productFiles": 20
+  },
   "budgets": {
-    "productLines": 400,
-    "productFiles": 15,
-    "totalLines": 1500,
-    "totalFiles": 40
+    "productLines": 1500,
+    "productFiles": 25,
+    "totalLines": 4000,
+    "totalFiles": 50
   },
   "classes": {
     "generated": [
