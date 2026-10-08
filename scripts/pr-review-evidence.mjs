@@ -12,8 +12,11 @@
  *     workflow runs trusted default-branch code and has no PR objects).
  *   - Every commit author/committer must resolve through the closed identity
  *     table in config/review-evidence.v1.json. Unresolved → failure
- *     (`identity-unresolved`). Owner-identity commits resolve only through an
- *     owner attestation at the exact head (`author-vendor:`).
+ *     (`identity-unresolved`). On owner carve-out heads (see CARVE_OUT_PATTERNS)
+ *     owner-identity and unsigned commits resolve only through an owner
+ *     attestation at the exact head (`author-vendor:`), and that attestation
+ *     is required even when every commit is signed. Elsewhere lane bots,
+ *     Agent-Vendor trailers, and an `independent` reviewer stand in for it.
  *   - Evidence: formal reviews at the exact head by a listed Bot identity
  *     (APPROVED / CHANGES_REQUESTED; DISMISSED, PENDING, COMMENTED ignored),
  *     an App-authored `review-evidence:v1` comment at the exact head, or an
@@ -55,6 +58,7 @@ const execFileAsync = promisify(execFile);
 export const REASONS = Object.freeze({
   pass: "success",
   "no-receipt-at-head": "pending",
+  "owner-attestation-required": "pending",
   "stale-head-only": "pending",
   "stale-base": "pending",
   "evidence-deleted": "pending",
@@ -68,7 +72,11 @@ export const REASONS = Object.freeze({
 });
 
 const SHA40 = /^[0-9a-f]{40}$/;
-const VENDORS = new Set(["grok", "codex", "claude", "devin", "coderabbit", "owner", "unknown"]);
+// `independent`: a reviewer-only identity that never authors commits (e.g. the
+// aie-independent-review App), so it is cross-vendor to every author by
+// construction. It is the delegated reviewer for commits whose vendor cannot be
+// named (owner-identity, no Agent-Vendor trailer) outside the carve-outs.
+const VENDORS = new Set(["grok", "codex", "claude", "devin", "coderabbit", "independent", "owner", "unknown"]);
 const AUTHOR_COMMIT_VENDORS = new Set(["grok", "codex", "claude", "devin"]);
 const ROLES = new Set(["author", "reviewer"]);
 const CONFIG_KEYS = new Set(["schemaVersion", "context", "ownerLogin", "attestationVendors", "identities"]);
@@ -76,23 +84,32 @@ const IDENTITY_KEYS = new Set(["login", "appSlug", "appId", "vendor", "roles", "
 // GitHub's own committer for web-UI edits; not a vendor, not an author of record.
 const GITHUB_WEB_FLOW = "web-flow";
 
-// Owner gate carve-outs (Mark, 2026-10-05). The owner-attestation requirement
-// for unsigned or owner-identity commits is kept ONLY when a PR touches one of
-// these paths: (a) agent rule and control-plane files, (b) secrets/billing,
-// (c) schema and migrations. Everywhere else a listed lane bot
-// (aie-agent-lanes-*[bot]) resolves without an attestation even when its CLI
-// commit is unsigned, and an owner-identity commit resolves to the vendor named
-// by its `Agent-Vendor:` trailer. An unknown file list is treated as a
-// carve-out (fail closed: the strict, attestation-required path).
+// Owner gate carve-outs (Mark, 2026-10-05: "Remove the owner gate everywhere
+// except agent rule files, secrets/billing, and schema migrations"). The owner
+// (mrhinkle) is required ONLY when a PR touches one of these paths:
+// (a) agent rule and control-plane files, (b) secrets/billing, (c) schema and
+// migrations. On those heads an owner attestation at the exact head is
+// REQUIRED (`owner-attestation-required`), even when every commit is
+// GitHub-signed, on top of the cross-vendor review. Everywhere else the owner
+// is not a gate: a listed lane bot (aie-agent-lanes-*[bot]) resolves without an
+// attestation even when its CLI commit is unsigned, an owner-identity commit
+// resolves to the vendor named by its `Agent-Vendor:` trailer, and an
+// owner-identity commit with no trailer is cleared by an `independent`
+// reviewer. An unknown file list is treated as a carve-out (fail closed).
 const LANE_BOT_LOGIN = /^aie-agent-lanes-[a-z0-9-]+\[bot\]$/;
 const AGENT_RULE_FILE_NAMES = new Set(["agents.md", "claude.md"]);
 const CARVE_OUT_PATTERNS = [
-  // (a) agent rule and control-plane files
-  /^\.(grok|codex|agents)\//i,
+  // (a) agent rule and control-plane files: agent config roots, workflows,
+  // the review-evidence trust config + evaluator, merge-gating sensors and
+  // their config, the policy manifest, and the human-gates doctrine page.
+  /^\.(grok|codex|claude|agents)\//i,
   /^\.github\//i,
-  /^config\/review-evidence\.v1\.json$/i,
+  /^config\/(review-evidence|pr-size)\.v1\.json$/i,
   /^config\/policy\//i,
-  /^scripts\/pr-review-evidence\.mjs$/i,
+  /^scripts\/(pr-review-evidence|pr-size|check-active-work|policy-manifest|contract-authority)\.mjs$/i,
+  /^scripts\/lib\/authority-config-canonical\.mjs$/i,
+  /^scripts\/loop-fleet\.sh$/i,
+  /^docs\/14-human-gates\.md$/i,
   // (b) secrets, Stripe, billing, checkout, payments, api keys
   /(^|\/)[^/]*(secret|stripe)[^/]*\.[cm]?[jt]sx?$/i,
   /(^|\/)[^/]*api[-_]?key[^/]*\.[cm]?[jt]sx?$/i,
@@ -174,7 +191,7 @@ export function validateConfig(cfg) {
   if (!Array.isArray(cfg.attestationVendors) || cfg.attestationVendors.length === 0) fail("attestationVendors");
   for (const v of cfg.attestationVendors) {
     const known = VENDORS.has(v) || v === "human";
-    if (!known || v === "unknown" || v === "owner" || v === "coderabbit") fail(`attestationVendors:${v}`);
+    if (!known || v === "unknown" || v === "owner" || v === "coderabbit" || v === "independent") fail(`attestationVendors:${v}`);
   }
   if (!Array.isArray(cfg.identities) || cfg.identities.length === 0) fail("identities");
   const seen = new Set();
@@ -189,6 +206,9 @@ export function validateConfig(cfg) {
     if (!VENDORS.has(id.vendor)) fail(`identity:vendor:${id.login}`);
     if (!Array.isArray(id.roles) || id.roles.length === 0 || id.roles.some((r) => !ROLES.has(r))) fail(`identity:roles:${id.login}`);
     if (id.roles.includes("reviewer") && id.login.endsWith("[bot]") && !id.appSlug) fail(`identity:reviewer-needs-appSlug:${id.login}`);
+    // An independent reviewer is only independent if it can never author and
+    // its receipts are bound to one GitHub App (slug AND id).
+    if (id.vendor === "independent" && (id.roles.length !== 1 || id.roles[0] !== "reviewer" || !id.appSlug || !Number.isInteger(id.appId))) fail(`identity:independent-reviewer-only:${id.login}`);
     if (Object.prototype.hasOwnProperty.call(id, "authorCommits")) {
       const ac = id.authorCommits;
       if (!Array.isArray(ac) || ac.length === 0) fail(`identity:authorCommits:${id.login}`);
@@ -227,7 +247,9 @@ function timestamp(item) {
 
 /**
  * Resolve every introduced commit's author+committer to a vendor.
- * Returns { vendors:Set, unresolved:[login...] }.
+ * Returns { vendors:Set, unresolved:[login...], unvendored:[login...] }.
+ * `unvendored`: relaxed-mode owner-identity commits with no Agent-Vendor
+ * trailer and no attestation; only an `independent` reviewer can clear them.
  *
  * Identity boundary (Codex review of #315, finding 1): GitHub resolves a
  * commit's `author.login` / `committer.login` from the raw git email, which any
@@ -241,6 +263,7 @@ export function resolveAuthors(commits, identities, attestedVendor, { relaxed = 
   const byLogin = new Map(identities.map((i) => [norm(i.login), i]));
   const vendors = new Set();
   const unresolved = [];
+  const unvendored = [];
   for (const c of commits) {
     const verified = c?.commit?.verification?.verified === true;
     // Runtime SHA may be absent or a non-string; never throw on `.slice` before
@@ -281,6 +304,7 @@ export function resolveAuthors(commits, identities, attestedVendor, { relaxed = 
           if (attestedVendor) for (const v of attestedVendor) if (v !== "human") vendors.add(v);
           continue;
         }
+        if (!attestedVendor) { unvendored.push(`${login}:owner-unvendored`); continue; }
       }
       if (vendor === "owner" || !verified) {
         if (!attestedVendor) { unresolved.push(`${login}:${vendor === "owner" ? "owner" : "unverified"}-unattested`); continue; }
@@ -295,7 +319,7 @@ export function resolveAuthors(commits, identities, attestedVendor, { relaxed = 
       vendors.add(vendor);
     }
   }
-  return { vendors, unresolved };
+  return { vendors, unresolved, unvendored };
 }
 
 /**
@@ -509,7 +533,17 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   // finding 3): evidence created before the last base_ref_changed is stale.
   const notBefore = lastBaseChange(timeline);
   const { newest, staleReceipts, staleBase } = collectEvidence({ reviews, comments, identities: config.identities, headSha: head, notBefore, ownerLogin: config.ownerLogin, attestationVendors: config.attestationVendors });
-  const eligible = newest.filter((e) => e.identity.vendor !== "unknown" && !authors.vendors.has(e.identity.vendor));
+  // Owner-identity commits with no named vendor (outside the carve-outs): the
+  // author's vendor is unknowable, so only an `independent` reviewer is
+  // provably cross-vendor. Without one, the identity stays unresolved.
+  const unvendored = authors.unvendored.length > 0;
+  if (unvendored && !newest.some((e) => e.identity.vendor === "independent")) {
+    return { state: "failure", reason: "identity-unresolved", detail: `${[...new Set(authors.unvendored)].join(",")};needs Agent-Vendor trailer, owner attestation, or independent review`, authorVendors: [...authors.vendors], attestation: att, carveOut };
+  }
+  // With unvendored commits a pass counts only from an independent reviewer;
+  // a cross-vendor fail still counts (fail closed).
+  const crossVendor = newest.filter((e) => e.identity.vendor !== "unknown" && !authors.vendors.has(e.identity.vendor));
+  const eligible = unvendored ? crossVendor.filter((e) => e.identity.vendor === "independent" || e.result === "fail") : crossVendor;
   const ineligible = newest.filter((e) => !eligible.includes(e));
   const base = { authorVendors: [...authors.vendors], attestation: att, evidence: newest.map((e) => `${e.identity.login}:${e.result}:${e.source}`) };
   if (eligible.some((e) => e.result === "fail")) return { state: "failure", reason: "changes-requested", detail: eligible.filter((e) => e.result === "fail").map((e) => e.identity.login).join(","), ...base };
@@ -521,6 +555,9 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
     const newestPass = Math.max(...eligible.filter((e) => e.result === "pass").map((e) => e.at));
     const deletedAfter = (timeline ?? []).filter((ev) => norm(ev?.event) === "comment_deleted" && (Date.parse(ev?.created_at ?? "") || 0) >= newestPass).length;
     if (deletedAfter > 0) return { state: "pending", reason: "evidence-deleted", detail: `${deletedAfter} comment(s) deleted at/after the newest pass; review again`, ...base };
+    // Carve-out heads need the owner on top of the review, even when every
+    // commit is GitHub-signed and resolved without an attestation.
+    if (carveOut !== null && !att) return { state: "pending", reason: "owner-attestation-required", detail: `owner-carve-out:${carveOut}; awaiting mrhinkle owner-review-attestation at this head`, ...base, carveOut };
     return { state: "success", reason: "pass", detail: eligible.filter((e) => e.result === "pass").map((e) => e.identity.login).join(","), ...base };
   }
   if (ineligible.length > 0) return { state: "failure", reason: "same-vendor-reviewer", detail: ineligible.map((e) => `${e.identity.login}(${e.identity.vendor})`).join(","), ...base };
