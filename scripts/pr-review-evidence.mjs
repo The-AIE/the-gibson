@@ -518,7 +518,10 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   // evaluation is, by its own record, one owner of its head: when the listing
   // is EMPTY and the PR's own head matches, evaluate it as the sole owner.
   // A non-empty listing that does not name this PR is still ambiguous.
-  if (openForHead.length === 0 && norm(pull?.state) === "open" && norm(pull?.head?.sha) === head) {
+  // Only an actually EMPTY listing qualifies (Codex review of #458): a
+  // non-empty listing that names other PRs or other heads, but not this one,
+  // is an inconsistency and stays ambiguous (fail closed).
+  if ((pullsForHead ?? []).length === 0 && norm(pull?.state) === "open" && norm(pull?.head?.sha) === head) {
     openForHead = [Number(prNumber)];
   }
   if (openForHead.length !== 1 || openForHead[0] !== Number(prNumber)) {

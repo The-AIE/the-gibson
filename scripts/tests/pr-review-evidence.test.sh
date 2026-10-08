@@ -145,6 +145,8 @@ d=$(fx_new w7f); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$
 expect "(w7f) fork head: empty pulls listing, PR's own head matches → evaluated as sole owner (#455)" "$d" pass success 0
 d=$(fx_new w7g); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[]' > "$d/pulls-for-head.json"; printf '{"number":1,"state":"open","commits":1,"head":{"sha":"%s"},"user":{"login":"%s"}}' "$PREV" "$OWNER" > "$d/pull.json"
 expect "(w7g) empty pulls listing and the PR's own record names another head → head-moved, never a verdict" "$d" head-moved failure 1
+d=$(fx_new w7h); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":9,"state":"closed","head":{"sha":"%s"}}]' "$HEAD" > "$d/pulls-for-head.json"
+expect "(w7h) non-empty listing that does not name this PR (only a closed sibling) stays ambiguous; no fork promotion" "$d" ambiguous-head failure 1
 d=$(fx_new w8); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_pull "$d" 3
 expect "(w8) PR declares more commits than the API returned (250 cap)" "$d" api-error failure 1
 d=$(fx_new w9); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|CHANGES_REQUESTED|$HEAD|9|2026-09-04T10:00:00Z"; fx_comments "$d" "$DEVIN|NONE|devin-ai-integration|811515|99999|2026-09-04T10:00:00Z|$(receipt "$HEAD" pass)"
