@@ -390,6 +390,27 @@ describe("matrix 6-9 pr-sample / freshness", () => {
     assert.equal(isExemptNonTargetSkip(skips[0], bare), false);
     assert.equal(classifySensor({ name: "pr", path: bare.path, policy: bare, runs: skips, ctx: ctx() }).state, STATES.BLIND);
   });
+  it("9a self path: a completed failing run inside the window is OK, not a fixed point (L-092)", () => {
+    // The sensor-health workflow fails whenever another row has a finding. Grading the
+    // self path by its own conclusion made one red run red forever (main 2026-10-01..08).
+    const failed = run({ id: 91, event: "schedule", conclusion: "failure", updated_at: "2026-08-30T10:00:00Z" });
+    const row = classifySensor({ name: "s", path: fresh.path, policy: fresh, runs: [failed], ctx: ctx(), evidenceComplete: true });
+    assert.equal(row.state, STATES.OK);
+    assert.equal(row.reasonClass, null);
+    assert.equal(row.selectedRunId, 91);
+    assert.match(row.detail, /self-run completed/);
+  });
+  it("9b self path: a cancelled or timed-out run is still FAILING; other paths keep latest-non-success", () => {
+    const cancelled = run({ id: 92, event: "schedule", conclusion: "cancelled", updated_at: "2026-08-30T10:00:00Z" });
+    const self = classifySensor({ name: "s", path: fresh.path, policy: fresh, runs: [cancelled], ctx: ctx(), evidenceComplete: true });
+    assert.equal(self.state, STATES.FAILING);
+    assert.equal(self.reasonClass, REASON.LATEST_NON_SUCCESS);
+    const other = { ...fresh, path: ".github/workflows/pr-review-evidence.yml" };
+    const failed = run({ id: 93, event: "schedule", conclusion: "failure", updated_at: "2026-08-30T10:00:00Z" });
+    const row = classifySensor({ name: "o", path: other.path, policy: other, runs: [failed], ctx: ctx(), evidenceComplete: true });
+    assert.equal(row.state, STATES.FAILING);
+    assert.equal(row.reasonClass, REASON.LATEST_NON_SUCCESS);
+  });
   it("9 freshness outside window => IDLE", () => {
     const row = classifySensor({
       name: "s",
