@@ -37,6 +37,7 @@ feature="$1"; label="$2"; shift 3
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "capture.sh: not inside a git repo" >&2; exit 2; }
 run_id="${VERIFY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+[[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$run_id" != *..* ]] || { echo "unknown flag: VERIFY_RUN_ID must match [A-Za-z0-9._-]+ with no dot-dot" >&2; exit 2; }
 dir="$root/.gibson-receipts/verify-gibson/$run_id/$feature"
 mkdir -p "$dir" || exit 2
 
