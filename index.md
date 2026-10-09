@@ -29,11 +29,13 @@ live, and customer data.
 | **An AI agent** | [AGENTS.md](AGENTS.md) — your contract |
 | **Just curious how it works** | [Reading order](docs/00-INDEX.md) · [FAQ](FAQ.md) · [Glossary](docs/00-glossary.md) |
 
-## The promise, in one paragraph
+## The goal
 
-Software teams earn trust by being boring: small changes, previewed before they
-go live, easy to undo, honestly reported. The Gibson hard-wires that boringness
-into AI agents — every change passes automatic quality, security, and
-click-through-it-like-a-customer testing before a human ever needs to look, and
-there are exactly [sixteen written reasons](docs/14-human-gates.md) the crew is
-allowed to interrupt you. Everything else, it handles.
+The Gibson is a capable, autonomous software engineering harness. You give it an
+outcome. Agents plan the work, write the code, test it, and ship it. A different
+agent reviews every change, from a different vendor when one is available.
+Nothing merges without passing tests and a security scan, and changes users can
+see get tested in a real browser. The crew stops for you on [sixteen
+conditions](docs/14-human-gates.md), such as spending money, going live, or
+touching customer data. It handles the rest. When it makes a mistake, the fix
+goes into the rules.
