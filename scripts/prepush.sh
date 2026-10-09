@@ -11,10 +11,13 @@ prepush.sh — run the cheap convention probes before the first push
 
 WHAT IT DOES
   Runs, from the repo root: sensor-reachability (no orphan scripts), the mjs
-  unknown-flag probe, `bash -n` on changed shell scripts, and the test suites
+  unknown-flag probe, the recipe playbook-sha256 pins, `bash -n` on changed
+  shell scripts, and the test suites
   your diff touches (a changed scripts/tests/X.test.sh, or scripts/X.{sh,mjs}
   with a scripts/tests/X.test.sh beside it; at most 6, each capped at 25s via
-  PREPUSH_TEST_TIMEOUT). The probes are the same
+  PREPUSH_TEST_TIMEOUT, all together within PREPUSH_BUDGET seconds, default 55;
+  any suite that is skipped for the cap, the budget or a timeout is NOT RUN).
+  The probes are the same
   functions run-all.sh uses (scripts/lib/convention-probes.sh), not copies.
 
 WHY
@@ -43,6 +46,8 @@ EOF
 
 BASE="origin/main"
 TEST_TIMEOUT="${PREPUSH_TEST_TIMEOUT:-25}"
+TEST_BUDGET="${PREPUSH_BUDGET:-55}"
+MAX_TESTS=6
 RUN_TESTS=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,6 +59,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO_ROOT" || exit 2
+git rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "prepush: --base ref not found: $BASE" >&2; exit 2; }
 # shellcheck source=lib/convention-probes.sh
 . "$SCRIPT_DIR/lib/convention-probes.sh"
 # shellcheck source=lib/wall-timeout.sh
@@ -70,7 +76,7 @@ run_probe() {
   case "$rc" in
     0) echo "  PASS     $name" ;;
     2) echo "  NOT RUN  $name (a required tool is missing)"; note_fail "$name" ;;
-    124) echo "  NOT RUN  $name (timed out after ${TEST_TIMEOUT}s; run it directly or rely on CI)"; note_fail "$name" ;;
+    124) echo "  NOT RUN  $name (timed out after ${TEST_TIMEOUT_USED:-$TEST_TIMEOUT}s; run it directly or rely on CI)"; note_fail "$name" ;;
     *) echo "  FAIL     $name"; printf '%s\n' "$out" | tail -n 8 | sed 's/^/           /'; note_fail "$name" ;;
   esac
 }
@@ -91,6 +97,7 @@ else
   echo "  NOT RUN  sensor-reachability (node missing)"; note_fail sensor-reachability
 fi
 run_probe mjs-unknown-flag cp_mjs_unknown_flag
+run_probe recipe-hash cp_recipe_hash_all
 
 SH_CHANGED=()
 while IFS= read -r f; do
@@ -113,18 +120,30 @@ if [[ "$RUN_TESTS" -eq 1 ]]; then
         [[ -f "scripts/tests/$base.test.sh" ]] && TESTS+=("scripts/tests/$base.test.sh") ;;
     esac
   done <<< "$CHANGED"
-  # De-duplicate (bash 3.2: no associative arrays) and cap at 6.
+  # De-duplicate (bash 3.2: no associative arrays).
   UNIQ=()
   for t in ${TESTS[@]+"${TESTS[@]}"}; do
     dup=0
     for u in ${UNIQ[@]+"${UNIQ[@]}"}; do [[ "$u" == "$t" ]] && dup=1; done
-    [[ "$dup" -eq 0 && ${#UNIQ[@]} -lt 6 ]] && UNIQ+=("$t")
+    [[ "$dup" -eq 0 ]] && UNIQ+=("$t")
   done
   if [[ ${#UNIQ[@]} -eq 0 ]]; then
     echo "  PASS     touched-tests (none map to this diff)"
   else
+    START=$SECONDS
+    n=0
     for t in "${UNIQ[@]}"; do
-      run_probe "test:$(basename "$t")" run_with_wall_timeout "$TEST_TIMEOUT" bash "$t"
+      n=$((n + 1))
+      left=$((TEST_BUDGET - (SECONDS - START)))
+      if [[ "$n" -gt "$MAX_TESTS" ]]; then
+        echo "  NOT RUN  test:$(basename "$t") (over the $MAX_TESTS-suite cap; run it directly)"; note_fail "test:$(basename "$t")"
+      elif [[ "$left" -le 0 ]]; then
+        echo "  NOT RUN  test:$(basename "$t") (over the ${TEST_BUDGET}s budget; run it directly)"; note_fail "test:$(basename "$t")"
+      else
+        cap=$TEST_TIMEOUT; [[ "$left" -lt "$cap" ]] && cap=$left
+        TEST_TIMEOUT_USED=$cap
+        run_probe "test:$(basename "$t")" run_with_wall_timeout "$cap" bash "$t"
+      fi
     done
   fi
 fi
