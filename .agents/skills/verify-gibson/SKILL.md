@@ -23,7 +23,7 @@ One read-only check that this checkout is worth driving. Run it first, and again
 node scripts/gibson-verify.mjs doctor
 ```
 
-Require `"ok": true`. Required tools are git, node, bash, jq, gh (authenticated), the gate script, and a git repo. `shellcheck` and the `MC_*` / `GH_REVIEWER_TOKEN` variables are optional; unset is not a failure. If `receipts:gitignored` is not ok, stop: evidence below would be committed.
+Require `"ok": true`. Required tools are git, node, bash, jq, gh (authenticated), the gate script, and a git repo. `shellcheck` and the `MC_*` / `GH_REVIEWER_TOKEN` variables are optional; unset is not a failure. 
 
 ## Drive
 
@@ -37,7 +37,7 @@ Run `scripts/prepush.sh` first on every change: it takes seconds and covers the 
 
 ## Evidence
 
-`capture.sh` writes `<label>.cmd`, `.out`, `.err` and `.rc` under `.gibson-receipts/verify-gibson/<run-id>/<feature-id>/`. That directory is gitignored and is **never deleted by cleanup**. `<run-id>` is `$VERIFY_RUN_ID` or a UTC timestamp. Proof standards:
+`capture.sh` writes `<label>.cmd`, `.out`, `.err` and `.rc` under `<git-common-dir>/gibson-verify-evidence/<run-id>/<feature-id>/`, in the shared `.git` directory of the repository (`git rev-parse --path-format=absolute --git-common-dir` prints it). That location is outside every worktree, so `git worktree remove` never deletes it, it is never committed, and cleanup must not touch it. `<run-id>` is `$VERIFY_RUN_ID` or a UTC timestamp. Proof standards:
 
 - Drive the real script on a real input, not a unit test of a copy. A unit suite counts only where the feature file says so.
 - Record the action and the result: the command, its exit code, and the line or file that shows the outcome.
@@ -46,7 +46,7 @@ Run `scripts/prepush.sh` first on every change: it takes seconds and covers the 
 
 ## Cleanup
 
-Remove only what this run created: temporary scratch repos under `$TMPDIR`, and the worktree when the PR has merged (`git worktree remove ../wt-<slug>`). Do not remove `.gibson-receipts/`. Never kill processes by name; stop only ones you started.
+Remove only what this run created: temporary scratch repos under `$TMPDIR`, and the worktree when the PR has merged (`git worktree remove ../wt-<slug>`). Do not remove the evidence directory; `git worktree remove` is safe because evidence is not inside the worktree. Paste the paths of the files that prove your claim into the PR body before you remove the worktree. Never kill processes by name; stop only ones you started.
 
 ## Features
 
