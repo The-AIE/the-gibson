@@ -119,7 +119,8 @@ printf '#!/usr/bin/env bash\necho nope\nexit 1\n' > "$d/scripts/tests/foo.test.s
 run_prepush "$d"
 [[ "$RC" -eq 1 && "$(last_line)" == *"FAILED test:foo.test.sh"* ]] && ok "changed scripts/foo.sh runs scripts/tests/foo.test.sh" || bad "touched rc=$RC: $OUT"
 run_prepush "$d" --no-tests
-[[ "$RC" -eq 0 ]] && ok "--no-tests skips the mapped suite" || bad "--no-tests rc=$RC: $OUT"
+[[ "$RC" -eq 0 && "$OUT" == *"SKIPPED  touched-tests"* && "$(last_line)" == *"touched tests SKIPPED"* && "$(last_line)" != *"all clear"* ]] \
+  && ok "--no-tests skips the mapped suite and says so (never a plain 'all clear')" || bad "--no-tests rc=$RC: $OUT"
 
 # --- more touched suites than the cap, and a spent budget, are NOT RUN ------
 d=$(make_repo manytests)
@@ -231,6 +232,20 @@ else
   # shellcheck disable=SC2034  # colours are read by the eval'd run-all.sh block
   got=$(cd "$gd" && RED='' GRN='' OFF='' FAILED='' && eval "$sr_block" >/dev/null 2>&1; echo "FAILED=[$FAILED]")
   [[ "$got" != *"sensor-reachability"* ]] && ok "executed run-all.sh sensor-reachability block: a passing sensor passes" || bad "sensor-reachability block failed a passing sensor: $got"
+fi
+
+# Execute the recipe-hash gate path: goose-recipes.test.sh run in a throwaway
+# repo whose builder playbook drifted from its pin must report the drift. Other assertions in that suite may fail on
+# hosts without pyyaml; only the drift line is judged.
+gr="$ROOT/goose-fixture"; mkdir -p "$gr/scripts/tests" "$gr/scripts/lib"
+cp "$GOOSE" "$gr/scripts/tests/"; cp "$REPO_ROOT/scripts/lib/convention-probes.sh" "$gr/scripts/lib/"
+cp -R "$REPO_ROOT/playbooks" "$gr/playbooks"
+printf '\n<!-- drifted -->\n' >> "$gr/playbooks/builder.md"
+drift_out=$(cd "$gr" && bash scripts/tests/goose-recipes.test.sh 2>&1)
+if [[ "$drift_out" == *"FAIL — builder.yaml playbook-sha256 drift"* ]]; then
+  ok "executed goose-recipes.test.sh hash path: reports drift when the playbook changes (the clean match is asserted by that suite itself)"
+else
+  bad "goose-recipes.test.sh hash path did not report drift: $(printf '%s' "$drift_out" | grep -i 'builder.yaml playbook-sha256' | head -2)"
 fi
 
 # Mutation: drop a probe from a copy of run-all.sh; the drift check must fail.
