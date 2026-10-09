@@ -142,6 +142,10 @@ out=$(node "$SENSOR" --file "$LINK/no-trigger.md" 2>&1); rc=$?
 rm -f "$LINK"
 [[ "$rc" -eq 1 ]] && ok "linter runs when the fixture path is a symlink" || bad "symlinked path rc=$rc: $out"
 
+# Unknown flags exit 2 without reading stdin (repo convention).
+node "$SENSOR" --definitely-not-a-flag </dev/null >/dev/null 2>&1; rc=$?
+[[ "$rc" -eq 2 ]] && ok "unknown flag exits 2" || bad "unknown flag rc=$rc want 2"
+
 # Usage / config errors exit 2.
 node "$SENSOR" --file "$ROOT/does-not-exist.md" >/dev/null 2>&1; rc=$?
 [[ "$rc" -eq 2 ]] && ok "unreadable input exits 2" || bad "unreadable input rc=$rc want 2"

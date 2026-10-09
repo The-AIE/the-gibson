@@ -109,6 +109,14 @@ export function lint(body, vocab) {
 function main() {
   const args = process.argv.slice(2);
   if (args.includes("-h") || args.includes("--help")) return help();
+  const known = new Set(["--file", "--classes", "-h", "--help"]);
+  for (let i = 0; i < args.length; i++) {
+    if (args[i].startsWith("-") && !known.has(args[i])) {
+      console.error(`review-findings-lint: unknown flag: ${args[i]} (see --help)`);
+      process.exit(2);
+    }
+    if (args[i] === "--file" || args[i] === "--classes") i++;
+  }
   const val = (flag) => {
     const i = args.indexOf(flag);
     return i === -1 ? null : args[i + 1] ?? "";
