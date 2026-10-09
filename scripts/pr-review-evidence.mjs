@@ -77,7 +77,9 @@ const SHA40 = /^[0-9a-f]{40}$/;
 // aie-independent-review App), so it is cross-vendor to every author by
 // construction. It is the delegated reviewer for commits whose vendor cannot be
 // named (owner-identity, no Agent-Vendor trailer) outside the carve-outs.
-const VENDORS = new Set(["grok", "codex", "claude", "devin", "coderabbit", "independent", "owner", "unknown"]);
+// `human`: an external contributor's own login (vendor of record for their
+// commits; D-014 lets any listed non-human reviewer clear them). Author-only.
+const VENDORS = new Set(["grok", "codex", "claude", "devin", "coderabbit", "independent", "owner", "human", "unknown"]);
 const AUTHOR_COMMIT_VENDORS = new Set(["grok", "codex", "claude", "devin"]);
 const ROLES = new Set(["author", "reviewer"]);
 const CONFIG_KEYS = new Set(["schemaVersion", "context", "ownerLogin", "attestationVendors", "identities"]);
