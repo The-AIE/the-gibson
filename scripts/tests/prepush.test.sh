@@ -89,6 +89,13 @@ run_prepush "$d"
 run_prepush "$d" --no-tests
 [[ "$RC" -eq 0 ]] && ok "--no-tests skips the mapped suite" || bad "--no-tests rc=$RC: $OUT"
 
+# --- a slow touched test is NOT RUN (timed out), never a pass ---------------
+d=$(make_repo slowtest)
+printf '#!/usr/bin/env bash\nexit 0\n' > "$d/scripts/slow.sh"
+printf '#!/usr/bin/env bash\nsleep 30\nexit 0\n' > "$d/scripts/tests/slow.test.sh"
+OUT=$(cd "$d" && PREPUSH_TEST_TIMEOUT=2 bash scripts/prepush.sh --base HEAD 2>&1); RC=$?
+[[ "$RC" -eq 1 && "$OUT" == *"NOT RUN  test:slow.test.sh (timed out"* ]] && ok "touched suite over its cap: NOT RUN (timed out), exit 1" || bad "slowtest rc=$RC: $OUT"
+
 # --- missing tool is NOT RUN, never a pass ----------------------------------
 d=$(make_repo nonode)
 mkdir -p "$ROOT/nonode-bin"

@@ -13,7 +13,8 @@ WHAT IT DOES
   Runs, from the repo root: sensor-reachability (no orphan scripts), the mjs
   unknown-flag probe, `bash -n` on changed shell scripts, and the test suites
   your diff touches (a changed scripts/tests/X.test.sh, or scripts/X.{sh,mjs}
-  with a scripts/tests/X.test.sh beside it; at most 6). The probes are the same
+  with a scripts/tests/X.test.sh beside it; at most 6, each capped at 25s via
+  PREPUSH_TEST_TIMEOUT). The probes are the same
   functions run-all.sh uses (scripts/lib/convention-probes.sh), not copies.
 
 WHY
@@ -24,7 +25,7 @@ WHY
 RISKS
   Report-only: it changes nothing and is not a merge gate. A green result is
   NOT a green gate; CI stays the authority. A probe that cannot run (missing
-  node) prints NOT RUN and does not count as a pass. Touched-test mapping is by
+  node, or a suite over its time cap) prints NOT RUN and does not count as a pass. Touched-test mapping is by
   filename only, so a change with no matching test runs no suite.
 
 USAGE
@@ -41,6 +42,7 @@ EOF
 }
 
 BASE="origin/main"
+TEST_TIMEOUT="${PREPUSH_TEST_TIMEOUT:-25}"
 RUN_TESTS=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -68,6 +70,7 @@ run_probe() {
   case "$rc" in
     0) echo "  PASS     $name" ;;
     2) echo "  NOT RUN  $name (a required tool is missing)"; note_fail "$name" ;;
+    124) echo "  NOT RUN  $name (timed out after ${TEST_TIMEOUT}s; run it directly or rely on CI)"; note_fail "$name" ;;
     *) echo "  FAIL     $name"; printf '%s\n' "$out" | tail -n 8 | sed 's/^/           /'; note_fail "$name" ;;
   esac
 }
@@ -121,7 +124,7 @@ if [[ "$RUN_TESTS" -eq 1 ]]; then
     echo "  PASS     touched-tests (none map to this diff)"
   else
     for t in "${UNIQ[@]}"; do
-      run_probe "test:$(basename "$t")" run_with_wall_timeout 120 bash "$t"
+      run_probe "test:$(basename "$t")" run_with_wall_timeout "$TEST_TIMEOUT" bash "$t"
     done
   fi
 fi

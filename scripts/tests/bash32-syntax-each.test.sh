@@ -497,8 +497,13 @@ if grep -nE 'docker run' "$RUN_ALL" | grep 'bash -n \$SH_FILES' >/dev/null; then
 else
   ok "run-all.sh no longer batches bash -n \$SH_FILES inside docker"
 fi
-if grep -Fq 'for f in $SH_FILES; do' "$RUN_ALL" && grep -Fq 'bash -n "$f"' "$RUN_ALL"; then
-  ok "modern-host per-file bash -n loop remains"
+# #465: the per-file loop moved into scripts/lib/convention-probes.sh (cp_bash_n) so
+# prepush.sh and run-all.sh share one definition. The intent is unchanged: one
+# `bash -n` per file, never a batched invocation.
+PROBES_LIB="$(dirname "$RUN_ALL")/../lib/convention-probes.sh"
+if grep -Fq 'cp_bash_n "${SH_ARR[@]}"' "$RUN_ALL" \
+  && grep -Fq 'for f in "$@"; do' "$PROBES_LIB" && grep -Fq 'bash -n "$f"' "$PROBES_LIB"; then
+  ok "modern-host per-file bash -n loop remains (via cp_bash_n)"
 else
   bad "modern-host per-file bash -n loop is missing"
 fi
