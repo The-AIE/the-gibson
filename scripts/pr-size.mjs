@@ -196,6 +196,59 @@ export function unquoteGitPath(s) {
   return Buffer.from(bytes).toString("utf8");
 }
 
+// Index just past a complete C-quoted git path at `start`, or -1. Escape
+// grammar matches unquoteGitPath (octal 1–3 digits; named escapes).
+function quotedGitPathEnd(s, start) {
+  if (s[start] !== '"') return -1;
+  const esc = { a: 1, b: 1, f: 1, n: 1, r: 1, t: 1, v: 1, '"': 1, "\\": 1 };
+  for (let i = start + 1; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === '"') return i + 1;
+    if (ch !== "\\") continue;
+    const n = s[i + 1];
+    if (n === undefined) return -1;
+    if (/[0-7]/.test(n)) {
+      const oct = s.slice(i + 1, i + 4).match(/^[0-7]{1,3}/);
+      if (!oct) return -1;
+      i += oct[0].length;
+    } else if (n in esc) {
+      i += 1;
+    } else {
+      return -1;
+    }
+  }
+  return -1;
+}
+
+// Newline-delimited rename/path field. Git C-quotes each unusual path
+// independently (`"old\\tname" => "new\\tname"`), and either side of a
+// rename may be quoted or plain; classify on the destination. A fully
+// C-quoted single path is returned as-is after unquoting: a decoded name that
+// happens to contain " => " or braces is a filename, not rename syntax
+// (Grok review of #398).
+function decodeSingleTextPath(p) {
+  if (p.startsWith('"')) {
+    if (quotedGitPathEnd(p, 0) === p.length) return unquoteGitPath(p);
+    return p;
+  }
+  return p.replace(/\{[^{}]* => ([^{}]*)\}/g, "$1").replace(/\/\//g, "/");
+}
+function decodeNumstatTextPath(path) {
+  if (path.startsWith('"')) {
+    const firstEnd = quotedGitPathEnd(path, 0);
+    if (firstEnd === path.length) return unquoteGitPath(path);
+    if (firstEnd > 0 && path.startsWith(" => ", firstEnd)) return decodeSingleTextPath(path.slice(firstEnd + 4));
+    return path;
+  }
+  // Plain source; a quoted destination starts at the first ` => "`.
+  const q = path.indexOf(' => "');
+  if (q >= 0) {
+    const dest = path.slice(q + 4);
+    if (quotedGitPathEnd(dest, 0) === dest.length) return unquoteGitPath(dest);
+  }
+  return path.replace(/\{[^{}]* => ([^{}]*)\}/g, "$1").replace(/^.* => /, "").replace(/\/\//g, "/");
+}
+
 // NUL-delimited (`--numstat -z`): "<a>\t<d>\t<path>\0" per file; a rename is
 // "<a>\t<d>\t\0<old>\0<new>\0". Paths are raw (never quoted), so a literal
 // " => " or a tab in a filename cannot be mistaken for rename syntax.
@@ -221,7 +274,8 @@ export function parseNumstatZ(text) {
 
 // Newline-delimited (`--numstat` without -z): "<a>\t<d>\t<path>" where binary
 // files show "-\t-", unusual paths are C-quoted, and renames show
-// "old => new" or "dir/{a => b}/file". Kept for offline fixtures; CI uses -z.
+// "old => new", "dir/{a => b}/file", or `"old" => "new"` when either path
+// needs quoting. Kept for offline fixtures; CI uses -z.
 export function parseNumstatText(text) {
   const rows = [];
   for (const line of text.split("\n")) {
@@ -229,9 +283,7 @@ export function parseNumstatText(text) {
     const parts = line.split("\t");
     if (parts.length < 3) throw malformed(JSON.stringify(line));
     const [a, d] = parts;
-    let path = parts.slice(2).join("\t");
-    if (path.startsWith('"')) path = unquoteGitPath(path);
-    else path = path.replace(/\{[^{}]* => ([^{}]*)\}/g, "$1").replace(/^.* => /, "").replace(/\/\//g, "/");
+    const path = decodeNumstatTextPath(parts.slice(2).join("\t"));
     rows.push(makeRow(a, d, path));
   }
   return rows;

@@ -126,6 +126,43 @@ node -e '
   if (j.largest[0].path !== "docs/café.md" || j.byClass.docs.files !== 1 || j.metrics.productFiles !== 0) { console.error(j.largest, j.byClass); process.exit(1); }
 ' "$out" && ok "C-quoted text path decodes to docs/café.md and counts as docs" || bad "quoted path: rc=$rc $out"
 
+# --- text mode: one-sided quoting and a quoted single path that contains " => "
+# (Grok review of #398): `plain => "quoted"` classifies the quoted destination,
+# `"quoted" => plain` classifies the plain destination, and a fully C-quoted
+# single path whose decoded name contains " => " is a filename, not a rename.
+printf '4%s0%ssrc/old.ts => "docs/caf\\303\\251.md"\n4%s0%s"docs/caf\\303\\251.md" => src/old.ts\n4%s0%s"notes => caf\\303\\251.md"\n' \
+  "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/quoted-one-sided.txt"
+out=$(run_sensor "$TMP/quoted-one-sided.txt" --format json 2>&1); rc=$?
+node -e '
+  const j = JSON.parse(process.argv[1]);
+  const paths = j.largest.map(f => f.path).sort();
+  const want = ["docs/café.md", "notes => café.md", "src/old.ts"].sort();
+  if (JSON.stringify(paths) !== JSON.stringify(want)) { console.error(paths, want); process.exit(1); }
+  const byPath = Object.fromEntries(j.largest.map(f => [f.path, f]));
+  if (byPath["docs/café.md"].class !== "docs" || byPath["notes => café.md"].class !== "docs" || byPath["src/old.ts"].class === "docs") { console.error(j.largest); process.exit(1); }
+' "$out" && ok "one-sided quoted renames classify the destination; a quoted name containing ' => ' stays a single path" || bad "one-sided quoting: rc=$rc $out"
+
+# --- text mode: C-quoted rename decodes both sides and classifies the destination
+# Git emits `"old\\tname" => "new\\tname"` (each unusual path quoted independently).
+# Treating the whole field as one quoted path would keep the source and misclassify.
+printf '3%s3%s"old\\tname.ts" => "new\\tname.ts"\n4%s0%s"src/old.ts" => "docs/new.md"\n2%s2%s"say\\"hi.ts" => "say\\"bye.ts"\n' \
+  "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/quoted-ren.txt"
+out=$(run_sensor "$TMP/quoted-ren.txt" --format json 2>&1); rc=$?
+node -e '
+  const j = JSON.parse(process.argv[1]);
+  const byPath = Object.fromEntries(j.largest.map(f => [f.path, f]));
+  const tabDest = "new\tname.ts";
+  if (!byPath[tabDest] || byPath[tabDest].class !== "product") { console.error("tab dest", j.largest); process.exit(1); }
+  if (!byPath["docs/new.md"] || byPath["docs/new.md"].class !== "docs") { console.error("docs dest", j.largest); process.exit(1); }
+  if (!byPath["say\"bye.ts"] || byPath["say\"bye.ts"].class !== "product") { console.error("quote dest", j.largest); process.exit(1); }
+  if (j.byClass.docs.files !== 1 || j.byClass.docs.lines !== 4) { console.error("docs", j.byClass.docs); process.exit(1); }
+  if (j.metrics.productFiles !== 2 || j.metrics.productLines !== 10) { console.error("metrics", j.metrics); process.exit(1); }
+  const joined = j.largest.map(f => f.path).join("\0");
+  if (joined.includes("src/old.ts") || joined.includes("old\tname.ts") || joined.includes("say\"hi.ts")) {
+    console.error("kept source path", j.largest); process.exit(1);
+  }
+' "$out" && ok "C-quoted rename decodes destination (tab, class change, escaped quote)" || bad "quoted rename: rc=$rc $out"
+
 # --- the sensor asks git for -z output
 grep -q '"--numstat", "-z"' "$SENSOR" && ok "live git call uses --numstat -z" || bad "git call is not NUL-delimited"
 node --input-type=module -e '
