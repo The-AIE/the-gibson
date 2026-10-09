@@ -41,6 +41,9 @@ make_repo() {
 const a = process.argv.slice(2);
 if (a.some((x) => x.startsWith("--"))) { console.error(`unknown flag: ${a[0]}`); process.exit(2); }
 EOF
+  mkdir -p "$d/playbooks/recipes"
+  printf '# builder\n' > "$d/playbooks/builder.md"
+  printf '# playbook-sha256: %s\n' "$(shasum -a 256 "$d/playbooks/builder.md" | awk '{print $1}')" > "$d/playbooks/recipes/builder.yaml"
   git -C "$d" init -q -b main && git -C "$d" add -A && git -C "$d" commit -q -m base
   echo "$d"
 }
@@ -80,6 +83,21 @@ printf 'if then fi (\n' > "$d/scripts/broken.sh"
 run_prepush "$d"
 [[ "$RC" -eq 1 && "$(last_line)" == *"FAILED bash-n"* ]] && ok "unparseable changed shell script: exit 1" || bad "badsyntax rc=$RC: $OUT"
 
+d=$(make_repo recipedrift)
+printf '# builder changed after the pin\n' > "$d/playbooks/builder.md"
+run_prepush "$d"
+[[ "$RC" -eq 1 && "$(last_line)" == *"FAILED recipe-hash"* ]] && ok "recipe pin drift: exit 1, name is last line" || bad "recipedrift rc=$RC: $OUT"
+
+# --- invalid --base is a usage error, not a silent all-clear ----------------
+d=$(make_repo badbase)
+OUT=$(cd "$d" && bash scripts/prepush.sh --base does-not-exist 2>&1); RC=$?
+[[ "$RC" -eq 2 && "$OUT" == *"--base ref not found"* ]] && ok "unknown --base ref exits 2" || bad "badbase rc=$RC: $OUT"
+
+# --- a probe that finds nothing to probe is not a pass ----------------------
+empty="$ROOT/empty"; mkdir -p "$empty/scripts"
+out=$(cd "$empty" && . "$REPO_ROOT/scripts/lib/convention-probes.sh" && cp_mjs_unknown_flag); rc=$?
+[[ "$rc" -eq 2 ]] && ok "unknown-flag probe with no scripts/*.mjs returns 2 (cannot run), not 0" || bad "empty mjs probe rc=$rc: $out"
+
 # --- touched-test mapping ---------------------------------------------------
 d=$(make_repo touched)
 printf '#!/usr/bin/env bash\nexit 0\n' > "$d/scripts/foo.sh"
@@ -88,6 +106,22 @@ run_prepush "$d"
 [[ "$RC" -eq 1 && "$(last_line)" == *"FAILED test:foo.test.sh"* ]] && ok "changed scripts/foo.sh runs scripts/tests/foo.test.sh" || bad "touched rc=$RC: $OUT"
 run_prepush "$d" --no-tests
 [[ "$RC" -eq 0 ]] && ok "--no-tests skips the mapped suite" || bad "--no-tests rc=$RC: $OUT"
+
+# --- more touched suites than the cap, and a spent budget, are NOT RUN ------
+d=$(make_repo manytests)
+for i in 1 2 3 4 5 6 7; do
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/scripts/t$i.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/scripts/tests/t$i.test.sh"
+done
+run_prepush "$d"
+[[ "$RC" -eq 1 && "$OUT" == *"NOT RUN  test:t7.test.sh (over the 6-suite cap"* ]] && ok "seventh touched suite is NOT RUN, never a silent all-clear" || bad "manytests rc=$RC: $OUT"
+d=$(make_repo budget)
+for i in 1 2 3; do
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/scripts/b$i.sh"
+  printf '#!/usr/bin/env bash\nsleep 3\nexit 0\n' > "$d/scripts/tests/b$i.test.sh"
+done
+OUT=$(cd "$d" && PREPUSH_BUDGET=2 PREPUSH_TEST_TIMEOUT=10 bash scripts/prepush.sh --base HEAD 2>&1); RC=$?
+[[ "$RC" -eq 1 && "$OUT" == *"over the 2s budget"* ]] && ok "suites past the time budget are NOT RUN" || bad "budget rc=$RC: $OUT"
 
 # --- a slow touched test is NOT RUN (timed out), never a pass ---------------
 d=$(make_repo slowtest)
@@ -113,12 +147,13 @@ drift_check() {
   for needle in cp_bash_n cp_mjs_unknown_flag; do
     gate_exercises "$runall" "$needle" || miss="$miss $needle"
   done
+  gate_exercises "$REPO_ROOT/scripts/tests/goose-recipes.test.sh" cp_recipe_hash_drift || miss="$miss cp_recipe_hash_drift"
   gate_exercises "$selfgate" "scripts/sensor-reachability.mjs" || miss="$miss sensor-reachability"
   [[ -z "$miss" ]] || { echo "not exercised by the gate:$miss"; return 1; }
 }
 RUNALL="$REPO_ROOT/scripts/tests/run-all.sh"
 SELFGATE="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
-for needle in cp_bash_n cp_mjs_unknown_flag "scripts/sensor-reachability.mjs"; do
+for needle in cp_bash_n cp_mjs_unknown_flag cp_recipe_hash_all "scripts/sensor-reachability.mjs"; do
   grep -qF "$needle" "$REPO_ROOT/scripts/prepush.sh" "$REPO_ROOT/scripts/lib/convention-probes.sh" \
     || bad "drift list rot: '$needle' is no longer referenced by prepush.sh or its lib"
 done

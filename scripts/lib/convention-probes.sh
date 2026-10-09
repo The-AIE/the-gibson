@@ -20,9 +20,10 @@ cp_bash_n() {
 # repo root. Prints one line per offender.
 cp_mjs_unknown_flag() {
   command -v node >/dev/null 2>&1 || return 2
-  local mjs outf errf rc hits=0
+  local mjs outf errf rc hits=0 seen=0
   while IFS= read -r mjs; do
     [[ -f "$mjs" ]] || continue
+    seen=$((seen + 1))
     outf=$(mktemp "${TMPDIR:-/tmp}/mjs-flag-out.XXXXXX")
     errf=$(mktemp "${TMPDIR:-/tmp}/mjs-flag-err.XXXXXX")
     node "$mjs" --definitely-not-a-flag >"$outf" 2>"$errf" </dev/null
@@ -33,5 +34,45 @@ cp_mjs_unknown_flag() {
     fi
     rm -f "$outf" "$errf"
   done < <(find scripts -maxdepth 1 -name '*.mjs' -type f | sort)
+  # Probing nothing is not a pass (find missing/failing must not read as green).
+  [[ "$seen" -gt 0 ]] || { echo "no scripts/*.mjs found to probe"; return 2; }
   return "$hits"
+}
+
+# cp_recipe_hash_drift RECIPE PLAYBOOK — the recipe's "# playbook-sha256:" pin
+# must equal the playbook's current sha256. 0 match, 1 drift (prints pin and
+# actual), 2 no sha256 tool, 3 recipe has no pin.
+cp_recipe_hash_drift() {
+  local recipe="$1" playbook="$2" pinned actual
+  pinned=$(awk '/^# playbook-sha256:/{print $3; exit}' "$recipe" 2>/dev/null || true)
+  [[ -n "$pinned" ]] || { echo "no playbook-sha256 pin"; return 3; }
+  if command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$playbook" 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$playbook" 2>/dev/null | awk '{print $1}')
+  else
+    return 2
+  fi
+  [[ -n "$actual" ]] || return 2
+  [[ "$pinned" == "$actual" ]] && return 0
+  printf 'pin=%s... actual=%s...\n' "${pinned:0:12}" "${actual:0:12}"
+  return 1
+}
+
+# cp_recipe_hash_all — check every playbooks/recipes/X.yaml that carries a pin
+# and has a playbooks/X.md. Prints one line per drifted recipe.
+cp_recipe_hash_all() {
+  local r name out rc worst=0
+  for r in playbooks/recipes/*.yaml; do
+    [[ -f "$r" ]] || continue
+    name=$(basename "$r" .yaml)
+    [[ -f "playbooks/$name.md" ]] && grep -q '^# playbook-sha256:' "$r" || continue
+    out=$(cp_recipe_hash_drift "$r" "playbooks/$name.md"); rc=$?
+    case "$rc" in
+      0) ;;
+      2) echo "$name: cannot hash (need shasum or sha256sum)"; [[ "$worst" -lt 2 ]] && worst=2 ;;
+      *) echo "$name: $out"; worst=1 ;;
+    esac
+  done
+  return "$worst"
 }

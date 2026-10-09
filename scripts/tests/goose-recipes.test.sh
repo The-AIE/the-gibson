@@ -28,6 +28,8 @@ export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 RECIPES_DIR="$REPO_ROOT/playbooks/recipes"
+# shellcheck source=../lib/convention-probes.sh
+. "$SCRIPT_DIR/../lib/convention-probes.sh"
 FINDINGS_TEMPLATE="$REPO_ROOT/playbooks/red-team/findings/TEMPLATE.md"
 RED_TEAM_RECIPE="$RECIPES_DIR/red-team.yaml"
 TOOLCHAIN_LOCK="$RECIPES_DIR/red-team.toolchain.json"
@@ -2408,18 +2410,14 @@ for role in "${ROLE_RECIPES[@]}"; do
   else
     bad "${role}.yaml missing local/playbooks/${role}.md replacement rule"
   fi
-  # playbook-sha256 pin must match current playbook bytes
-  pinned=$(awk '/^# playbook-sha256:/{print $3; exit}' "$recipe" || true)
-  actual=$(sha256_file "$playbook")
-  if [[ -z "$pinned" ]]; then
-    bad "${role}.yaml missing # playbook-sha256: pin"
-  elif [[ -z "$actual" ]]; then
-    bad "cannot hash playbooks/${role}.md (need sha256sum or shasum)"
-  elif [[ "$pinned" == "$actual" ]]; then
-    ok "${role}.yaml playbook-sha256 matches playbooks/${role}.md"
-  else
-    bad "${role}.yaml playbook-sha256 drift (pin=${pinned:0:12}… actual=${actual:0:12}…) — recompute after playbook edit"
-  fi
+  # playbook-sha256 pin must match current playbook bytes (shared with prepush.sh, #465)
+  drift_out=$(cp_recipe_hash_drift "$recipe" "$playbook"); drift_rc=$?
+  case "$drift_rc" in
+    0) ok "${role}.yaml playbook-sha256 matches playbooks/${role}.md" ;;
+    3) bad "${role}.yaml missing # playbook-sha256: pin" ;;
+    2) bad "cannot hash playbooks/${role}.md (need sha256sum or shasum)" ;;
+    *) bad "${role}.yaml playbook-sha256 drift (${drift_out}) — recompute after playbook edit" ;;
+  esac
   # No @latest in role recipes (belt + suspenders; structural checker also enforces)
   if grep -nE '@latest|[[:space:]]latest[[:space:]]*$' "$recipe" | grep -vE '^\s*#' | grep -vE 'do not|never|not |unpinned|comment' >/dev/null; then
     # Allow only comment mentions of latest
