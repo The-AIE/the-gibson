@@ -19,7 +19,9 @@ concurrency:
 
 jobs:
   sensors:
-    runs-on: ubuntu-latest
+    # Monk CI trial: faster Linux runners for the sensor suite (merge-speed experiment).
+    # Requires the Monk CI GitHub App on The-AIE. claim-isolation / pr-size stay on ubuntu-latest.
+    runs-on: monkci-ubuntu-24.04-4
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -104,7 +106,7 @@ jobs:
       # restate version/digest here; extract strict assignment lines only.
       # Unpinned apt shellcheck on ubuntu-latest has been 0.9.x/0.10.x and
       # reports different findings than the baseline ratchet (#138 / #142).
-      # Architecture: ubuntu-latest → linux x86_64 (GitHub-hosted runners).
+      # Architecture: Monk CI Ubuntu 24.04 runners are linux x86_64 (required for ShellCheck pin).
       - name: Resolve ShellCheck pin from run-all.sh
         id: sc_pin
         run: |
@@ -247,7 +249,7 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
           echo "self-gate mode: $mode (base ${BASE_SHA:-<none>})"
 
-      # Docker is present on ubuntu-latest, so run-all.sh also checks that every
+      # Docker is expected on the runner, so run-all.sh also checks that every
       # script parses under bash 3.2 — stock macOS, where most of our
       # portability lessons were earned.
       #
