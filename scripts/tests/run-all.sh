@@ -1169,6 +1169,21 @@ else
   echo "${GRN}  ok${OFF}   — $n_mjs scripts/*.mjs reject --definitely-not-a-flag (exit 2)"
 fi
 
+echo "== sensor-reachability"
+if command -v node >/dev/null 2>&1; then
+  SR_OUT=$(node scripts/sensor-reachability.mjs 2>&1); SR_RC=$?
+  if [[ "$SR_RC" -ne 0 ]]; then
+    echo "${RED}  FAIL${OFF} — sensor-reachability (an unreferenced script, or orphans above the baseline):"
+    printf '%s\n' "$SR_OUT" | tail -n 6 | sed 's/^/         /'
+    FAILED="$FAILED sensor-reachability"
+  else
+    echo "${GRN}  ok${OFF}   — $(printf '%s\n' "$SR_OUT" | tail -n 1)"
+  fi
+else
+  echo "${RED}  FAIL${OFF} — node not installed; cannot run sensor-reachability"
+  FAILED="$FAILED sensor-reachability-node-missing"
+fi
+
 # --- 3. injection scan ------------------------------------------------------
 echo "== injection-scan"
 if [[ -x scripts/injection-scan.sh ]]; then

@@ -157,13 +157,12 @@ OUT=$(cd "$d" && PATH="$ROOT/nonode-bin" bash scripts/prepush.sh --base HEAD 2>&
 # gate_exercises FILE NEEDLE — the gate file must still contain the probe.
 gate_exercises() { grep -qF "$2" "$1"; }
 RUNALL="$REPO_ROOT/scripts/tests/run-all.sh"
-SELFGATE="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
 GOOSE="$REPO_ROOT/scripts/tests/goose-recipes.test.sh"
 # probe name -> "gate file|needle". Every probe prepush.sh runs must appear here,
 # and the needle must still be in that gate file.
 probe_gate() {
   case "$1" in
-    sensor-reachability) echo "$SELFGATE|scripts/sensor-reachability.mjs" ;;
+    sensor-reachability) echo "$RUNALL|scripts/sensor-reachability.mjs" ;;
     mjs-unknown-flag)    echo "$RUNALL|cp_mjs_unknown_flag" ;;
     bash-n)              echo "$RUNALL|cp_bash_n" ;;
     recipe-hash)         echo "$GOOSE|cp_recipe_hash_drift" ;;
@@ -207,8 +206,9 @@ fi
 # run the real run-all.sh text (extracted by marker) against throwaway input.
 gate_block() { awk -v s="$2" -v e="$3" 'index($0,s)==1{on=1} on&&index($0,e)==1{exit} on{print}' "$1"; }
 bash_n_block=$(gate_block "$RUNALL" 'echo "== bash -n"' 'echo "== bash 3.2')
-mjs_block=$(gate_block "$RUNALL" 'echo "== mjs unknown-flag"' '# --- 3. injection scan')
-if [[ -z "$bash_n_block" || -z "$mjs_block" ]]; then
+mjs_block=$(gate_block "$RUNALL" 'echo "== mjs unknown-flag"' 'echo "== sensor-reachability"')
+sr_block=$(gate_block "$RUNALL" 'echo "== sensor-reachability"' '# --- 3. injection scan')
+if [[ -z "$bash_n_block" || -z "$mjs_block" || -z "$sr_block" ]]; then
   bad "could not extract the run-all.sh bash -n / mjs blocks (markers moved?)"
 else
   gd="$ROOT/gateblocks"; mkdir -p "$gd/scripts"
@@ -223,6 +223,14 @@ else
   # shellcheck disable=SC2034  # colours are read by the eval'd run-all.sh block
   got=$(cd "$gd" && RED='' GRN='' OFF='' FAILED='' && . "$REPO_ROOT/scripts/lib/convention-probes.sh" && eval "$mjs_block" >/dev/null 2>&1; echo "FAILED=[$FAILED]")
   [[ "$got" == *"mjs-unknown-flag"* ]] && ok "executed run-all.sh mjs block: a script ignoring unknown flags fails the gate" || bad "mjs block did not fail: $got"
+  reach_stub "$gd" 1; rm -f "$gd/scripts/ignores.mjs"
+  # shellcheck disable=SC2034  # colours are read by the eval'd run-all.sh block
+  got=$(cd "$gd" && RED='' GRN='' OFF='' FAILED='' && eval "$sr_block" >/dev/null 2>&1; echo "FAILED=[$FAILED]")
+  [[ "$got" == *"sensor-reachability"* ]] && ok "executed run-all.sh sensor-reachability block: a failing sensor fails the gate" || bad "sensor-reachability block did not fail: $got"
+  reach_stub "$gd" 0
+  # shellcheck disable=SC2034  # colours are read by the eval'd run-all.sh block
+  got=$(cd "$gd" && RED='' GRN='' OFF='' FAILED='' && eval "$sr_block" >/dev/null 2>&1; echo "FAILED=[$FAILED]")
+  [[ "$got" != *"sensor-reachability"* ]] && ok "executed run-all.sh sensor-reachability block: a passing sensor passes" || bad "sensor-reachability block failed a passing sensor: $got"
 fi
 
 # Mutation: drop a probe from a copy of run-all.sh; the drift check must fail.
