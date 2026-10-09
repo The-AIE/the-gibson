@@ -44,8 +44,11 @@ run_id="${VERIFY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$run_id" != *..* ]] || { echo "unknown flag: VERIFY_RUN_ID must match [A-Za-z0-9._-]+ with no dot-dot" >&2; exit 2; }
 dir="$common/gibson-verify-evidence/$run_id/$feature"
 mkdir -p "$dir" || exit 2
-# Evidence is never overwritten: a repeat of the same run-id/feature/label is refused.
-if [[ -e "$dir/$label.cmd" || -e "$dir/$label.out" || -e "$dir/$label.err" || -e "$dir/$label.rc" ]]; then
+# Evidence is never overwritten. mkdir is atomic, so the lock directory is the claim:
+# of two concurrent captures with the same run-id/feature/label exactly one wins and
+# the other exits 2 before it writes anything. The marker is never removed.
+if [[ -e "$dir/$label.cmd" || -e "$dir/$label.out" || -e "$dir/$label.err" || -e "$dir/$label.rc" ]] \
+   || ! mkdir "$dir/$label.lock" 2>/dev/null; then
   echo "capture.sh: evidence already exists for $feature/$label in run $run_id; use a new label or VERIFY_RUN_ID" >&2
   exit 2
 fi
