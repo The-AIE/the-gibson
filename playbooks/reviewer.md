@@ -180,8 +180,12 @@ This restates the fleet severity contract; it adds no new gate.
    wrong outcome it produces. Without one it is at most `kind: note`.
 3. **Every finding carries `kind:` and `class:` lines.** `kind` is one of
    `blocker`, `note`, `rule-candidate`; `class` is one slug from
-   `config/review-finding-classes.v1.json`. Check a body with
-   `node scripts/review-findings-lint.mjs --file <review.md>` (report-only).
+   `config/review-finding-classes.v1.json`. Check a body before posting it
+   (report-only; exit 0 clean, 1 findings, 2 usage):
+
+```bash
+node scripts/review-findings-lint.mjs --file review.md
+```
 
 ### 5. Verdict (mandatory final line)
 
