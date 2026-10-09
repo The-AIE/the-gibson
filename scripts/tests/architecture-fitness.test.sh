@@ -7,6 +7,8 @@
 # USAGE
 #   scripts/tests/architecture-fitness.test.sh
 set -uo pipefail
+# #467: claim.sh refuses an unvendored reservation; tests claim as claude.
+export GIBSON_AGENT_VENDOR="${GIBSON_AGENT_VENDOR:-claude}"
 
 # Hermetic git identity (#101)
 export GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-gibson-sensor}"
