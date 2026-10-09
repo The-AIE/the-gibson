@@ -16,8 +16,12 @@ done
 command -v nvidia-smi >/dev/null || { echo "FAIL nvidia-smi missing" >&2; exit 4; }
 command -v python3 >/dev/null || { echo "FAIL python3 missing" >&2; exit 4; }
 
+# Every FAIL exits above; only then is the receipt token printed, so a partial
+# receipt can never be mistaken for a passing one (Grok review of #416).
+git_sha="$(git -C "$ROOT/.." rev-parse HEAD 2>/dev/null)" || { echo "FAIL git rev-parse HEAD failed in $ROOT/.." >&2; exit 5; }
+[[ -n "$git_sha" ]] || { echo "FAIL git rev-parse returned an empty sha" >&2; exit 5; }
 echo "MINI_GIBSON_REPRO_RECEIPT v1"
-echo "git_sha=$(git -C "$ROOT/.." rev-parse HEAD)"
+echo "git_sha=$git_sha"
 echo "python=$(python3 --version 2>&1)"
 echo "base_model=$MINI_GIBSON_BASE_MODEL"
 echo "base_revision=$MINI_GIBSON_BASE_REVISION"

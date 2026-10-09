@@ -55,7 +55,8 @@ class GibsonEnv:
         except Exception as exc:  # tool boundary normalizes failures
             event = {"kind": "tool_error", "tool": action.tool, "error": type(exc).__name__, "message": str(exc)}
         self._events.append(event)
-        return Observation(task.task_id, "TOOL", "tool completed", event, self._events.copy()), False
+        label = "tool error" if event["kind"] == "tool_error" else "tool completed"
+        return Observation(task.task_id, "TOOL", label, event, self._events.copy()), False
 
     def note_repair(self) -> None:
         task = self._require_task()
