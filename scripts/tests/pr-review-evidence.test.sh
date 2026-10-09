@@ -272,7 +272,7 @@ printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","descriptio
 GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && grep -q "^$H2 failure" "$ROOT/gh.log" && ok "publish: every sweep line published; job green when the EVENT's PR is not failing" || bad "publish normal: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 : > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=2 EVENT_HEAD_SHA=$H2 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -ne 0 ] && grep -q "^$H2 failure" "$ROOT/gh.log" && ok "publish: job red when the EVENT's PR failed closed" || bad "publish event-fail: rc=$rc"
+[ "$rc" -eq 0 ] && grep -q "^$H2 failure" "$ROOT/gh.log" && grep -q "^- PR 2 @ ${H2:0:7}: \`failure\`" "$ROOT/summary" && ok "publish: job stays GREEN when the EVENT's PR failed closed — the verdict is published, not a crash (L-087/L-092)" || bad "publish event-fail: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 : > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=true bash "$ROOT/publish.sh" >/dev/null 2>&1
 [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: cancelled → every head pending (supersession is not a verdict)" || bad "publish cancelled: $(tr '\n' ' ' < "$ROOT/gh.log")"
 # publish: sweep produced nothing
@@ -467,13 +467,13 @@ GH_FP="$FP" GH_CUR="" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLE
   && ok "#329: normal failure verdict: publish succeeds (rc=0), so if: failure() does not fire; no error stamp" \
   || bad "#329: normal failure path: rc=$pub_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 
-# Even if GitHub ran recovery because publish exited 1 AFTER writing a real
-# failure (event PR failed closed), do not clobber that verdict with error.
+# Publish no longer exits 1 for an event-PR failure verdict, but if GitHub ever
+# ran recovery after a real failure was written, do not clobber it with error.
 printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
 printf '{"number":1,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n' "$HEAD" > "$WD/results.jsonl"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_FP="$FP" GH_CUR="" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; pub_rc=$?
-[ "$pub_rc" -ne 0 ] && grep -q "^$HEAD failure" "$ROOT/gh.log" || bad "#329: event-PR failure publish did not write failure (rc=$pub_rc log=$(tr '\n' ' ' < "$ROOT/gh.log"))"
+[ "$pub_rc" -eq 0 ] && grep -q "^$HEAD failure" "$ROOT/gh.log" || bad "#329: event-PR failure publish did not write failure or exited nonzero (rc=$pub_rc log=$(tr '\n' ' ' < "$ROOT/gh.log"))"
 GH_CUR="failure|same-vendor-reviewer: grok" \
   envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
 [ "$rec_rc" -eq 0 ] && grep -q "^$HEAD failure" "$ROOT/gh.log" && ! grep -q "^$HEAD error" "$ROOT/gh.log" \
