@@ -41,7 +41,7 @@ function help() {
 
 WHAT IT DOES
   Checks each finding under "### Findings": blocking finding has a trigger,
-  every finding has a known class and kind, VERDICT is the last line.
+  every finding has a known class and an explicit known kind, VERDICT is the last line.
 
 WHY
   Findings with no trigger are speculation; findings with no class cannot be
@@ -88,6 +88,7 @@ export function lint(body, vocab) {
   const classes = vocab.classes;
   for (const it of parseFindings(body)) {
     const kind = (it.fields.kind || vocab.defaultKind).toLowerCase();
+    if (!it.fields.kind) problems.push(`line ${it.line}: finding without kind`);
     const cls = (it.fields.class || "").toLowerCase();
     const where = `line ${it.line}`;
     if (!kinds[kind]) problems.push(`${where}: unknown kind '${kind}'`);

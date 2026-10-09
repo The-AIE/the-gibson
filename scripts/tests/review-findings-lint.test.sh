@@ -126,7 +126,8 @@ EOF
 
 expect "well-formed review passes" "$ROOT/good.md" 0 "clean"
 expect "blocker without trigger fails" "$ROOT/no-trigger.md" 1 "blocking finding without trigger"
-expect "kind defaults to blocker, so missing trigger fails" "$ROOT/no-trigger-default-kind.md" 1 "blocking finding without trigger"
+expect "missing kind is reported" "$ROOT/no-trigger-default-kind.md" 1 "finding without kind"
+expect "missing kind is still treated as blocking (no trigger reported)" "$ROOT/no-trigger-default-kind.md" 1 "blocking finding without trigger"
 expect "finding without class fails" "$ROOT/no-class.md" 1 "finding without class"
 expect "unknown class fails" "$ROOT/unknown-class.md" 1 "unknown class 'vibes'"
 expect "unknown kind fails" "$ROOT/unknown-kind.md" 1 "unknown kind 'showstopper'"
