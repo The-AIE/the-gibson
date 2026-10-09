@@ -167,6 +167,18 @@ writes `.gibson-receipts/<HEAD>.json`. Paste its summary in the PR body (step 5)
 `report` once the PR exists. No receipt at the PR head means the status is **claim-only**,
 and you say so ([docs/30](../docs/30-verification-lever.md)).
 
+### 4c. Before the first push, when the target is The Gibson itself (#465)
+
+```bash
+scripts/prepush.sh
+```
+
+Runs in seconds and covers the convention probes that fail first-push in practice
+(an unreferenced script, a `scripts/*.mjs` that ignores unknown flags, a shell script that
+does not parse, the test suites your diff touches). Read its last line. `FAILED <probe>`
+means fix before you push; `NOT RUN` is not a pass. It is not the gate: CI stays the
+authority, and a clear result here does not replace step 4.
+
 ### 5. Open the PR
 
 ```bash

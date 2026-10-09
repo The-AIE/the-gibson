@@ -101,6 +101,7 @@ REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 BASELINE="$SCRIPT_DIR/shellcheck-baseline.txt"
 # shellcheck source=lib/convention-sensors.sh
 . "$SCRIPT_DIR/lib/convention-sensors.sh"
+. "$SCRIPT_DIR/lib/convention-probes.sh"
 WORKFLOW_SELF_GATE="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
 
 # Parse "ShellCheck … version: X.Y.Z" (or a bare X.Y.Z) → X.Y.Z, else empty.
@@ -914,14 +915,13 @@ fi
 # --- 2. syntax --------------------------------------------------------------
 echo "== bash -n"
 SYNTAX_BAD=""
-for f in $SH_FILES; do
-  bash -n "$f" 2>"${TMPDIR:-/tmp}/run-all-syntax.$$" || {
-    echo "${RED}  FAIL${OFF} — $f"; sed 's/^/         /' "${TMPDIR:-/tmp}/run-all-syntax.$$"
-    SYNTAX_BAD=1
-  }
-done
-rm -f "${TMPDIR:-/tmp}/run-all-syntax.$$"
-if [[ -n "$SYNTAX_BAD" ]]; then FAILED="$FAILED bash-n"; else
+SH_ARR=()
+while IFS= read -r f; do SH_ARR+=("$f"); done <<< "$SH_FILES"
+SYNTAX_OUT=$(cp_bash_n "${SH_ARR[@]}") || SYNTAX_BAD=1
+if [[ -n "$SYNTAX_BAD" ]]; then
+  echo "${RED}  FAIL${OFF} — bash -n:"; printf '%s\n' "$SYNTAX_OUT" | sed 's/^/         /'
+  FAILED="$FAILED bash-n"
+else
   echo "${GRN}  ok${OFF}   — $(echo "$SH_FILES" | wc -l | tr -d ' ') scripts parse"
 fi
 
@@ -1154,30 +1154,18 @@ fi
 # policy-manifest.mjs (upstream #188) uses "option". Do not retrofit that
 # parser — the contract is the exit code plus either wording.
 echo "== mjs unknown-flag"
-MJS_FLAG_HITS=""
-if command -v node >/dev/null 2>&1; then
-  while IFS= read -r mjs; do
-    [[ -f "$mjs" ]] || continue
-    _outf=$(mktemp "${TMPDIR:-/tmp}/mjs-flag-out.XXXXXX")
-    _errf=$(mktemp "${TMPDIR:-/tmp}/mjs-flag-err.XXXXXX")
-    node "$mjs" --definitely-not-a-flag >"$_outf" 2>"$_errf"
-    rc=$?
-    if [[ "$rc" -ne 2 ]] || ! grep -qE 'unknown (flag|option):' "$_errf"; then
-      MJS_FLAG_HITS="${MJS_FLAG_HITS}${mjs} (rc=$rc stderr=$(head -1 "$_errf") stdout=$(head -1 "$_outf"))"$'\n'
-    fi
-    rm -f "$_outf" "$_errf"
-  done < <(find scripts -maxdepth 1 -name '*.mjs' -type f | sort)
-  if [[ -n "$MJS_FLAG_HITS" ]]; then
-    echo "${RED}  FAIL${OFF} — scripts/*.mjs must exit 2 on unknown --flag:"
-    printf '%s' "$MJS_FLAG_HITS" | sed 's/^/         /'
-    FAILED="$FAILED mjs-unknown-flag"
-  else
-    n_mjs=$(find scripts -maxdepth 1 -name '*.mjs' -type f | wc -l | tr -d ' ')
-    echo "${GRN}  ok${OFF}   — $n_mjs scripts/*.mjs reject --definitely-not-a-flag (exit 2)"
-  fi
-else
+MJS_FLAG_RC=0
+MJS_FLAG_HITS=$(cp_mjs_unknown_flag) || MJS_FLAG_RC=$?
+if [[ "$MJS_FLAG_RC" -eq 2 ]]; then
   echo "${RED}  FAIL${OFF} — node not installed; cannot probe mjs unknown-flag contract"
   FAILED="$FAILED mjs-unknown-flag-node-missing"
+elif [[ -n "$MJS_FLAG_HITS" ]]; then
+  echo "${RED}  FAIL${OFF} — scripts/*.mjs must exit 2 on unknown --flag:"
+  printf '%s\n' "$MJS_FLAG_HITS" | sed 's/^/         /'
+  FAILED="$FAILED mjs-unknown-flag"
+else
+  n_mjs=$(find scripts -maxdepth 1 -name '*.mjs' -type f | wc -l | tr -d ' ')
+  echo "${GRN}  ok${OFF}   — $n_mjs scripts/*.mjs reject --definitely-not-a-flag (exit 2)"
 fi
 
 # --- 3. injection scan ------------------------------------------------------
