@@ -27,6 +27,7 @@
  */
 
 import { readFileSync, realpathSync } from "node:fs";
+import { parseFlags } from "./lib/args.mjs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -109,24 +110,14 @@ export function lint(body, vocab) {
 function main() {
   const args = process.argv.slice(2);
   if (args.includes("-h") || args.includes("--help")) return help();
-  const known = new Set(["--file", "--classes", "-h", "--help"]);
-  for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("-") && !known.has(args[i])) {
-      console.error(`review-findings-lint: unknown flag: ${args[i]} (see --help)`);
-      process.exit(2);
-    }
-    if (args[i] === "--file" || args[i] === "--classes") i++;
-  }
-  const val = (flag) => {
-    const i = args.indexOf(flag);
-    return i === -1 ? null : args[i + 1] ?? "";
-  };
-  const file = val("--file");
-  const classesPath = val("--classes") || DEFAULT_CLASSES;
-  if (file === "" || classesPath === "") {
-    console.error("review-findings-lint: flag requires a value");
-    process.exit(2);
-  }
+  const opt = parseFlags(args, {
+    flags: {
+      "--file": { key: "file", default: null },
+      "--classes": { key: "classes", default: DEFAULT_CLASSES },
+    },
+  });
+  const file = opt.file;
+  const classesPath = opt.classes;
   let vocab;
   let body;
   try {
