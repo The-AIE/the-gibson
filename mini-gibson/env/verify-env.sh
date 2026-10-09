@@ -32,10 +32,12 @@ else
   echo "FAIL neither shasum nor sha256sum is available" >&2; exit 5
 fi
 [[ "$benchmark_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo "FAIL manifest hash is not a sha256: '$benchmark_sha256'" >&2; exit 5; }
+python_version="$(python3 --version 2>&1)" || { echo "FAIL python3 --version failed (stub interpreter?)" >&2; exit 4; }
+[[ "$python_version" =~ ^Python\ [0-9] ]] || { echo "FAIL unexpected python3 --version output: '$python_version'" >&2; exit 4; }
 
 echo "MINI_GIBSON_REPRO_RECEIPT v1"
 echo "git_sha=$git_sha"
-echo "python=$(python3 --version 2>&1)"
+echo "python=$python_version"
 echo "base_model=$MINI_GIBSON_BASE_MODEL"
 echo "base_revision=$MINI_GIBSON_BASE_REVISION"
 echo "dataset_revision=$MINI_GIBSON_DATASET_REVISION"
