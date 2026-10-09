@@ -279,17 +279,25 @@ GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false ba
 rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: sweep never ran → failure on EVERY stamped head, never a stale success" || bad "publish no-results: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-# closed event with nothing stamped and nothing swept: the expected end state after a merge
-rm -f "$WD/results.jsonl"; : > "$WD/heads.txt"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
+# an empty sweep that completed (rc 0) with nothing stamped is "no open PRs": the expected
+# state after a merge, on the hourly schedule, or on a comment with an empty queue
+rm -f "$WD/results.jsonl"; : > "$WD/results.jsonl"; : > "$WD/heads.txt"; printf '0' > "$WD/sweep.rc"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=closed bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && grep -q "nothing to sweep after a closed event" "$ROOT/summary" && ok "publish: closed event with no heads and no verdicts exits 0 (a merge is not a sensor defect)" || bad "publish closed-event: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-rm -f "$WD/results.jsonl"; : > "$WD/heads.txt"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
+[ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && grep -q "nothing to sweep" "$ROOT/summary" && ok "publish: completed empty sweep with no heads exits 0 (closed event)" || bad "publish empty-sweep closed: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env EVENT_PR_NUMBER= EVENT_HEAD_SHA= CANCELLED=false EVENT_ACTION= bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && ok "publish: completed empty sweep with no heads exits 0 (schedule / comment with an empty queue)" || bad "publish empty-sweep schedule: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+printf '1' > "$WD/sweep.rc"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=closed bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && ok "publish: an empty result from a sweep that exited non-zero still fails closed" || bad "publish empty-sweep crashed: rc=$rc"
+rm -f "$WD/sweep.rc" "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -ne 0 ] && ok "publish: a non-closed event with no heads and no verdicts still fails closed" || bad "publish no-results non-closed: rc=$rc"
+[ "$rc" -ne 0 ] && ok "publish: a sweep that never ran (no rc file) with no heads still fails closed" || bad "publish no-rc-file: rc=$rc"
 printf '1 %s\n2 %s\n' "$HEAD" "$H2" > "$WD/heads.txt"   # restore the two stamped heads for the cases below
-rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
+rm -f "$WD/results.jsonl"; : > "$WD/results.jsonl"; printf '0' > "$WD/sweep.rc"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=closed bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: a closed event WITH stamped heads and no verdicts still fails closed on every head (Codex review of #462)" || bad "publish closed-with-heads: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+rm -f "$WD/sweep.rc"
+[ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: an empty completed sweep WITH stamped heads still fails closed on every head (Codex review of #462)" || bad "publish closed-with-heads: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 printf '{"number":null,"headSha":"","state":"failure","reason":"api-error","detail":"listing"}\n' > "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: sweep listing fault → failure on every stamped head" || bad "publish listing-fault: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
