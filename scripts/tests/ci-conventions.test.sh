@@ -778,6 +778,7 @@ check_gate_fetch_auth() {
       /^    env:[[:space:]]*\{/ { if ($0 ~ /github\.token|secrets\.GITHUB_TOKEN/) jenv_tok=1; next }
       /^    env:/ { in_jenv=1; next }
       in_jenv && /^    [^[:space:]]/ { in_jenv=0 }
+      /^      - / { step++ }
       {
         line=$0
         sub(/[[:space:]]#.*$/, "", line)
@@ -790,12 +791,15 @@ check_gate_fetch_auth() {
         }
         is_tok = (line ~ /github\.token|secrets\.GITHUB_TOKEN/)
         if (is_tok && in_jenv) jenv_tok=1
-        if (is_tok) tok_last=NR
-        if (!npm && line ~ /npm[[:space:]]+(ci|install)/) npm=NR
+        # Compare by STEP, not by line: a step env: block sits above its run:,
+        # so a token on the npm ci step itself would otherwise read as "before
+        # npm ci" while every install script sees it (Grok review of #413).
+        if (is_tok && step > tok_step) tok_step=step
+        if (!npm && line ~ /npm[[:space:]]+(ci|install)/) { npm=NR; npm_step=step }
       }
       END {
         if (jenv_tok) print "gate job token is in job-level env (every step, incl. PR-head code, inherits it)"
-        if (tok_last && npm && npm < tok_last) print "gate job token enters the step env after npm ci (PR-head code already ran)"
+        if (tok_step && npm && tok_step >= npm_step) print "gate job token enters the step env after npm ci (PR-head code already ran)"
       }
     ' "$f")
     [[ -n "$viol" ]] || continue
@@ -1915,6 +1919,32 @@ jobs:
 YML
 got=$(check_gate_fetch_auth "$MUT/47") || true
 assert_planted 47 "gate job token in a step after npm ci" \
+  "ci/planted.yml gate job token enters the step env after npm ci" "$got"
+mkdir -p "$MUT/50/ci"
+cat > "$MUT/50/ci/planted.yml" <<'YML'
+name: planted-late-token
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch the PR base branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --prune origin main
+      - name: Install
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: npm ci --include=dev
+      - name: Claim isolation
+        run: node scripts/check-active-work.mjs
+YML
+got=$(check_gate_fetch_auth "$MUT/50") || true
+assert_planted 50 "gate job token on the npm ci step itself (env above run)" \
   "ci/planted.yml gate job token enters the step env after npm ci" "$got"
 
 # 48. scoped gitleaks run with no proof the range exists (scans 0, exits 0)
