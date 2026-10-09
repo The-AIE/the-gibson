@@ -6,7 +6,11 @@ permalink: /
 
 # The Gibson
 
-**Your AI development crew, with rules.**
+![The Gibson: a G made of two rings around an amber core](assets/images/branding/gibson-lockup-horizontal.svg){: width="360" }
+
+**The governance harness for your coding agents.**
+
+Your AI development crew, with rules.
 
 You describe what you want in plain words. A team of AI agents plans it, builds
 it, tests it, security-checks it, and ships it to your live site — and only
