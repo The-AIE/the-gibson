@@ -160,8 +160,9 @@ done
 # Mutation: with the trigger check removed, the blocker-without-trigger fixture
 # must stop failing. If it still fails, the sensor above proves nothing.
 MUT="$ROOT/mutant"
-mkdir -p "$MUT/scripts" "$MUT/config"
+mkdir -p "$MUT/scripts/lib" "$MUT/config"
 cp "$CLASSES" "$MUT/config/"
+cp "$SCRIPT_DIR/../lib/args.mjs" "$MUT/scripts/lib/"
 sed 's/kinds\[kind\]?.blocking && !(it.fields.trigger || "").length/false/' "$SENSOR" > "$MUT/scripts/review-findings-lint.mjs"
 if cmp -s "$SENSOR" "$MUT/scripts/review-findings-lint.mjs"; then
   bad "mutation did not apply (trigger check line changed?)"
