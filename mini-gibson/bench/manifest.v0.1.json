@@ -1,0 +1,17 @@
+{
+  "schema_version": "gibson-bench/v0.1",
+  "status": "DRAFT_DO_NOT_TUNE",
+  "freeze_required_before_lora": true,
+  "splits": {
+    "development": [],
+    "temporal_gibson_holdout": [],
+    "external_holdout": []
+  },
+  "configurations": [
+    "raw_nemotron",
+    "nemotron_gibson_harness",
+    "mini_gibson_historical_lora"
+  ],
+  "primary_metric": "task_resolution_rate",
+  "failure_taxonomy": "failure-taxonomy.json"
+}
