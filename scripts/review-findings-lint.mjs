@@ -26,7 +26,7 @@
  *   0 clean   1 lint findings reported   2 usage or unreadable input/config
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -137,4 +137,12 @@ function main() {
   process.exit(1);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
+function isEntry() {
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (process.argv[1] && isEntry()) main();
