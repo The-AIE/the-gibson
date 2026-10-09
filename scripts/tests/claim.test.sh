@@ -14,6 +14,8 @@
 # USAGE
 #   scripts/tests/claim.test.sh
 set -uo pipefail
+# #467: claim.sh refuses an unvendored reservation; tests claim as claude.
+export GIBSON_AGENT_VENDOR="${GIBSON_AGENT_VENDOR:-claude}"
 
 # Hermetic git identity (#101): suites that commit must not read ambient global
 # user.name/email. Pass with HOME pointed at an empty directory.
@@ -429,6 +431,8 @@ contains "claim-id trailer" "$res_msg" "Gibson-Claim-ID: issue-42-password-reset
 contains "issue trailer" "$res_msg" "Gibson-Issue: #42"
 contains "branch trailer" "$res_msg" "Gibson-Branch: feat/42-password-reset"
 contains "DCO trailer present" "$res_msg" "Signed-off-by: ${GIT_AUTHOR_NAME} <${GIT_AUTHOR_EMAIL}>"
+contains "#467 reservation carries an Agent-Vendor trailer" "$res_msg" "Agent-Vendor: claude"
+contains "#467 reservation is still verified by claim-provenance with the vendor line" "$out" '"verified":true'
 table=$(cd "$ROOT/a/canon" && git show origin/main:docs/active-work.md)
 lacks "does not append to the shared table" "$table" "issue-42"
 head_before=$(cd "$ROOT/a/canon" && git rev-parse origin/main)
@@ -3036,6 +3040,20 @@ test -d "$ROOT/331sha/wt-331-adopted" \
   && ok "SHA-mismatched adoption keeps the worktree" || bad "SHA-mismatched adoption destroyed the worktree"
 contains "SHA-mismatched adoption keeps agent-claimed" "$(cat "$SHA331_STATE/labels")" "agent-claimed"
 unset SHA331_STATE
+
+echo "#467 · claim.sh refuses an unvendored reservation and takes --vendor over the env"
+new_repo "$ROOT/v1"
+out=$(cd "$ROOT/v1/canon" && env -u GIBSON_AGENT_VENDOR "$CLAIM" 43 vendorless 'app/x/**' 2>&1); rc=$?
+check "no vendor: refuses (exit 1)" "$rc" "1"
+contains "no vendor: says why" "$out" "no agent vendor"
+[[ ! -d "$ROOT/v1/wt-43-vendorless" ]] && ok "no vendor: no worktree was created" || bad "no vendor: a worktree was created"
+out=$(cd "$ROOT/v1/canon" && "$CLAIM" 43 vendorless 'app/x/**' --vendor=bogus 2>&1); rc=$?
+check "unknown vendor: refuses (exit 1)" "$rc" "1"
+contains "unknown vendor: says why" "$out" "unknown agent vendor"
+new_repo "$ROOT/v2"
+out=$(cd "$ROOT/v2/canon" && GIBSON_AGENT_VENDOR=claude "$CLAIM" 44 flagwins 'app/y/**' --vendor=grok 2>&1); rc=$?
+check "--vendor overrides GIBSON_AGENT_VENDOR: claim succeeds" "$rc" "0"
+contains "--vendor overrides GIBSON_AGENT_VENDOR: trailer is the flag's" "$(git -C "$ROOT/v2/wt-44-flagwins" log -1 --format=%B)" "Agent-Vendor: grok"
 
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"

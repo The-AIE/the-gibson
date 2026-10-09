@@ -14,6 +14,8 @@
 # USAGE
 #   scripts/tests/check-active-work.test.sh
 set -uo pipefail
+# #467: claim.sh refuses an unvendored reservation; tests claim as claude.
+export GIBSON_AGENT_VENDOR="${GIBSON_AGENT_VENDOR:-claude}"
 
 # Hermetic git identity (#101): suites that commit must not read ambient global
 # user.name/email. Pass with HOME pointed at an empty directory.

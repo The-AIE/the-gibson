@@ -124,12 +124,18 @@ RISKS
     worktree, so a dirty feature branch is fine (L-009).
 
 USAGE
-  claim.sh <issue> <slug> <scope...> [--slice]
+  claim.sh <issue> <slug> <scope...> [--slice] [--vendor=NAME]
   claim.sh --help
 
   issue   GitHub issue number
   slug    short branch slug (e.g. password-reset)
   scope   file globs/paths that become the claim scope (one or more)
+  --vendor=NAME  the agent vendor writing this lane (claude, codex, grok, devin),
+          or set GIBSON_AGENT_VENDOR. REQUIRED (#467): the reservation commit
+          carries an Agent-Vendor trailer, because review-evidence treats an owner
+          identity commit with no vendor as unresolved and would block every PR
+          this claim opens. claim.sh refuses rather than create an unvendored
+          reservation.
   --slice deliberate additional lane on an already-claimed issue. Required to get
           past the dual-claim refusal, and it is not a formality: the scopes must
           not overlap, and whoever releases a slice must use
@@ -186,9 +192,14 @@ ISSUE="$1"
 SLUG="$2"
 shift 2
 SLICE=0
+VENDOR="${GIBSON_AGENT_VENDOR:-}"
 SCOPE_PARTS=()
 for arg in "$@"; do
-  if [[ "$arg" == "--slice" ]]; then SLICE=1; else SCOPE_PARTS+=("$arg"); fi
+  case "$arg" in
+    --slice) SLICE=1 ;;
+    --vendor=*) VENDOR="${arg#--vendor=}" ;;
+    *) SCOPE_PARTS+=("$arg") ;;
+  esac
 done
 # Joined form is display / PR-body metadata ONLY. Execution and validation
 # always iterate SCOPE_PARTS unflattened so a quoted literal `*`, `**`, or
@@ -209,6 +220,13 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 die() { echo "claim.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "claim.sh: $*" >&2; }
+
+# #467: refuse before any inventory read or mutation when the vendor is unknown.
+case "$VENDOR" in
+  claude|codex|grok|devin) ;;
+  "") die "no agent vendor: pass --vendor=<claude|codex|grok|devin> or set GIBSON_AGENT_VENDOR (an unvendored reservation commit blocks review-evidence, #467)" ;;
+  *) die "unknown agent vendor '$VENDOR': use one of claude, codex, grok, devin (#467)" ;;
+esac
 
 # --- local scope-token grammar (#331) ---------------------------------------
 # Cheap, no inventory, no network. A glob like `*.test.sh` must refuse here
@@ -1073,8 +1091,13 @@ ORIGINAL_BRANCH_POINT=$CLAIM_EXPECTED_OID
 [[ "$ORIGINAL_BRANCH_POINT" =~ ^[0-9a-f]{40}$ ]] ||
   die "cannot pin the original branch point for the v2 reservation — refusing to continue without a 40-hex base SHA"
 
+# The Agent-Vendor trailer sits in its own paragraph above the Gibson trailer
+# block: claim-provenance reads only the final block (an extra trailer there is
+# malformed), while review-evidence matches Agent-Vendor anywhere in the message.
 RESERVE_MSG=$(printf '%s\n' \
   "chore: reserve issue #${ISSUE} for ${CLAIM_ID}" \
+  "" \
+  "Agent-Vendor: ${VENDOR}" \
   "" \
   "Gibson-Reservation: v1" \
   "Gibson-Claim-ID: ${CLAIM_ID}" \
