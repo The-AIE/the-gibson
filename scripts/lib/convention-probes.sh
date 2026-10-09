@@ -64,12 +64,13 @@ cp_recipe_hash_drift() {
 # "# playbook:" header (e.g. red-team) are out of scope. A missing playbook or a
 # removed pin is reported, never skipped. Prints one line per problem.
 cp_recipe_hash_all() {
-  local r name pb out rc worst=0
+  local r name pb out rc worst=0 seen=0
   for r in playbooks/recipes/*.yaml; do
     [[ -f "$r" ]] || continue
     name=$(basename "$r" .yaml)
     pb=$(awk '/^# playbook: /{print $3; exit}' "$r")
     [[ -n "$pb" ]] || continue
+    seen=$((seen + 1))
     if [[ ! -f "$pb" ]]; then echo "$name: declared playbook $pb is missing"; worst=1; continue; fi
     out=$(cp_recipe_hash_drift "$r" "$pb"); rc=$?
     case "$rc" in
@@ -78,5 +79,7 @@ cp_recipe_hash_all() {
       *) echo "$name: $out"; worst=1 ;;
     esac
   done
+  # Examining nothing is not a pass (recipes deleted or not checked out).
+  [[ "$seen" -gt 0 ]] || { echo "no recipe declaring a playbook was found to check"; return 2; }
   return "$worst"
 }
