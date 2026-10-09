@@ -87,7 +87,10 @@ gh pr review 123 --comment --body "$(cat <<'EOF'
 | Maintainability | clear / findings | |
 
 ### Findings
-- `path/file.ts:42` — <failure scenario, not just smell>
+- `path/file.ts:42` — <what is wrong>
+  kind: blocker
+  class: logic
+  trigger: <input, state or call sequence in the diff> => <wrong outcome>
 
 VERDICT: REQUEST_CHANGES
 EOF
@@ -162,6 +165,23 @@ formality:
    suite when the check is required is a **sensor failure** → REQUEST_CHANGES.
    Waivers surface from inert PR-body text (`--waiver-file`); never trust a
    PR-head rewrite of the helper.
+
+### 4c. Finding contract (issue #401)
+
+This restates the fleet severity contract; it adds no new gate.
+
+1. **Linter-class is not a finding.** A defect that a configured deterministic
+   tool reports, or would report with an existing rule, is not a review finding.
+   The exclusion applies only to tools that actually ran on this head. If no
+   tool covers the pattern, file it as `kind: rule-candidate` (non-blocking),
+   never as a blocker.
+2. **A blocker names its trigger.** A blocking finding states a concrete
+   `trigger:` reachable in the diff (input, state or call sequence) and the
+   wrong outcome it produces. Without one it is at most `kind: note`.
+3. **Every finding carries `kind:` and `class:` lines.** `kind` is one of
+   `blocker`, `note`, `rule-candidate`; `class` is one slug from
+   `config/review-finding-classes.v1.json`. Check a body with
+   `node scripts/review-findings-lint.mjs --file <review.md>` (report-only).
 
 ### 5. Verdict (mandatory final line)
 
