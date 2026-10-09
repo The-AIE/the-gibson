@@ -1158,7 +1158,7 @@ echo "== mjs unknown-flag"
 MJS_FLAG_RC=0
 MJS_FLAG_HITS=$(cp_mjs_unknown_flag) || MJS_FLAG_RC=$?
 if [[ "$MJS_FLAG_RC" -eq 2 ]]; then
-  echo "${RED}  FAIL${OFF} — node not installed; cannot probe mjs unknown-flag contract"
+  echo "${RED}  FAIL${OFF} — cannot probe mjs unknown-flag contract (node not installed, or no scripts/*.mjs found)"
   FAILED="$FAILED mjs-unknown-flag-node-missing"
 elif [[ -n "$MJS_FLAG_HITS" ]]; then
   echo "${RED}  FAIL${OFF} — scripts/*.mjs must exit 2 on unknown --flag:"

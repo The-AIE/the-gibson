@@ -109,6 +109,11 @@ else
   echo "  PASS     bash-n (no changed shell scripts)"
 fi
 
+SKIPPED_TESTS=0
+if [[ "$RUN_TESTS" -ne 1 ]]; then
+  SKIPPED_TESTS=1
+  echo "  SKIPPED  touched-tests (--no-tests: the suites your diff touches were NOT run)"
+fi
 if [[ "$RUN_TESTS" -eq 1 ]]; then
   TESTS=()
   while IFS= read -r f; do
@@ -152,4 +157,8 @@ if [[ ${#FAILED[@]} -gt 0 ]]; then
   echo "prepush: FAILED ${FAILED[*]}"
   exit 1
 fi
-echo "prepush: all clear (CI is still the authority)"
+if [[ "$SKIPPED_TESTS" -eq 1 ]]; then
+  echo "prepush: probes clear, touched tests SKIPPED (CI is still the authority)"
+else
+  echo "prepush: all clear (CI is still the authority)"
+fi
