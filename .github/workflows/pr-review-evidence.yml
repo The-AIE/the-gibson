@@ -154,6 +154,7 @@ jobs:
           node scripts/pr-review-evidence.mjs --repo "$GH_REPO" --sweep \
             --config config/review-evidence.v1.json > "$RUNNER_TEMP/results.jsonl"
           rc=$?
+          printf '%s' "$rc" > "$RUNNER_TEMP/sweep.rc"
           if [ "$rc" -ne 0 ]; then
             echo "::notice::review-evidence sweep exited $rc; the published statuses carry the verdicts"
             echo "- review-evidence sweep exited $rc (see published statuses)" >> "$GITHUB_STEP_SUMMARY"
@@ -226,13 +227,17 @@ jobs:
               echo "### review-evidence: \`$state\` on PR $n — $desc" >> "$GITHUB_STEP_SUMMARY"
             done < "$RUNNER_TEMP/heads.txt"
             n_heads=$(grep -cE '^[0-9]+ [0-9a-f]{40}$' "$RUNNER_TEMP/heads.txt" 2>/dev/null || true)
-            if [ "$n_pub" -eq 0 ] && [ "${n_heads:-0}" -eq 0 ] && [ "${EVENT_ACTION:-}" = "closed" ]; then
-              # A PR that was just closed or merged has nothing left to sweep;
-              # an empty sweep here is the expected end state, not a sensor
-              # defect. Exiting 1 made every merge turn this workflow red and
-              # Sensor health (latest-non-success) red with it (L-092, #452).
-              echo "::notice::review-evidence: closed event with no open heads to sweep; nothing to publish"
-              echo "### review-evidence: nothing to sweep after a closed event" >> "$GITHUB_STEP_SUMMARY"
+            sweep_rc=$(cat "$RUNNER_TEMP/sweep.rc" 2>/dev/null || echo missing)
+            n_lines=$(grep -c . "$RUNNER_TEMP/results.jsonl" 2>/dev/null || true)
+            if [ "$n_pub" -eq 0 ] && [ "${n_heads:-0}" -eq 0 ] && [ "$sweep_rc" = "0" ] && [ "${n_lines:-0}" -eq 0 ]; then
+              # The sweep ran to completion and found no open pull request:
+              # after a merge, on the hourly schedule with an empty queue, or on
+              # a comment with nothing open. Nothing to publish is the correct
+              # outcome, not a sensor defect. A sweep that crashed (rc != 0) or
+              # never ran (no rc file) with stamped heads still fails closed below
+              # (L-087, L-092, #452).
+              echo "::notice::review-evidence: the sweep completed and found no open pull request; nothing to publish"
+              echo "### review-evidence: nothing to sweep (no open pull requests)" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             if [ "$n_pub" -eq 0 ]; then
