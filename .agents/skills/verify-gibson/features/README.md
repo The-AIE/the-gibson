@@ -19,7 +19,7 @@ The maintained source for verifying what the Gibson's scripts do. Read this inde
 
 ## Proof and skip reporting
 
-- Evidence lives in `.gibson-receipts/verify-gibson/<run-id>/<feature-id>/` and survives cleanup.
+- Evidence lives in `<git-common-dir>/gibson-verify-evidence/<run-id>/<feature-id>/` (the shared `.git` directory, outside every worktree) and survives `git worktree remove`.
 - Report an unreachable path with the command and the unmet precondition; do not report it verified through a different path.
 - A suite counts as proof only for the feature file that names it, and only with `0 failed`.
 

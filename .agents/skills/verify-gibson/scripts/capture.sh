@@ -8,7 +8,8 @@ capture.sh — record a verification command and its result
 
 WHAT IT DOES
   Runs the command after "--" and writes <label>.cmd, .out, .err and .rc under
-  .gibson-receipts/verify-gibson/<run-id>/<feature>/ (the directory is gitignored).
+  <git-common-dir>/gibson-verify-evidence/<run-id>/<feature>/ . The shared git
+  directory survives `git worktree remove`, is never committed, and is not scanned.
   Prints the exit code and the evidence path, and exits with the command's exit code.
 
 WHY
@@ -36,9 +37,10 @@ feature="$1"; label="$2"; shift 3
 [[ "$feature" =~ ^[a-z0-9-]+$ && "$label" =~ ^[a-z0-9-]+$ ]] || { echo "unknown flag: feature and label must match [a-z0-9-]+" >&2; exit 2; }
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "capture.sh: not inside a git repo" >&2; exit 2; }
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { echo "capture.sh: cannot resolve the shared git directory" >&2; exit 2; }
 run_id="${VERIFY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$run_id" != *..* ]] || { echo "unknown flag: VERIFY_RUN_ID must match [A-Za-z0-9._-]+ with no dot-dot" >&2; exit 2; }
-dir="$root/.gibson-receipts/verify-gibson/$run_id/$feature"
+dir="$common/gibson-verify-evidence/$run_id/$feature"
 mkdir -p "$dir" || exit 2
 
 printf '%s\n' "$*" > "$dir/$label.cmd"
