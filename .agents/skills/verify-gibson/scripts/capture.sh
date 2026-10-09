@@ -11,6 +11,8 @@ WHAT IT DOES
   <git-common-dir>/gibson-verify-evidence/<run-id>/<feature>/ . The shared git
   directory survives `git worktree remove`, is never committed, and is not scanned.
   Prints the exit code and the evidence path, and exits with the command's exit code.
+  Refuses (exit 2) rather than overwrite evidence that already exists for the same
+  run-id, feature and label.
 
 WHY
   A claim that a change works needs the command, its output and its exit code.
@@ -42,6 +44,11 @@ run_id="${VERIFY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$run_id" != *..* ]] || { echo "unknown flag: VERIFY_RUN_ID must match [A-Za-z0-9._-]+ with no dot-dot" >&2; exit 2; }
 dir="$common/gibson-verify-evidence/$run_id/$feature"
 mkdir -p "$dir" || exit 2
+# Evidence is never overwritten: a repeat of the same run-id/feature/label is refused.
+if [[ -e "$dir/$label.cmd" || -e "$dir/$label.out" || -e "$dir/$label.err" || -e "$dir/$label.rc" ]]; then
+  echo "capture.sh: evidence already exists for $feature/$label in run $run_id; use a new label or VERIFY_RUN_ID" >&2
+  exit 2
+fi
 
 printf '%s\n' "$*" > "$dir/$label.cmd"
 ( cd "$root" && "$@" ) > "$dir/$label.out" 2> "$dir/$label.err"
