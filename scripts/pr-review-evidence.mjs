@@ -301,6 +301,16 @@ export function resolveAuthors(commits, identities, attestedVendor, { relaxed = 
         if (attestedVendor) for (const v of attestedVendor) if (v !== "human") vendors.add(v);
         continue;
       }
+      // A listed `human` identity (external contributor, author-only) resolves
+      // to vendor `human` on its login alone: the login check exists to stop a
+      // forged BOT login from dodging same-vendor exclusion, and `human`
+      // excludes no reviewer, so a forged human login gains nothing. The diff
+      // still needs a listed cross-vendor reviewer at the exact head (D-014).
+      if (relaxed && vendor === "human") {
+        vendors.add("human");
+        if (attestedVendor) for (const v of attestedVendor) if (v !== "human") vendors.add(v);
+        continue;
+      }
       if (relaxed && vendor === "owner") {
         const tv = trailerVendors(c?.commit?.message);
         if (tv.length > 0) {

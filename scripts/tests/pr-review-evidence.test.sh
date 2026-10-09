@@ -722,6 +722,13 @@ d=$(fx_new cg12); fx_commits "$d" "$MINI|$MINI|false"; fx_files "$d" docs/guide.
 expect "(cg12) authorCommits restriction still precedes relaxation" "$d" identity-unresolved failure 1; expect_detail "(cg12)" "commit-not-allowed"
 d=$(fx_new cg13); fx_commits "$d" "$GROK|$GROK|false"; fx_files "$d" AGENTS.md; fx_reviews "$d" "$DEVIN_OK"; fx_comments "$d" "$OWNER|OWNER|-|0|9|2026-10-05T11:00:00Z|$(attest "$HEAD" grok)"
 expect "(cg13) an owner attestation is still honoured as an identity statement" "$d" pass success 0
+HUMAN="dmessing"   # listed in the shipped config since #459 (vendor human, author only)
+d=$(fx_new cgh1); fx_commits "$d" "$HUMAN|$HUMAN|false"; fx_files "$d" ci/gibson-gate.yml; fx_reviews "$d" "$DEVIN_OK"
+expect "(cgh1) listed human author, unsigned commit, devin APPROVE => pass (D-014; #459)" "$d" pass success 0; expect_av "(cgh1)" '["human"]'
+d=$(fx_new cgh2); fx_commits "$d" "$HUMAN|$HUMAN|false"; fx_files "$d" ci/gibson-gate.yml
+expect "(cgh2) listed human author without any review stays pending" "$d" no-receipt-at-head pending 0
+d=$(fx_new cgh3); fx_commits "$d" "someone-unlisted|someone-unlisted|false"; fx_files "$d" ci/gibson-gate.yml; fx_reviews "$d" "$DEVIN_OK"
+expect "(cgh3) unlisted human login is still unresolved" "$d" identity-unresolved failure 1
 d=$(fx_new cg14); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 $'x\n\nAgent-Vendor: owner'; fx_files "$d" docs/guide.md; fx_reviews "$d" "$DEVIN_OK"
 expect "(cg14) a non-author trailer vendor does not resolve" "$d" identity-unresolved failure 1
 d=$(fx_new cg15); fx_commits "$d" "$GROK|$GROK|false" "$OWNER|$OWNER|false"; set_msg "$d" 1 $'y\n\nAgent-Vendor: claude'; fx_files "$d" docs/guide.md; fx_reviews "$d" "$DEVIN_OK"
