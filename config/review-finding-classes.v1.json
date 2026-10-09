@@ -1,0 +1,23 @@
+{
+  "schema": "gibson.review-finding-classes/v1",
+  "authority": "report-only",
+  "description": "Closed vocabularies for reviewer findings (#401). A finding carries one `kind:` and one `class:` line. scripts/review-findings-lint.mjs reads this file; extending a vocabulary is a reviewed change to this file, not a reviewer improvisation.",
+  "kinds": {
+    "blocker": { "blocking": true, "description": "Must be fixed before merge. Requires a `trigger:` line naming a concrete input, state or call sequence reachable in the diff and the wrong outcome it produces." },
+    "note": { "blocking": false, "description": "Observation without a reachable trigger. Never blocks." },
+    "rule-candidate": { "blocking": false, "description": "A pattern no configured deterministic tool covers. Filed so a rule can be proposed; never a blocker." }
+  },
+  "defaultKind": "blocker",
+  "classes": {
+    "ignored-error-return": "A returned error, exit status or rejected promise is dropped.",
+    "unclosed-resource": "A handle, process, lock, temp file or connection is not released on some path.",
+    "style": "Formatting, naming or idiom with no behavioral effect.",
+    "speculative-no-trigger": "\"This could break\" with no reachable trigger in the diff.",
+    "logic": "Wrong result on a reachable input or state.",
+    "concurrency": "Race, ordering or atomicity defect.",
+    "security": "Authn/z, injection, secrets, SSRF, unsafe deserialization.",
+    "contract-coverage": "A sprint-contract criterion has no evidence in the diff.",
+    "test-integrity": "Removed, skipped or weakened tests; a test that cannot fail.",
+    "other": "None of the above. Prefer a specific class; recurrence of `other` is itself a signal to extend this list."
+  }
+}
