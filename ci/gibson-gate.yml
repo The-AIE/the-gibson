@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:e6e97e55ab6232ddd88d611a48b8fc019837cb63d2d2133da5e851b95a625e3b
+# gibson-template-version: sha256:75c85188e1d20730acc929675d18d1affb3024f6dffda17014aba7c065f27f31
 # The Gibson — green gate + protected test-integrity CI (template)
 # Install as .github/workflows/gibson-gate.yml in the target repo (docs/13).
 # Fill <angle> placeholders from the repo's gate commands.
@@ -48,14 +48,24 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+      - name: Fetch the PR base branch (claim isolation)
+        # Via env, not ${{ }} inside the script: a branch name is attacker-controlled.
+        # persist-credentials: false leaves no auth, and private repos refuse
+        # anonymous fetches (issue #412). Authenticate this one fetch with a
+        # per-command header (masked, never written to .git/config). Runs before
+        # `npm ci` so no PR-head code has executed while the token is in env.
+        # GitHub Enterprise Server: replace https://github.com/ with your host.
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::${auth}"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
       - name: Install dependencies
         run: npm ci --include=dev
 
-      - name: Fetch the PR base branch (claim isolation)
-        # Via env, not ${{ }} inside the script: a branch name is attacker-controlled
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: git fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
       - name: Claim isolation
         run: node scripts/check-active-work.mjs
 
@@ -76,9 +86,32 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Secrets (gitleaks)
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        # MIT CLI, not the GitHub Action: the Action needs a paid GITLEAKS_LICENSE
+        # on organization-owned repos (issue #412). Pinned release,
+        # checksum-verified before execution. Scans the PR's commits only (like
+        # the Action; without its --first-parent, so side-branch commits merged
+        # into the PR are covered too): the CLI default is every branch's full
+        # history, so one old secret on any branch would turn every PR red.
+        # gitleaks exits 0 after scanning nothing when the range is unknown, so
+        # both ends must exist locally first (fail closed). Findings appear
+        # (redacted) in the job log; there is no PR comment or SARIF upload.
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          for sha in "$BASE_SHA" "$HEAD_SHA"; do
+            [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "::error::malformed PR SHA '$sha' (fail closed)"; exit 1; }
+            git cat-file -e "${sha}^{commit}" || { echo "::error::PR commit $sha not present locally (fail closed)"; exit 1; }
+          done
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 \
+            --log-opts="--no-merges ${BASE_SHA}..${HEAD_SHA}" .
       - name: SAST (semgrep)
         run: pipx run semgrep ci --config p/owasp-top-ten --config p/secrets
       - name: Supply chain

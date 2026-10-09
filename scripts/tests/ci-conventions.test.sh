@@ -30,6 +30,11 @@
 #   - `#` inside quoted strings on a genuine summary-write line (naive
 #     comment strip cuts at the first `#`)
 #   - YAML anchors, aliases, merge keys, or tag constructs
+#   - (j) a gate-job fetch line that mentions `extraheader` without using it
+#     (`git fetch origin main; echo extraheader`)
+#   - (i) a --log-opts value that widens the range again (`--log-opts="--all"`)
+#   - (j) an inline flow-map job env (`env: { GH_TOKEN: ... }`) is caught only
+#     on its own line; tokens smuggled via other YAML shapes are not
 set -uo pipefail
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -705,6 +710,107 @@ check_operator_literals() {
   return "$failed"
 }
 
+# (i) gitleaks runs as the pinned MIT CLI, never gitleaks/gitleaks-action
+# (#412): the Action refuses to run on organization-owned repos without a paid
+# GITLEAKS_LICENSE secret, so an unmodified template goes red on adoption.
+# A CLI `gitleaks git`/`detect` run must pass --log-opts: the default scans
+# every branch's full history, so one old secret anywhere reddens every PR. A
+# scoped run must sit in a file that proves the range exists (`git cat-file
+# -e`): gitleaks exits 0 after scanning nothing when a range end is missing.
+check_gitleaks_action() {
+  local root="$1"
+  local failed=0
+  local f rel hits
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    rel=${f#"$root"/}
+    if grep -Eq '^[^#]*uses:[[:space:]]*["'"'"']?gitleaks/gitleaks-action' "$f"; then
+      echo "$rel uses gitleaks/gitleaks-action (license-gated on org repos; use the pinned CLI)"
+      failed=1
+    fi
+    hits=$(awk '
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*(-[[:space:]]*)?name:/ { next }
+      {
+        line=$0
+        if (cont != "") line = cont " " line
+        if (line ~ /\\[[:space:]]*$/) { sub(/\\[[:space:]]*$/, "", line); cont=line; next }
+        cont=""
+        if (line ~ /gitleaks["'"'"']?[[:space:]]+(git|detect)([[:space:]]|$)/ && line !~ /--log-opts/) {
+          sub(/^[[:space:]]*/, "", line); print line
+        }
+      }
+    ' "$f")
+    if [[ -n "$hits" ]]; then
+      echo "$rel gitleaks scans full history without --log-opts: $hits"
+      failed=1
+    fi
+    if grep -Eq '^[^#]*--log-opts' "$f" \
+      && grep -Eq '^[^#]*gitleaks["'"'"']?[[:space:]]+(git|detect)([[:space:]]|$)' "$f" \
+      && ! grep -Eq '^[^#]*git[[:space:]]+cat-file[[:space:]]+-e' "$f"; then
+      echo "$rel gitleaks --log-opts range is not proven present (git cat-file -e); a missing end scans 0 commits and passes"
+      failed=1
+    fi
+  done < <(collect_workflows "$root")
+  return "$failed"
+}
+
+# (j) the gate job's git fetches authenticate, before PR-head code runs (#412).
+# Checkout uses persist-credentials: false, so a bare `git fetch origin` is
+# anonymous and private repos refuse it. Every git fetch in a job named `gate`
+# must carry a per-command extraheader, and the job token must never be in the
+# environment of a step at or after the first `npm ci`/`npm install` — nor in
+# the gate job's job-level env:, which every step inherits.
+check_gate_fetch_auth() {
+  local root="$1"
+  local failed=0
+  local f rel viol
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    rel=${f#"$root"/}
+    viol=$(awk '
+      /^jobs:/ { in_jobs=1; next }
+      /^[^[:space:]#]/ { in_jobs=0; in_gate=0 }
+      in_jobs && /^  gate:[[:space:]]*$/ { in_gate=1; next }
+      in_gate && /^  [^[:space:]#]/ { in_gate=0 }
+      !in_gate { next }
+      /^[[:space:]]*#/ { next }
+      /^    env:[[:space:]]*\{/ { if ($0 ~ /github\.token|secrets\.GITHUB_TOKEN/) jenv_tok=1; next }
+      /^    env:/ { in_jenv=1; next }
+      in_jenv && /^    [^[:space:]]/ { in_jenv=0 }
+      /^      - / { step++ }
+      {
+        line=$0
+        sub(/[[:space:]]#.*$/, "", line)
+        if (cont != "") line = cont " " line
+        if (line ~ /\\[[:space:]]*$/) { sub(/\\[[:space:]]*$/, "", line); cont=line; next }
+        cont=""
+        if (line ~ /(^|[^[:alnum:]_.-])git[[:space:]]/ && line ~ /[[:space:]]fetch([[:space:]]|$)/ && line !~ /extraheader/) {
+          sub(/^[[:space:]]*(-[[:space:]]*)?(run:[[:space:]]*)?/, "", line)
+          print "unauthenticated git fetch in gate job: " line
+        }
+        is_tok = (line ~ /github\.token|secrets\.GITHUB_TOKEN/)
+        if (is_tok && in_jenv) jenv_tok=1
+        # Compare by STEP, not by line: a step env: block sits above its run:,
+        # so a token on the npm ci step itself would otherwise read as "before
+        # npm ci" while every install script sees it (Grok review of #413).
+        if (is_tok && step > tok_step) tok_step=step
+        if (!npm && line ~ /npm[[:space:]]+(ci|install)/) { npm=NR; npm_step=step }
+      }
+      END {
+        if (jenv_tok) print "gate job token is in job-level env (every step, incl. PR-head code, inherits it)"
+        if (tok_step && npm && tok_step >= npm_step) print "gate job token enters the step env after npm ci (PR-head code already ran)"
+      }
+    ' "$f")
+    [[ -n "$viol" ]] || continue
+    while IFS= read -r line; do
+      echo "$rel $line"
+    done <<< "$viol"
+    failed=1
+  done < <(collect_workflows "$root")
+  return "$failed"
+}
+
 # Report a planted-fixture failure. needle must appear in the check output.
 assert_planted() {
   local n="$1"
@@ -915,6 +1021,28 @@ if [[ -z "$op_viol" ]]; then
   ok "templates/ and ci/ are free of mrhinkle and /Users/ literals"
 else
   bad "$op_viol"
+fi
+
+echo "# (i) gitleaks runs as the pinned CLI, not gitleaks/gitleaks-action (#412)"
+gl_viol=$(check_gitleaks_action "$REPO_ROOT") || true
+if [[ -z "$gl_viol" ]]; then
+  ok "no workflow uses the license-gated gitleaks/gitleaks-action"
+else
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    bad "$line"
+  done <<< "$gl_viol"
+fi
+
+echo "# (j) gate job git fetches authenticate before npm ci (#412)"
+fa_viol=$(check_gate_fetch_auth "$REPO_ROOT") || true
+if [[ -z "$fa_viol" ]]; then
+  ok "gate job fetches carry an extraheader and precede npm ci"
+else
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    bad "$line"
+  done <<< "$fa_viol"
 fi
 
 # --- mutation coverage: one planted fixture per sensor ---------------------
@@ -1611,6 +1739,249 @@ jobs: {}
 YML
 got=$(check_concurrency "$MUT/39") || true
 assert_clean 39 "PR-only cancellation expression is accepted" "$got"
+
+# 40. gitleaks/gitleaks-action (license-gated on org repos, #412)
+mkdir -p "$MUT/40/ci"
+cat > "$MUT/40/ci/planted.yml" <<'YML'
+name: planted-gitleaks-action
+on: push
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+YML
+got=$(check_gitleaks_action "$MUT/40") || true
+assert_planted 40 "gitleaks/gitleaks-action under ci/ (or .github/workflows/)" \
+  "ci/planted.yml uses gitleaks/gitleaks-action" "$got"
+
+# 41. pinned gitleaks CLI; a commented-out Action line is not a use (must pass)
+mkdir -p "$MUT/41/ci"
+cat > "$MUT/41/ci/planted.yml" <<'YML'
+name: planted-gitleaks-cli
+on: push
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      # uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+      - name: Secrets
+        run: |
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 \
+            --log-opts="--no-merges ${BASE_SHA}..${HEAD_SHA}" .
+      - name: Run gitleaks git scan
+        run: "true"
+YML
+got=$(check_gitleaks_action "$MUT/41") || true
+assert_clean 41 "pinned gitleaks CLI scoped to a proven PR range is accepted (step name prose ignored)" "$got"
+
+# 42. bare git fetch origin in the gate job (anonymous on private repos, #412)
+mkdir -p "$MUT/42/ci"
+cat > "$MUT/42/ci/planted.yml" <<'YML'
+name: planted-anon-fetch
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch the PR base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+      - run: npm ci --include=dev
+YML
+got=$(check_gate_fetch_auth "$MUT/42") || true
+assert_planted 42 "unauthenticated git fetch origin in the gate job" \
+  "ci/planted.yml unauthenticated git fetch in gate job: git fetch --no-tags" "$got"
+
+# 43. authenticated fetch, but after npm ci (token visible to PR-head code)
+mkdir -p "$MUT/43/ci"
+cat > "$MUT/43/ci/planted.yml" <<'YML'
+name: planted-token-after-install
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci --include=dev
+      - name: Fetch the PR base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+YML
+got=$(check_gate_fetch_auth "$MUT/43") || true
+assert_planted 43 "gate job token enters env after npm ci" \
+  "ci/planted.yml gate job token enters the step env after npm ci" "$got"
+
+# 44. authenticated fetch before npm ci; bare fetches in other jobs are out of
+#     scope (must pass)
+mkdir -p "$MUT/44/ci"
+cat > "$MUT/44/ci/planted.yml" <<'YML'
+name: planted-auth-fetch
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      # git fetch origin in a comment is not a fetch
+      - name: Fetch the PR base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+      - run: npm ci --include=dev
+  other:
+    runs-on: ubuntu-latest
+    steps:
+      - run: git fetch origin main
+YML
+got=$(check_gate_fetch_auth "$MUT/44") || true
+assert_clean 44 "authenticated gate fetch before npm ci is accepted" "$got"
+
+# 45. gitleaks CLI with no --log-opts scans every branch's full history
+mkdir -p "$MUT/45/ci"
+cat > "$MUT/45/ci/planted.yml" <<'YML'
+name: planted-gitleaks-full-history
+on: pull_request
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Secrets
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 .
+YML
+got=$(check_gitleaks_action "$MUT/45") || true
+assert_planted 45 "gitleaks CLI without --log-opts (full-history scan)" \
+  "ci/planted.yml gitleaks scans full history without --log-opts" "$got"
+
+# 46. job token hoisted to the gate job's job-level env: (inherited by npm ci)
+mkdir -p "$MUT/46/ci"
+cat > "$MUT/46/ci/planted.yml" <<'YML'
+name: planted-job-env-token
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Fetch the PR base branch
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --prune origin main
+      - run: npm ci --include=dev
+YML
+got=$(check_gate_fetch_auth "$MUT/46") || true
+assert_planted 46 "gate job token in job-level env" \
+  "ci/planted.yml gate job token is in job-level env" "$got"
+
+# 47. token also handed to a step after npm ci (first use is still before it)
+mkdir -p "$MUT/47/ci"
+cat > "$MUT/47/ci/planted.yml" <<'YML'
+name: planted-late-token
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch the PR base branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --prune origin main
+      - run: npm ci --include=dev
+      - name: Claim isolation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-active-work.mjs
+YML
+got=$(check_gate_fetch_auth "$MUT/47") || true
+assert_planted 47 "gate job token in a step after npm ci" \
+  "ci/planted.yml gate job token enters the step env after npm ci" "$got"
+mkdir -p "$MUT/50/ci"
+cat > "$MUT/50/ci/planted.yml" <<'YML'
+name: planted-late-token
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch the PR base branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --prune origin main
+      - name: Install
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: npm ci --include=dev
+      - name: Claim isolation
+        run: node scripts/check-active-work.mjs
+YML
+got=$(check_gate_fetch_auth "$MUT/50") || true
+assert_planted 50 "gate job token on the npm ci step itself (env above run)" \
+  "ci/planted.yml gate job token enters the step env after npm ci" "$got"
+
+# 48. scoped gitleaks run with no proof the range exists (scans 0, exits 0)
+mkdir -p "$MUT/48/ci"
+cat > "$MUT/48/ci/planted.yml" <<'YML'
+name: planted-unproven-range
+on: pull_request
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Secrets
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 \
+            --log-opts="--no-merges ${BASE_SHA}..${HEAD_SHA}" .
+YML
+got=$(check_gitleaks_action "$MUT/48") || true
+assert_planted 48 "gitleaks range scan without git cat-file -e proof" \
+  "ci/planted.yml gitleaks --log-opts range is not proven present" "$got"
+
+# 49. inline flow-map job-level env carrying the token
+mkdir -p "$MUT/49/ci"
+cat > "$MUT/49/ci/planted.yml" <<'YML'
+name: planted-inline-job-env
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    env: { GH_TOKEN: "${{ github.token }}" }
+    steps:
+      - run: npm ci --include=dev
+YML
+got=$(check_gate_fetch_auth "$MUT/49") || true
+assert_planted 49 "gate job token in inline job-level env map" \
+  "ci/planted.yml gate job token is in job-level env" "$got"
 
 # --- #274 machine-readable self-gate contract --------------------------------
 echo "# #274 command consistency (AGENTS.md, gate.json, sensors job, run-all --no-quarantine)"
