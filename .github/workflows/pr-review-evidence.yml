@@ -225,7 +225,8 @@ jobs:
               publish "$sha" "$state" "$desc" && n_pub=$((n_pub + 1))
               echo "### review-evidence: \`$state\` on PR $n — $desc" >> "$GITHUB_STEP_SUMMARY"
             done < "$RUNNER_TEMP/heads.txt"
-            if [ "$n_pub" -eq 0 ] && [ "${EVENT_ACTION:-}" = "closed" ]; then
+            n_heads=$(grep -cE '^[0-9]+ [0-9a-f]{40}$' "$RUNNER_TEMP/heads.txt" 2>/dev/null || true)
+            if [ "$n_pub" -eq 0 ] && [ "${n_heads:-0}" -eq 0 ] && [ "${EVENT_ACTION:-}" = "closed" ]; then
               # A PR that was just closed or merged has nothing left to sweep;
               # an empty sweep here is the expected end state, not a sensor
               # defect. Exiting 1 made every merge turn this workflow red and

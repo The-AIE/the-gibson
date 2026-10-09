@@ -287,6 +287,9 @@ rm -f "$WD/results.jsonl"; : > "$WD/heads.txt"; : > "$ROOT/gh.log"; : > "$ROOT/s
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && ok "publish: a non-closed event with no heads and no verdicts still fails closed" || bad "publish no-results non-closed: rc=$rc"
 printf '1 %s\n2 %s\n' "$HEAD" "$H2" > "$WD/heads.txt"   # restore the two stamped heads for the cases below
+rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=closed bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: a closed event WITH stamped heads and no verdicts still fails closed on every head (Codex review of #462)" || bad "publish closed-with-heads: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 printf '{"number":null,"headSha":"","state":"failure","reason":"api-error","detail":"listing"}\n' > "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: sweep listing fault → failure on every stamped head" || bad "publish listing-fault: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
