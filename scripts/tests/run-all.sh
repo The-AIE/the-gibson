@@ -101,7 +101,8 @@ REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 BASELINE="$SCRIPT_DIR/shellcheck-baseline.txt"
 # shellcheck source=lib/convention-sensors.sh
 . "$SCRIPT_DIR/lib/convention-sensors.sh"
-. "$SCRIPT_DIR/lib/convention-probes.sh"
+# shellcheck source=../lib/convention-probes.sh
+. "$SCRIPT_DIR/../lib/convention-probes.sh" || { echo "run-all: cannot source scripts/lib/convention-probes.sh" >&2; exit 1; }
 WORKFLOW_SELF_GATE="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
 
 # Parse "ShellCheck … version: X.Y.Z" (or a bare X.Y.Z) → X.Y.Z, else empty.
@@ -917,7 +918,7 @@ echo "== bash -n"
 SYNTAX_BAD=""
 SH_ARR=()
 while IFS= read -r f; do SH_ARR+=("$f"); done <<< "$SH_FILES"
-SYNTAX_OUT=$(cp_bash_n "${SH_ARR[@]}") || SYNTAX_BAD=1
+if [[ ${#SH_ARR[@]} -gt 0 && -n "${SH_ARR[0]}" ]]; then SYNTAX_OUT=$(cp_bash_n "${SH_ARR[@]}") || SYNTAX_BAD=1; fi
 if [[ -n "$SYNTAX_BAD" ]]; then
   echo "${RED}  FAIL${OFF} — bash -n:"; printf '%s\n' "$SYNTAX_OUT" | sed 's/^/         /'
   FAILED="$FAILED bash-n"

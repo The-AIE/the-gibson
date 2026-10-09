@@ -117,6 +117,15 @@ for needle in cp_bash_n cp_mjs_unknown_flag "scripts/sensor-reachability.mjs"; d
 done
 if out=$(drift_check "$RUNALL" "$SELFGATE"); then ok "every prepush probe is exercised by run-all.sh or the self-gate"; else bad "drift: $out"; fi
 
+# The gate must actually load the lib it calls: run-all.sh resolves SCRIPT_DIR to
+# scripts/tests, so the source line must reach ../lib and that file must exist.
+src_line=$(grep -F 'convention-probes.sh"' "$RUNALL" | grep -F '. "$SCRIPT_DIR/' | head -1)
+if [[ "$src_line" == *'$SCRIPT_DIR/../lib/convention-probes.sh'* && -f "$SCRIPT_DIR/../lib/convention-probes.sh" && "$src_line" == *'exit 1'* ]]; then
+  ok "run-all.sh sources scripts/lib/convention-probes.sh by a path that exists and fails closed"
+else
+  bad "run-all.sh does not source the probe lib correctly: $src_line"
+fi
+
 # Mutation: drop a probe from a copy of run-all.sh; the drift check must fail.
 sed 's/cp_mjs_unknown_flag/cp_removed/g' "$RUNALL" > "$ROOT/run-all.mutant"
 if drift_check "$ROOT/run-all.mutant" "$SELFGATE" >/dev/null; then
