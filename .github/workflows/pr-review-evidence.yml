@@ -165,6 +165,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANCELLED: ${{ job.status == 'cancelled' }}
+          EVENT_ACTION: ${{ github.event.action }}
           # continue-on-error turns the pending step's failure green; read its
           # real outcome here so a failed pending stamp makes the job red
           # (Codex round 8, finding 2).
@@ -224,6 +225,15 @@ jobs:
               publish "$sha" "$state" "$desc" && n_pub=$((n_pub + 1))
               echo "### review-evidence: \`$state\` on PR $n — $desc" >> "$GITHUB_STEP_SUMMARY"
             done < "$RUNNER_TEMP/heads.txt"
+            if [ "$n_pub" -eq 0 ] && [ "${EVENT_ACTION:-}" = "closed" ]; then
+              # A PR that was just closed or merged has nothing left to sweep;
+              # an empty sweep here is the expected end state, not a sensor
+              # defect. Exiting 1 made every merge turn this workflow red and
+              # Sensor health (latest-non-success) red with it (L-092, #452).
+              echo "::notice::review-evidence: closed event with no open heads to sweep; nothing to publish"
+              echo "### review-evidence: nothing to sweep after a closed event" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
             if [ "$n_pub" -eq 0 ]; then
               echo "::error::review-evidence: no verdicts and no known heads; a prior status may be stale until the next event"
               echo "### review-evidence: NOT PUBLISHED — no verdicts and no known heads" >> "$GITHUB_STEP_SUMMARY"
