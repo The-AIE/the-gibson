@@ -10,6 +10,21 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### New brand: ring logo and tagline (#406)
+
+- **New mark:** a G made of two rings around an amber core. The outer ring is the
+  Gibson, the inner ring is your coding agents, and the core is the model. The gaps
+  line up at nine o'clock to form the one gated channel in.
+- **New tagline:** "The governance harness for your coding agents." Short form:
+  "Governance for coding agents." It replaces "The open source harness for
+  vibecoders" in the README and on the docs home page.
+- **Brand kit** in `assets/images/branding/` (`README.md` there): outlined SVG marks and
+  lockups (light, dark, small, mono), PNG/ICO exports, colors and usage rules.
+- **Migration note for forks:** the favicon, docs-site logo, icon, lockup and
+  social-preview files keep their old names, so `_config.yml` and existing links work
+  unchanged. If your fork overrides the logo in `local/`, nothing changes for you. To
+  pick up the new tagline, update any copy you have that quotes the old one.
+
 ### Conventions contract + substrate-first roadmap (#190)
 
 - **New `docs/CONVENTIONS.md`** — code & doc conventions for the harness repo

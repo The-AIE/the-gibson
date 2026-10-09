@@ -101,11 +101,13 @@ Findings, backlogs, retros, and other history remain in `docs/`, `memory/`, and
 | 27 | [lightweight-mcts-panel](27-lightweight-mcts-panel.md) | Lightweight MCTS review panel |
 | 28 | [self-learning-loops](28-self-learning-loops.md) | Artifact ladder, standing loops, spec gate (#210) |
 | 29 | [guarded-state-transitions](29-guarded-state-transitions.md) | Illegal state moves fail loud; frozen decision packages |
+| 30 | [verification-lever](30-verification-lever.md) | `gibson-verify`: receipts at an exact head; verified vs claim-only |
 | — | [goose-strategy](GOOSE-STRATEGY.md) | Build on Goose's engine: engine / brand / interop / funnel |
 | — | [goose-license-verification](GOOSE-LICENSE-VERIFICATION.md) | #29 findings: Apache-2.0 embed / re-brand / pin / AAIF governance |
 | — | [goose-spike-findings](GOOSE-SPIKE-FINDINGS.md) | #28 paperwork pass only — no live runtime spike; scaffold permitted, runtime still gated |
 | — | [autonomy-modes](autonomy-modes.md) | Four modes + per-tool overrides mapped to Goose; no new Gibson session defaults |
 | — | [conventions](CONVENTIONS.md) | Code & doc target contract — live vs planned state, retrofit batches, and owner gates |
+| — | [brand-kit](../assets/images/branding/README.md) | Logo, lockups, tagline, colors and usage rules (2026-09-27) |
 
 ## Worked examples & ops
 

@@ -183,3 +183,65 @@ Revisit when: Tier A/B defect data shows E2 letting through what a
 cross-vendor E3 pass would have caught, delivery-control's minimum is
 decided separately, or a genuinely separate schema/security tier (distinct
 from Tier C) is proposed.
+
+## D-013 · 2026-10-08 · One attestation model: the independent reviewer clears routine work; the owner attests only three carve-outs
+Decided (Mark, 2026-10-05 "Remove the owner gate everywhere except agent rule
+files, secrets/billing, and schema migrations"; made the only model on
+2026-10-08 after a fleet-process review): across The-AIE repositories a routine
+pull request is cleared by an independent, cross-vendor reviewer at the exact head
+plus the repository's required checks, never by the owner. The reviewer is the
+independent-review App (`aie-independent-review[bot]`, reviewer-only, cross-vendor
+to every author) where it is wired up (ConferenceOS today); in this repository and
+Chatterbuilt, until the App is extended, a listed lane-bot reviewer identity or
+CodeRabbit posts the receipt for a review another vendor performed. The owner attests only
+the three carve-outs: (a) agent rule and control-plane files (AGENTS.md,
+CLAUDE.md, `.github/`, `.agents/`, gate/classifier/merge-on-green/review-evidence
+scripts and configs), (b) secrets, Stripe, billing, checkout, payments, api-key
+and `.env` paths, (c) schema, migrations and `*.sql`. There is no owner
+attestation queue for routine work, and machinery built around the owner signing
+routine pull requests is the losing half and is deleted when touched. Agent work
+is committed under a lane-bot identity, or under the owner identity with an
+`Agent-Vendor:` trailer, so provenance resolves without an attestation.
+Why: two models were running at once. The `review-evidence` gate was built to
+need the owner's attestation; the owner then said he should not need to approve
+or attest anything; the fleet then built the independent reviewer to route
+around the gate it had built, while 122 of 139 ConferenceOS merges and 31 of 33
+Chatterbuilt merges in the preceding 30 days were still authored as the owner.
+Every agent had to work out which model applied, and the losing half kept
+generating attestation-queue entries, owner alerts and stalled pull requests
+(this repository had 11 open PRs all failing `review-evidence`). Lesson L-094.
+Rejected: keeping routine owner attestation as a fallback (it is the second
+model by another name); dropping `review-evidence` as a required check (the
+check is what makes a reviewer's absence visible; L-087).
+Revisit when: the independent-review App is extended to this repository and
+Chatterbuilt (retiring the lane-bot/CodeRabbit receipt path), or when a carve-out
+class proves to need no human after a quarter of incident-free delegation.
+
+## D-014 · 2026-10-08 · The owner is out of the review loop: cross-vendor review clears every head, including the former carve-outs
+Decided (Mark, 2026-10-08, evening: "Remove me from the loop, remove the labels,
+fix everything, attribute the commits to Claude"): no pull request in a The-AIE
+repository requires the owner's attestation, approval or label. Every head,
+including the three classes D-013 reserved for the owner (agent rule and
+control-plane files, secrets/billing/payments paths, schema and migrations), is
+cleared by an independent cross-vendor review at the exact head plus the
+repository's required checks. `needs-mark` and `decision` are no longer merge
+holds and were removed from open pull requests. Agent commits are attributed to
+their vendor: a lane-bot identity, or the owner identity with an `Agent-Vendor:`
+trailer (Claude's work carries `Agent-Vendor: claude` until a Claude lane-bot
+App exists). The hard blocks on ACTIONS in `~/.claude/FLEET.md` (handling
+secrets and keys, billing and pricing changes, customer-facing legal pages,
+destructive operations, commits and pushes nobody asked for) are unchanged:
+they govern what an agent may do, not who signs a review.
+Why: D-013 still left six Gibson PRs and two Chatterbuilt PRs waiting on one
+person, and the harness's own fixes (#454, #457) were carve-outs by its own
+definition, so the repository could not repair itself without him. The
+review-independence rules (D-011 E3 for Tier C, D-012 E2 for Tier A/B) already
+carry the safety; the owner signature on top of them was a second gate that
+only stalled.
+Rejected: keeping schema/migrations as the one remaining owner class (the
+rehearsal gates in ConferenceOS and the cross-vendor review are the controls
+that actually catch a bad migration; the signature caught none); keeping the
+labels as advisory (a label that does not hold is noise).
+Revisit when: a cross-vendor-reviewed change in a former carve-out class causes
+an incident the owner signature would plausibly have stopped, or when a Claude
+lane-bot identity exists and the trailer path can be retired.

@@ -133,6 +133,17 @@ L
 out=$(node "$L8" --claimed green --log-file "$ROOT/failed.log" 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "L8 failed tally refuses green claim" || bad "L8 failed (rc=$rc): $out"
 
+cat > "$ROOT/aggregate.log" <<'L'
+  ok   — metrics mutation: ordinary suite failure is RED with aggregate metrics
+run-all: GREEN — 0 failed, 0 quarantined
+L
+out=$(node "$L8" --claimed success --gate-exit 0 --log-file "$ROOT/aggregate.log" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "L8 'RED with aggregate' is not a red gate (word boundary)" || bad "L8 aggregate false positive (rc=$rc): $out"
+
+printf 'the RED gate stayed red\n' > "$ROOT/redgate.log"
+out=$(node "$L8" --claimed success --gate-exit 0 --log-file "$ROOT/redgate.log" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "L8 'RED gate' still refuses" || bad "L8 red gate passed (rc=$rc): $out"
+
 out=$(node "$L8" --claimed blocked --gate-exit 1 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && ok "L8 non-success claim not contradicted" || bad "L8 blocked claim (rc=$rc): $out"
 

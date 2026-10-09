@@ -1848,7 +1848,84 @@ Codex round 2 on Gibson PR #327 caught `run-all-stress.sh --runs` (no value) han
 **Status:** fixed (fleet-vitals.sh patched 2026-09-04; Mini copy to sync) — no Gibson sensor yet
 **Tags:** #fleet #grok #watchdog #liveness
 
-## L-090 · 2026-09-30 · gate-template-private-org-repo
+## L-090 · 2026-10-08 · coordinator-plan-is-state-not-log
+**What happened:** A coordinator's instruction file must be one current state, never an append-only stack of dated owner notes; Carmack's reached 66 KB and hid a dead lock for 5 days
+On 2026-10-08 Carmack's plan file on the Mini was 66 KB with eight dated OWNER notes, each partially superseding earlier ones ("supersedes the October 5 placement for priority order only"). A coordinator lock from a PID dead since 10-03 went unnoticed until 10-08, and the last run reported zero implementation artifacts with its budget exhausted. FLEET.md had the same override-on-override shape.
+
+**Why:** a cold agent must resolve a chain of exceptions before it can act, and every added note thins attention on the ones that matter. Dated notes are history, not instructions.
+
+**How to apply:** one current-state file per coordinator, under 12 KB. A new owner direction REPLACES the sentence it changes; the old text moves to `history-<date>/`. Superseded paragraphs are deleted, not annotated. Apply the same to FLEET.md (rule "Keep this card a card"). See [[fleet-harness-blocked-ratio-applies-to-itself]].
+**Harness fix:** one current-state file per coordinator, under 12 KB. A new owner direction REPLACES the sentence it changes; the old text moves to `history-<date>/`. Superseded paragraphs are deleted, not annotated. Apply the same to FLEET.md (rule "Keep this card a card"). See [[fleet-harness-blocked-ratio-applies-to-itself]].
+**Status:** intake 2026-10-08 from fleet memory `feedback_coordinator_plan_is_state_not_log.md` (no sensor yet)
+**Tags:** #fleet #intake #pid
+
+## L-091 · 2026-10-08 · fleet-harness-blocked-ratio-applies-to-itself
+**What happened:** The harness repo must pass its own rules; on 2026-10-08 the Gibson was the fleet's slowest repo (8 merges/30d), 36% dependency-blocked, every open PR red
+Measured 2026-10-08: 30-day merges ConferenceOS 139, Chatterbuilt 33, The Gibson 8. The Gibson had 11 open PRs all failing `review-evidence` (a docs-only PR included), `Sensor health` red on main every day since 10-01, and 46 of 129 issues `dependency-blocked`, 21 of them on #164/#160 open since 2026-08-10. The card's rule "clear the blocker before decomposing behind it" and "fix the guard before extending it" had been applied to product repos but not to the harness that states them.
+
+**Why:** a harness that cannot merge its own PRs cannot improve, and work decomposed behind a blocker is a waiting list, not a backlog. Capacity added to it changes nothing.
+
+**How to apply:** run the blocked-ratio check on the Gibson itself in every fleet-health pass; above 40%, freeze features there before anywhere else. A gate repo whose own gate is red on main is an outage, not a backlog item. Freeze on 2026-10-08: the-gibson#452. See [[coordinator-plan-is-state-not-log]], [[sensor-health-grades-its-own-last-run]].
+**Harness fix:** run the blocked-ratio check on the Gibson itself in every fleet-health pass; above 40%, freeze features there before anywhere else. A gate repo whose own gate is red on main is an outage, not a backlog item. Freeze on 2026-10-08: the-gibson#452. See [[coordinator-plan-is-state-not-log]], [[sensor-health-grades-its-own-last-run]].
+**Status:** intake 2026-10-08 from fleet memory `feedback_fleet_harness_blocked_ratio_applies_to_itself.md` (no sensor yet)
+**Tags:** #fleet #gate #intake #merge #review #sensor
+
+## L-092 · 2026-10-08 · sensor-health-grades-its-own-last-run
+**What happened:** A sensor evaluated in latest-non-success mode on its own workflow can never recover once it fails; Gibson Sensor health was red 2026-10-01 to 10-08 for this reason
+`scripts/sensor-health-lib.mjs` lists `.github/workflows/sensor-health.yml` among `REQUIRED_REPO_OWNED_PATHS` and evaluates it in `latest-non-success` mode. After one failure for any cause, the workflow's latest run is a failure, so the next run reports `FAILING: sensor-health.yml: latest-non-success` and fails again. Eight consecutive red days on main; today's log showed exactly one FAILING sensor (itself).
+
+**Why:** a sensor that grades its own previous run has a fixed point at "failing". The signal stops carrying information the moment it first trips.
+
+**How to apply:** never evaluate a workflow's health from that workflow's own latest run; evaluate self-paths at `current-head` (as the self-gate already does) or exclude them with a named reason. Add a test for the self-reference case to any new sensor. Diagnosis on the-gibson#452. See [[fleet-harness-blocked-ratio-applies-to-itself]].
+**Harness fix:** never evaluate a workflow's health from that workflow's own latest run; evaluate self-paths at `current-head` (as the self-gate already does) or exclude them with a named reason. Add a test for the self-reference case to any new sensor. Diagnosis on the-gibson#452. See [[fleet-harness-blocked-ratio-applies-to-itself]].
+**Status:** intake 2026-10-08 from fleet memory `feedback_sensor_health_grades_its_own_last_run.md` (no sensor yet)
+**Tags:** #fleet #gate #intake #sensor
+
+## L-093 · 2026-10-08 · measurement-tooling-nobody-reads
+**What happened:** A measurement rule with no reader is a belief; review-metrics.sh measured zero real PRs in six weeks and the claims registry was corrupt for two months unnoticed
+Found 2026-10-08: the doctrine rule "measure it or the change is a belief" cited `review-metrics.sh`, whose reviews directory held two entries with 0 PRs. `~/.claude/fleet/claims/` contained directories named `--force` and `--repo` (lane-check.sh accepted flags as issue numbers) plus 50 claims up to six weeks past the 12-hour TTL. FLEET.md freshness stamps were mostly dated 2026-08-22, past the card's own 30-day rule. Nothing read any of it, so nothing noticed.
+
+**Why:** tooling that only writes is cost with no return; worse, its existence lets a rule stay on the card that nothing enforces.
+
+**How to apply:** when adding a measurement, name what reads it and when; if nothing reads it in 30 days, delete it and the rule that cites it. Validate script arguments (lane-check.sh now rejects non-numeric issues). Archive stale claims on every fleet-health run. Retired 2026-10-08: review-metrics.sh. See [[coordinator-plan-is-state-not-log]].
+**Harness fix:** when adding a measurement, name what reads it and when; if nothing reads it in 30 days, delete it and the rule that cites it. Validate script arguments (lane-check.sh now rejects non-numeric issues). Archive stale claims on every fleet-health run. Retired 2026-10-08: review-metrics.sh. See [[coordinator-plan-is-state-not-log]].
+**Status:** intake 2026-10-08 from fleet memory `feedback_measurement_tooling_nobody_reads.md` (no sensor yet)
+**Tags:** #fleet #intake #lane #review
+
+## L-094 · 2026-10-08 · one-attestation-model
+**What happened:** Two attestation models fought each other (owner gate vs independent-review App); decided 2026-10-08 that the App clears routine PRs and Mark attests only control files, secrets/billing, schema
+The `review-evidence` gate was built to need Mark's attestation; Mark then said "I shouldn't need to approve or attest anything"; the fleet then built an independent-review App and trust file to route around the gate it had built. Meanwhile 122 of 139 ConferenceOS merges and 31 of 33 Chatterbuilt merges in the last 30 days were authored as Mark, against the standing lane-bot rule. Two systems, one making Mark the required signer and one removing him.
+
+**Why:** two models mean every agent must work out which applies, and the losing half keeps generating attestation-queue entries, alerts and stalled PRs.
+
+**How to apply:** one model. The independent-review App (`aie-independent-review`) clears routine PRs at the exact head; Mark attests only three carve-outs: agent rule/control files, secrets/billing/payments paths, schema/migrations. No owner queue for routine work. Delete attestation machinery for routine work when touched. Agent work is committed under a lane-bot identity so provenance resolves. Recorded in FLEET.md and the-gibson#452. See [[process-scales-with-repo-health]].
+**Harness fix:** one model. The independent-review App (`aie-independent-review`) clears routine PRs at the exact head; Mark attests only three carve-outs: agent rule/control files, secrets/billing/payments paths, schema/migrations. No owner queue for routine work. Delete attestation machinery for routine work when touched. Agent work is committed under a lane-bot identity so provenance resolves. Recorded in FLEET.md and the-gibson#452. See [[process-scales-with-repo-health]].
+**Status:** intake 2026-10-08 from fleet memory `feedback_one_attestation_model.md` (no sensor yet)
+**Tags:** #attest #fleet #gate #intake #lane #review
+
+## L-095 · 2026-10-08 · process-scales-with-repo-health
+**What happened:** The same process produced 139 merges in ConferenceOS and 8 in the Gibson; process must scale with a repo's stakes and health, not be copied uniformly
+ConferenceOS has a deadline, a human in the loop, 25 workflows and 40 gate scripts, and merged 139 PRs in 30 days (92 product). Chatterbuilt (33) and the Gibson (8) inherit the same rules with no deadline and stall. The rules were copied, not fitted.
+
+**Why:** gates pay for themselves where there is product flow to protect; on a repo with eight merges a month the same gates are most of the cost.
+
+**How to apply:** set process weight per repo from its measured throughput and stakes. A repo under ~20 merges/month gets the fast path and thin CI by default; add a gate there only when an incident in that repo justifies it. Review the per-repo weight whenever fleet-health shows a 5x throughput gap between repos under the same rules. See [[one-attestation-model]], [[agents-approving-agents]].
+**Harness fix:** set process weight per repo from its measured throughput and stakes. A repo under ~20 merges/month gets the fast path and thin CI by default; add a gate there only when an incident in that repo justifies it. Review the per-repo weight whenever fleet-health shows a 5x throughput gap between repos under the same rules. See [[one-attestation-model]], [[agents-approving-agents]].
+**Status:** intake 2026-10-08 from fleet memory `feedback_process_scales_with_repo_health.md` (no sensor yet)
+**Tags:** #ci #fleet #gate #intake #review
+
+## L-096 · 2026-10-08 · agents-approving-agents
+**What happened:** An agent approving another agent's permission prompts (Neuro for Carmack, 2026-10-07) is grade-your-own-homework one level up; supervision layers were cut 2026-10-08
+By 2026-10-08 the development loop had Carmack coordinating, Neuro approving Carmack's permission prompts overnight, a two-hour self-improvement audit job, a 10-minute blocker watch, a 15-minute completion supervisor, Einstein relaying Gibson state every 30 minutes, overwatch unsticking lanes, and merge-on-green merging: 61 cron jobs across 16 Hermes profiles on one Mini. None of it noticed a dead coordinator lock for five days.
+
+**Why:** supervision layers that share the same blind spots add cost, not safety; an agent approving an agent's requests to act is the cross-vendor-review rule violated at the control level.
+
+**How to apply:** one coordinator, one reviewer of a different vendor, deterministic gates, and a human on the carve-outs. No agent approves another agent's permission prompts. A supervision job must name the failure it would catch that the gates would not; otherwise it is not added. Paused 2026-10-08: the four Neuro/Einstein dev-supervision jobs alongside Carmack. See [[process-scales-with-repo-health]].
+**Harness fix:** one coordinator, one reviewer of a different vendor, deterministic gates, and a human on the carve-outs. No agent approves another agent's permission prompts. A supervision job must name the failure it would catch that the gates would not; otherwise it is not added. Paused 2026-10-08: the four Neuro/Einstein dev-supervision jobs alongside Carmack. See [[process-scales-with-repo-health]].
+**Status:** intake 2026-10-08 from fleet memory `feedback_agents_approving_agents.md` (no sensor yet)
+**Tags:** #fleet #intake #merge #review
+
+## L-097 · 2026-09-30 · gate-template-private-org-repo
 **What happened:** An unmodified `ci/gibson-gate.yml` failed on its first run in a private, organization-owned adopter repo, before any real check ran. The gate job's "Fetch the PR base branch" step died with `could not read Username for 'https://github.com'`: checkout uses `persist-credentials: false`, and that `git fetch origin` carried no credentials. `security-fast` died with `missing gitleaks license`, because `gitleaks/gitleaks-action` requires a paid `GITLEAKS_LICENSE` secret on organization-owned repos. The adopter fixed both by hand (The-AIE/the-gibson#412).
 **Why:** the template was only ever exercised on public, user-owned repos, where anonymous fetches succeed and the Action needs no license. `test-integrity-resolve` already authenticated its fetches, so the gap was a single step, and no sensor compared the jobs.
 **Harness fix:** the gate job's base fetch authenticates with the job token through a per-command `extraheader` (masked, never written to `.git/config`) and runs before `npm ci`, so no PR-head code has executed while the token is in the step environment. gitleaks runs as the pinned, SHA-256-verified MIT CLI, scoped with `--log-opts` to the PR's commits: the CLI default is every branch's full history, which review caught failing on an unrelated branch's old secret, re-creating the red-on-adoption failure. Both range ends are proven present with `git cat-file -e` first, because gitleaks exits 0 after scanning 0 commits when a range end is missing (second review round). `scripts/tests/ci-conventions.test.sh` sections (i) and (j) fail on any `gitleaks/gitleaks-action` use, on a gitleaks scan without `--log-opts` or without a range-presence proof, and on an unauthenticated gate-job fetch or a gate-job token visible at or after `npm ci` (step or job-level env); mutations 40–49 prove each fires.

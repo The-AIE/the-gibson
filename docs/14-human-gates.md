@@ -9,9 +9,8 @@ nav_order: 14
 
 > **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
 
-> 🙂 **In plain English:** There are exactly sixteen written reasons the crew may
-> interrupt you — money, going live, private data, and similar owner decisions.
-> Everything else is the crew's problem to solve without waking you.
+> 🙂 **In plain English:** The crew stops for you on sixteen conditions: money,
+> going live, private data, and similar owner decisions. It handles the rest.
 
 The closed stop list lives in [`AGENTS.md`](../AGENTS.md). This page restates
 those G1–G16 IDs for explanation and history only; it is not the operative

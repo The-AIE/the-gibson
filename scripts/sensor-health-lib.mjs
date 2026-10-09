@@ -62,9 +62,10 @@ export const REVIEW_EVIDENCE_EVENTS = Object.freeze([
   "schedule",
 ]);
 export const REVIEW_EVIDENCE_WINDOW_DAYS = 1;
+export const SENSOR_HEALTH_SELF_PATH = ".github/workflows/sensor-health.yml";
 export const REQUIRED_REPO_OWNED_PATHS = Object.freeze([
   ".github/workflows/gibson-self-gate.yml",
-  ".github/workflows/sensor-health.yml",
+  SENSOR_HEALTH_SELF_PATH,
   REVIEW_EVIDENCE_WORKFLOW_PATH,
 ]);
 export const PAGES_WORKFLOW_PATH = "dynamic/pages/pages-build-deployment";
@@ -1086,6 +1087,23 @@ function classifyWindowed({ name, path, policy, runs, ctx, allowBlind }) {
       state: STATES.OK,
       reasonClass: null,
       detail: `last green ${String(latest.updated_at).slice(0, 10)}`,
+      run: latest,
+    });
+  }
+  if (path === SENSOR_HEALTH_SELF_PATH && latest.conclusion === "failure") {
+    // The sensor-health workflow fails on purpose whenever any OTHER row has a finding,
+    // so grading this path by its own conclusion has a fixed point at FAILING: one red
+    // run makes the next run red forever (main was red 2026-10-01 → 10-08 for exactly
+    // this reason; Gibson L-092). For the self path, freshness means "a scheduled run
+    // completed inside the window". Findings are the other rows; a crash is published
+    // as UNKNOWN by the runner (L-087), never inferred from this row's conclusion.
+    return rowResult({
+      name,
+      path,
+      mode: policy.mode,
+      state: STATES.OK,
+      reasonClass: null,
+      detail: `self-run completed ${String(latest.updated_at).slice(0, 10)} (findings are reported by the other rows, not by this run's conclusion)`,
       run: latest,
     });
   }

@@ -62,10 +62,28 @@
       ]
     },
     {
+      "login": "aie-independent-review[bot]",
+      "appSlug": "aie-independent-review",
+      "appId": 5189740,
+      "vendor": "independent",
+      "roles": [
+        "reviewer"
+      ]
+    },
+    {
       "login": "mrhinkle",
       "appSlug": null,
       "appId": null,
       "vendor": "owner",
+      "roles": [
+        "author"
+      ]
+    },
+    {
+      "login": "dmessing",
+      "appSlug": null,
+      "appId": null,
+      "vendor": "human",
       "roles": [
         "author"
       ]
