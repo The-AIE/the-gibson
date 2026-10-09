@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # claim-provenance.test.sh — process sensors for the report-only reservation reader (#273)
 set -uo pipefail
+# #467: claim.sh refuses an unvendored reservation; tests claim as claude.
+export GIBSON_AGENT_VENDOR="${GIBSON_AGENT_VENDOR:-claude}"
 
 export GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-gibson-sensor}"
 export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-sensor@gibson.invalid}"

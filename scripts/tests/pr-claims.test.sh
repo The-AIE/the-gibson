@@ -31,6 +31,8 @@
 # USAGE
 #   scripts/tests/pr-claims.test.sh
 set -uo pipefail
+# #467: claim.sh refuses an unvendored reservation; tests claim as claude.
+export GIBSON_AGENT_VENDOR="${GIBSON_AGENT_VENDOR:-claude}"
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PC="$SCRIPT_DIR/../pr-claims.sh"
