@@ -135,6 +135,13 @@ expect "'none' findings list passes" "$ROOT/none.md" 0 "clean"
 expect "verdict not last fails" "$ROOT/verdict-not-last.md" 1 "not the final line"
 expect "missing verdict fails" "$ROOT/no-verdict.md" 1 "missing VERDICT"
 
+# Entry guard must survive symlinked invocation paths (macOS /var -> /private/var).
+ln -s "$ROOT" "$ROOT/../gibson-rfl-link.$$" 2>/dev/null
+LINK="$ROOT/../gibson-rfl-link.$$"
+out=$(node "$SENSOR" --file "$LINK/no-trigger.md" 2>&1); rc=$?
+rm -f "$LINK"
+[[ "$rc" -eq 1 ]] && ok "linter runs when the fixture path is a symlink" || bad "symlinked path rc=$rc: $out"
+
 # Usage / config errors exit 2.
 node "$SENSOR" --file "$ROOT/does-not-exist.md" >/dev/null 2>&1; rc=$?
 [[ "$rc" -eq 2 ]] && ok "unreadable input exits 2" || bad "unreadable input rc=$rc want 2"
@@ -156,8 +163,8 @@ if cmp -s "$SENSOR" "$MUT/scripts/review-findings-lint.mjs"; then
   bad "mutation did not apply (trigger check line changed?)"
 else
   out=$(SENSOR_UNDER_TEST="$MUT/scripts/review-findings-lint.mjs" node "$MUT/scripts/review-findings-lint.mjs" --file "$ROOT/no-trigger.md" 2>&1); rc=$?
-  [[ "$rc" -eq 0 ]] && ok "mutation (trigger check removed) is caught by the no-trigger fixture" \
-    || bad "mutant still fails the no-trigger fixture (rc=$rc): $out"
+  [[ "$rc" -eq 0 && "$out" == *"clean"* ]] && ok "mutation (trigger check removed) is caught by the no-trigger fixture" \
+    || bad "mutant did not report clean (rc=$rc): $out"
 fi
 
 echo
