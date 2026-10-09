@@ -146,9 +146,8 @@ the point:
 2. **You approve a Blueprint** you can actually read.
 3. **The crew builds in small pieces**, each tested, security-checked, and
    clicked through like a real user before you ever see it.
-4. **You make only owner decisions** — money, going live, customer data. There
-   are exactly sixteen reasons the crew is allowed to interrupt you, written
-   down in [one page](docs/14-human-gates.md).
+4. **You make only owner decisions** — money, going live, customer data. The
+   crew stops for you on [sixteen conditions](docs/14-human-gates.md).
 5. **It keeps getting better after launch** — monthly checkups, speed and
    security watching, and a crew that learns from every mistake permanently.
 
