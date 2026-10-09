@@ -221,14 +221,31 @@ function quotedGitPathEnd(s, start) {
 }
 
 // Newline-delimited rename/path field. Git C-quotes each unusual path
-// independently (`"old\\tname" => "new\\tname"`); classify on the destination.
+// independently (`"old\\tname" => "new\\tname"`), and either side of a
+// rename may be quoted or plain; classify on the destination. A fully
+// C-quoted single path is returned as-is after unquoting: a decoded name that
+// happens to contain " => " or braces is a filename, not rename syntax
+// (Grok review of #398).
+function decodeSingleTextPath(p) {
+  if (p.startsWith('"')) {
+    if (quotedGitPathEnd(p, 0) === p.length) return unquoteGitPath(p);
+    return p;
+  }
+  return p.replace(/\{[^{}]* => ([^{}]*)\}/g, "$1").replace(/\/\//g, "/");
+}
 function decodeNumstatTextPath(path) {
-  const firstEnd = quotedGitPathEnd(path, 0);
-  if (firstEnd > 0 && path.startsWith(" => ", firstEnd)) {
-    const dest = path.slice(firstEnd + 4);
+  if (path.startsWith('"')) {
+    const firstEnd = quotedGitPathEnd(path, 0);
+    if (firstEnd === path.length) return unquoteGitPath(path);
+    if (firstEnd > 0 && path.startsWith(" => ", firstEnd)) return decodeSingleTextPath(path.slice(firstEnd + 4));
+    return path;
+  }
+  // Plain source; a quoted destination starts at the first ` => "`.
+  const q = path.indexOf(' => "');
+  if (q >= 0) {
+    const dest = path.slice(q + 4);
     if (quotedGitPathEnd(dest, 0) === dest.length) return unquoteGitPath(dest);
   }
-  if (path.startsWith('"')) path = unquoteGitPath(path);
   return path.replace(/\{[^{}]* => ([^{}]*)\}/g, "$1").replace(/^.* => /, "").replace(/\/\//g, "/");
 }
 

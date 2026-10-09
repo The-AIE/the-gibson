@@ -126,6 +126,22 @@ node -e '
   if (j.largest[0].path !== "docs/café.md" || j.byClass.docs.files !== 1 || j.metrics.productFiles !== 0) { console.error(j.largest, j.byClass); process.exit(1); }
 ' "$out" && ok "C-quoted text path decodes to docs/café.md and counts as docs" || bad "quoted path: rc=$rc $out"
 
+# --- text mode: one-sided quoting and a quoted single path that contains " => "
+# (Grok review of #398): `plain => "quoted"` classifies the quoted destination,
+# `"quoted" => plain` classifies the plain destination, and a fully C-quoted
+# single path whose decoded name contains " => " is a filename, not a rename.
+printf '4%s0%ssrc/old.ts => "docs/caf\\303\\251.md"\n4%s0%s"docs/caf\\303\\251.md" => src/old.ts\n4%s0%s"notes => caf\\303\\251.md"\n' \
+  "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/quoted-one-sided.txt"
+out=$(run_sensor "$TMP/quoted-one-sided.txt" --format json 2>&1); rc=$?
+node -e '
+  const j = JSON.parse(process.argv[1]);
+  const paths = j.largest.map(f => f.path).sort();
+  const want = ["docs/café.md", "notes => café.md", "src/old.ts"].sort();
+  if (JSON.stringify(paths) !== JSON.stringify(want)) { console.error(paths, want); process.exit(1); }
+  const byPath = Object.fromEntries(j.largest.map(f => [f.path, f]));
+  if (byPath["docs/café.md"].class !== "docs" || byPath["notes => café.md"].class !== "docs" || byPath["src/old.ts"].class === "docs") { console.error(j.largest); process.exit(1); }
+' "$out" && ok "one-sided quoted renames classify the destination; a quoted name containing ' => ' stays a single path" || bad "one-sided quoting: rc=$rc $out"
+
 # --- text mode: C-quoted rename decodes both sides and classifies the destination
 # Git emits `"old\\tname" => "new\\tname"` (each unusual path quoted independently).
 # Treating the whole field as one quoted path would keep the source and misclassify.
