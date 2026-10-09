@@ -5,7 +5,7 @@
 ## Sub-features
 
 - `evidence-suite` proves the resolution rules offline (vendors, unvendored commits, same-vendor rejection, stale heads).
-- `evidence-help` prints usage.
+- `evidence-help` prints usage on stderr and exits 2.
 
 ## How to get to it (user POV)
 
@@ -15,7 +15,7 @@
 
 Preconditions: doctor is ok.
 
-- **Usage.** `capture.sh evidence help -- node scripts/pr-review-evidence.mjs --help`. Exit `0`; `.out` starts with `pr-review-evidence.mjs`.
+- **Usage.** `capture.sh evidence help -- node scripts/pr-review-evidence.mjs --help`. Exit `2` (this script treats `--help` as a usage error); `.err` starts with `pr-review-evidence.mjs: help` and contains `usage:`.
 - **Suite.** `capture.sh evidence suite -- bash scripts/tests/pr-review-evidence.test.sh`. Exit `0`; the last line ends `0 failed`.
 
 ## Gotchas
