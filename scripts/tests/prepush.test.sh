@@ -43,7 +43,7 @@ if (a.some((x) => x.startsWith("--"))) { console.error(`unknown flag: ${a[0]}`);
 EOF
   mkdir -p "$d/playbooks/recipes"
   printf '# builder\n' > "$d/playbooks/builder.md"
-  printf '# playbook-sha256: %s\n' "$(shasum -a 256 "$d/playbooks/builder.md" | awk '{print $1}')" > "$d/playbooks/recipes/builder.yaml"
+  printf '# playbook: playbooks/builder.md\n# playbook-sha256: %s\n' "$(shasum -a 256 "$d/playbooks/builder.md" | awk '{print $1}')" > "$d/playbooks/recipes/builder.yaml"
   git -C "$d" init -q -b main && git -C "$d" add -A && git -C "$d" commit -q -m base
   echo "$d"
 }
@@ -87,6 +87,15 @@ d=$(make_repo recipedrift)
 printf '# builder changed after the pin\n' > "$d/playbooks/builder.md"
 run_prepush "$d"
 [[ "$RC" -eq 1 && "$(last_line)" == *"FAILED recipe-hash"* ]] && ok "recipe pin drift: exit 1, name is last line" || bad "recipedrift rc=$RC: $OUT"
+
+d=$(make_repo recipegone)
+rm -f "$d/playbooks/builder.md"
+run_prepush "$d"
+[[ "$RC" -eq 1 && "$(last_line)" == *"FAILED recipe-hash"* ]] && ok "recipe whose playbook is missing is reported, not skipped" || bad "recipegone rc=$RC: $OUT"
+d=$(make_repo recipenopin)
+printf '# playbook: playbooks/builder.md\n' > "$d/playbooks/recipes/builder.yaml"
+run_prepush "$d"
+[[ "$RC" -eq 1 && "$(last_line)" == *"FAILED recipe-hash"* ]] && ok "recipe whose pin was removed is reported, not skipped" || bad "recipenopin rc=$RC: $OUT"
 
 # --- invalid --base is a usage error, not a silent all-clear ----------------
 d=$(make_repo badbase)
@@ -166,6 +175,28 @@ if [[ "$src_line" == *'$SCRIPT_DIR/../lib/convention-probes.sh'* && -f "$SCRIPT_
   ok "run-all.sh sources scripts/lib/convention-probes.sh by a path that exists and fails closed"
 else
   bad "run-all.sh does not source the probe lib correctly: $src_line"
+fi
+
+# Execute the gate's own blocks. The grep checks above prove references; these
+# run the real run-all.sh text (extracted by marker) against throwaway input.
+gate_block() { awk -v s="$2" -v e="$3" 'index($0,s)==1{on=1} on&&index($0,e)==1{exit} on{print}' "$1"; }
+bash_n_block=$(gate_block "$RUNALL" 'echo "== bash -n"' 'echo "== bash 3.2')
+mjs_block=$(gate_block "$RUNALL" 'echo "== mjs unknown-flag"' '# --- 3. injection scan')
+if [[ -z "$bash_n_block" || -z "$mjs_block" ]]; then
+  bad "could not extract the run-all.sh bash -n / mjs blocks (markers moved?)"
+else
+  gd="$ROOT/gateblocks"; mkdir -p "$gd/scripts"
+  printf 'if then fi (\n' > "$gd/broken.sh"; printf 'echo ok\n' > "$gd/fine.sh"
+  printf 'process.exit(0);\n' > "$gd/scripts/ignores.mjs"
+  # shellcheck disable=SC2034  # SH_FILES is read by the eval'd run-all.sh block
+  got=$(cd "$gd" && RED='' GRN='' OFF='' FAILED='' SH_FILES=$'broken.sh\nfine.sh' && . "$REPO_ROOT/scripts/lib/convention-probes.sh" && eval "$bash_n_block" >/dev/null 2>&1; echo "FAILED=[$FAILED]")
+  [[ "$got" == *"bash-n"* ]] && ok "executed run-all.sh bash -n block: a broken script in SH_FILES fails the gate" || bad "bash -n block did not fail on a broken script: $got"
+  # shellcheck disable=SC2034  # SH_FILES is read by the eval'd run-all.sh block
+  got=$(cd "$gd" && RED='' GRN='' OFF='' FAILED='' SH_FILES='fine.sh' && . "$REPO_ROOT/scripts/lib/convention-probes.sh" && eval "$bash_n_block" >/dev/null 2>&1; echo "FAILED=[$FAILED]")
+  [[ "$got" != *"bash-n"* ]] && ok "executed run-all.sh bash -n block: a clean list passes" || bad "bash -n block failed on a clean list: $got"
+  # shellcheck disable=SC2034  # colours are read by the eval'd run-all.sh block
+  got=$(cd "$gd" && RED='' GRN='' OFF='' FAILED='' && . "$REPO_ROOT/scripts/lib/convention-probes.sh" && eval "$mjs_block" >/dev/null 2>&1; echo "FAILED=[$FAILED]")
+  [[ "$got" == *"mjs-unknown-flag"* ]] && ok "executed run-all.sh mjs block: a script ignoring unknown flags fails the gate" || bad "mjs block did not fail: $got"
 fi
 
 # Mutation: drop a probe from a copy of run-all.sh; the drift check must fail.
