@@ -88,6 +88,11 @@ printf '# builder changed after the pin\n' > "$d/playbooks/builder.md"
 run_prepush "$d"
 [[ "$RC" -eq 1 && "$(last_line)" == *"FAILED recipe-hash"* ]] && ok "recipe pin drift: exit 1, name is last line" || bad "recipedrift rc=$RC: $OUT"
 
+d=$(make_repo recipenone)
+rm -f "$d/playbooks/recipes/builder.yaml"
+run_prepush "$d"
+[[ "$RC" -eq 1 && "$OUT" == *"NOT RUN  recipe-hash"* ]] && ok "no recipes found: NOT RUN, never a pass" || bad "recipenone rc=$RC: $OUT"
+
 d=$(make_repo recipegone)
 rm -f "$d/playbooks/builder.md"
 run_prepush "$d"
@@ -151,22 +156,43 @@ OUT=$(cd "$d" && PATH="$ROOT/nonode-bin" bash scripts/prepush.sh --base HEAD 2>&
 # --- drift: every probe prepush.sh runs is exercised by the gate ------------
 # gate_exercises FILE NEEDLE — the gate file must still contain the probe.
 gate_exercises() { grep -qF "$2" "$1"; }
-drift_check() {
-  local runall="$1" selfgate="$2" miss=""
-  for needle in cp_bash_n cp_mjs_unknown_flag; do
-    gate_exercises "$runall" "$needle" || miss="$miss $needle"
-  done
-  gate_exercises "$REPO_ROOT/scripts/tests/goose-recipes.test.sh" cp_recipe_hash_drift || miss="$miss cp_recipe_hash_drift"
-  gate_exercises "$selfgate" "scripts/sensor-reachability.mjs" || miss="$miss sensor-reachability"
-  [[ -z "$miss" ]] || { echo "not exercised by the gate:$miss"; return 1; }
-}
 RUNALL="$REPO_ROOT/scripts/tests/run-all.sh"
 SELFGATE="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
-for needle in cp_bash_n cp_mjs_unknown_flag cp_recipe_hash_all "scripts/sensor-reachability.mjs"; do
-  grep -qF "$needle" "$REPO_ROOT/scripts/prepush.sh" "$REPO_ROOT/scripts/lib/convention-probes.sh" \
-    || bad "drift list rot: '$needle' is no longer referenced by prepush.sh or its lib"
-done
-if out=$(drift_check "$RUNALL" "$SELFGATE"); then ok "every prepush probe is exercised by run-all.sh or the self-gate"; else bad "drift: $out"; fi
+GOOSE="$REPO_ROOT/scripts/tests/goose-recipes.test.sh"
+# probe name -> "gate file|needle". Every probe prepush.sh runs must appear here,
+# and the needle must still be in that gate file.
+probe_gate() {
+  case "$1" in
+    sensor-reachability) echo "$SELFGATE|scripts/sensor-reachability.mjs" ;;
+    mjs-unknown-flag)    echo "$RUNALL|cp_mjs_unknown_flag" ;;
+    bash-n)              echo "$RUNALL|cp_bash_n" ;;
+    recipe-hash)         echo "$GOOSE|cp_recipe_hash_drift" ;;
+    *) return 1 ;;
+  esac
+}
+# discover_probes FILE — names of the non-test run_probe calls in prepush.sh.
+discover_probes() { grep -E '^[[:space:]]*run_probe [a-z][a-z-]* ' "$1" | awk '{print $2}'; }
+drift_check() {
+  local prepush="$1" runall_override="${2:-}" name spec gfile needle bad="" n=0
+  for name in $(discover_probes "$prepush"); do
+    n=$((n + 1))
+    spec=$(probe_gate "$name") || { bad="$bad unmapped-probe:$name"; continue; }
+    gfile="${spec%%|*}"; needle="${spec#*|}"
+    [[ -n "$runall_override" && "$gfile" == "$RUNALL" ]] && gfile="$runall_override"
+    gate_exercises "$gfile" "$needle" || bad="$bad $name"
+  done
+  [[ "$n" -ge 4 ]] || bad="$bad discovered-only-$n-probes"
+  [[ -z "$bad" ]] || { echo "not exercised by the gate:$bad"; return 1; }
+}
+if out=$(drift_check "$REPO_ROOT/scripts/prepush.sh"); then ok "every probe prepush.sh runs (discovered, not listed) is exercised by the gate"; else bad "drift: $out"; fi
+
+# A probe added to prepush.sh with no gate mapping must fail the drift check.
+{ cat "$REPO_ROOT/scripts/prepush.sh"; printf 'run_probe new-check true\n'; } > "$ROOT/prepush.mutant"
+if drift_check "$ROOT/prepush.mutant" >/dev/null; then
+  bad "mutation (new unmapped probe added to prepush.sh) was NOT caught"
+else
+  ok "mutation (new unmapped probe added to prepush.sh) is caught by discovery"
+fi
 
 # The gate must actually load the lib it calls: run-all.sh resolves SCRIPT_DIR to
 # scripts/tests, so the source line must reach ../lib and that file must exist.
@@ -201,7 +227,7 @@ fi
 
 # Mutation: drop a probe from a copy of run-all.sh; the drift check must fail.
 sed 's/cp_mjs_unknown_flag/cp_removed/g' "$RUNALL" > "$ROOT/run-all.mutant"
-if drift_check "$ROOT/run-all.mutant" "$SELFGATE" >/dev/null; then
+if drift_check "$REPO_ROOT/scripts/prepush.sh" "$ROOT/run-all.mutant" >/dev/null; then
   bad "mutation (probe removed from run-all.sh) was NOT caught by the drift check"
 else
   ok "mutation (probe removed from run-all.sh) is caught by the drift check"
