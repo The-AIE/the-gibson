@@ -59,15 +59,19 @@ cp_recipe_hash_drift() {
   return 1
 }
 
-# cp_recipe_hash_all — check every playbooks/recipes/X.yaml that carries a pin
-# and has a playbooks/X.md. Prints one line per drifted recipe.
+# cp_recipe_hash_all — every playbooks/recipes/X.yaml that declares "# playbook: P"
+# must have P present and a matching "# playbook-sha256:" pin; recipes with no
+# "# playbook:" header (e.g. red-team) are out of scope. A missing playbook or a
+# removed pin is reported, never skipped. Prints one line per problem.
 cp_recipe_hash_all() {
-  local r name out rc worst=0
+  local r name pb out rc worst=0
   for r in playbooks/recipes/*.yaml; do
     [[ -f "$r" ]] || continue
     name=$(basename "$r" .yaml)
-    [[ -f "playbooks/$name.md" ]] && grep -q '^# playbook-sha256:' "$r" || continue
-    out=$(cp_recipe_hash_drift "$r" "playbooks/$name.md"); rc=$?
+    pb=$(awk '/^# playbook: /{print $3; exit}' "$r")
+    [[ -n "$pb" ]] || continue
+    if [[ ! -f "$pb" ]]; then echo "$name: declared playbook $pb is missing"; worst=1; continue; fi
+    out=$(cp_recipe_hash_drift "$r" "$pb"); rc=$?
     case "$rc" in
       0) ;;
       2) echo "$name: cannot hash (need shasum or sha256sum)"; [[ "$worst" -lt 2 ]] && worst=2 ;;
