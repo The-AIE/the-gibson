@@ -248,11 +248,15 @@ lane-bot identity exists and the trailer path can be retired.
 
 ## D-015 · 2026-10-09 · G12 is no longer a human gate: the Tier C floor is E3 plus required checks
 Decided (Mark, 2026-10-09, "Go with 1", after asking whether G12 survived D-014):
-Tier C changes (the classes G12 names: money, auth, consent, PII, security,
-schema) require **E3 (cross-vendor independent review, exact-head bound) plus the
-repository's required checks**, and no owner review, approval, attestation, label
-or merge action. This supersedes the clause of D-011 that added "the repository
-owner's own merge action on top". Everything else in D-011 stands: E3 is still a
+for Tier C as AGENTS.md defines it (rule 7 and the Risk tiers table: money, auth,
+consent/PII, security boundaries, schema, incident alerting, production data) the
+human merge gate G12 is retired. A Tier C change requires **E3 (cross-vendor
+independent review, exact-head bound) plus the repository's required checks**, and
+no owner review, approval, attestation, label or merge action. This supersedes the
+clause of D-011 that added "the repository owner's own merge action on top". No
+class is dropped from Tier C: only the human merge gate is retired for it.
+Adversarial review (fan-out), serialization of stateful changes and every other
+Tier C requirement stand. Everything else in D-011 stands too: E3 is still a
 claim, not proof, so the merging party re-runs the checks and reads the diff
 before merging on it; E4 (a named human reading the diff) remains rejected. The
 identifier G12 stays as a stable name for "Tier C review-independence floor" so
@@ -263,8 +267,7 @@ What this does NOT change, stated so a reader cannot skip it:
   pushes nobody asked for), exactly as D-014 left them: they govern what an agent
   may do, not who signs a review.
 - Delivery control (AGENTS.md "Delivery control (binding)"): audit, then
-  dry-run, then explicit human apply. It is not one of the classes G12 names and
-  is not touched here.
+  dry-run, then explicit human apply. It is a separate rule and is not touched.
 - The ratchet (AGENTS.md "Self-modification bounds"): changes to human gates,
   Tier definitions or hard-fail security layers are Tier C and "may only loosen
   with the owner's sign-off". This record is itself such a loosening, because it
@@ -272,38 +275,52 @@ What this does NOT change, stated so a reader cannot skip it:
   ratchet requires for THIS change and no other. The ratchet clause is not
   amended here. How D-014 and that clause fit together for future loosenings is
   OPEN: D-014 and AGENTS.md read differently, and AGENTS.md stays the authority
-  until an amendment to it merges; the question is listed for the inventory below. Until it is decided, any further loosening of a human
-  gate, Tier definition or hard-fail security layer still needs the owner's
-  sign-off as AGENTS.md says, and the amendments below may retire G12 as
-  described and nothing more.
+  until an amendment to it merges; the question is listed for the inventory
+  below. Until it is decided, any further loosening of a human gate, Tier
+  definition or hard-fail security layer still needs the owner's sign-off as
+  AGENTS.md says, and the amendments below may retire G12 as described and
+  nothing more.
 Merge operation for Tier C does not change: D-014 already clears every head on
 E3 plus checks. This record exists so the doctrine stops saying something the
 fleet does not do.
+Known places that still describe the human gate (found by search on 2026-10-09,
+not yet amended): AGENTS.md rule 7 (Tier C "gets ... a human merge gate (G12)"),
+the G12 line in the human-gates list, the Tier C row of the Risk tiers table
+("G12 human merge gate ... Min. E3 + owner merge (D-011)"), the release-role
+forbidden list ("merging Tier C/schema without G12"), and the pre-merge checklist
+line "Tier C / schema → G12 human approval recorded"; docs/06 (the Risk tiers
+table, "human merge gate", and its checklist line "Tier C / schema → human
+approval recorded (comment or approval from Mark)"); docs/14. The inventory in step 2 is the complete list.
 Amendment order (each lands separately, the existing text and sensors stand until
 its own change merges, none is done by this record):
 1. This record (memory-only).
-2. An inventory of every G12 reference (about 25 files: AGENTS.md, docs/14 and
-   siblings, the release playbook, the policy candidate, the authority sensors
-   and their fixtures, formal-review/digest/decision-ledger scripts) with the
-   proposed edit for each, plus the open D-014 versus ratchet contradiction.
-3. Doctrine text first (docs/14, AGENTS.md, playbooks/release.md), then each
-   authority sensor and fixture in the same pull request as the text it guards,
-   so no sensor is ever red against its own doctrine.
-4. #225 and #164 contracts rewritten to the D-015 model: no owner G12 event
-   evaluator, no owner-actor receipt, Tier C floor expressed as E3 + checks.
-Why: D-014 removed the owner from the loop but left D-011's owner merge action,
-docs/14's G12 human gate and #225's contract, which builds a validator for a G12
-event posted by the `mrhinkle` actor at the exact head. The chain #225A, #225B,
-#164, #140, #160 therefore waited on, and would have implemented, a signature
-nobody provides. The fleet card's rule applies: doctrine and operation must not
-disagree.
+2. An inventory of every G12 reference (about 25 files, including the authority
+   sensors and their fixtures, the policy candidate, and the formal-review,
+   digest and decision-ledger scripts) with the proposed edit for each, plus the
+   open D-014 versus ratchet question.
+3. Doctrine text first (AGENTS.md, docs/06, docs/14, playbooks/release.md), then
+   each authority sensor and fixture in the same pull request as the text it
+   guards, so no sensor is ever red against its own doctrine.
+4. The contracts that reference a human G12 event are rewritten to the D-015
+   model. #225's contract specifies a report-only offline evaluator for a G12
+   event comment posted by the `mrhinkle` actor (provider `github-human-owner`) at
+   the exact head, and says it preserves G12 as a human merge gate until its
+   Phase B; #164 is ordered after it. Whether #164, #140 and #160 carry their own
+   G12 requirements has not been checked and is part of the inventory.
+Why: D-014 removed the owner from the loop, but D-011's owner merge action,
+AGENTS.md's human merge gate for Tier C and #225's contract still describe an
+owner signature that nobody provides. The R0 milestone orders #225 Phase A, the
+#161 decision, #225 Phase B and #164 ahead of R1's #140 and #160, so a contract
+that encodes the owner signature sits at the head of that chain. The fleet card's
+rule applies: doctrine and operation must not disagree.
 Rejected: keeping G12 as a recorded but unenforced human gate (doctrine and
 operation would disagree, the stale-rule failure); a narrower human gate for
 money, consent and PII only (partly reverses D-014, which already rejected a
 schema-only owner class).
-Accepted risk: agents merge money, auth, PII, security and schema changes on one
-cross-vendor review. The floor must fail closed: with no E3 reviewer available
-the change waits, it does not drop to a lower level. Reviewer availability is the
+Accepted risk: agents merge money, auth, PII, security, schema, incident-alerting
+and production-data changes on one cross-vendor review, with adversarial review
+still required. The floor must fail closed: with no E3 reviewer available the
+change waits, it does not drop to a lower level. Reviewer availability is the
 live weakness (Grok stalled repeatedly on 2026-10-09; Codex has no reviewer
 identity, #470), so availability problems delay merges instead of weakening them.
 Revisit when: a Tier C change merged on E3 + checks causes an incident the owner
