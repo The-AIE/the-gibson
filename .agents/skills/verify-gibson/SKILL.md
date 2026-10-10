@@ -37,7 +37,7 @@ Run `scripts/prepush.sh` first on every change: it takes seconds and covers the 
 
 ## Evidence
 
-`capture.sh` writes `<label>.cmd`, `.out`, `.err` and `.rc` under `<git-common-dir>/gibson-verify-evidence/<run-id>/<feature-id>/`, in the shared `.git` directory of the repository (`git rev-parse --path-format=absolute --git-common-dir` prints it). That location is outside every worktree, so `git worktree remove` never deletes it, it is never committed, and cleanup must not touch it. `<run-id>` is `$VERIFY_RUN_ID` or a UTC timestamp. `capture.sh` refuses to overwrite: to repeat a recipe, use a new label or a new `VERIFY_RUN_ID`. The `<label>.lock` directory beside the files is the atomic claim that makes the refusal safe under concurrent runs; leave it in place. Proof standards:
+`capture.sh` writes `<label>.cmd` (the command, shell-quoted so it can be replayed exactly), `.out`, `.err` and `.rc` under `<git-common-dir>/gibson-verify-evidence/<run-id>/<feature-id>/`, in the shared `.git` directory of the repository (`git rev-parse --path-format=absolute --git-common-dir` prints it). That location is outside every worktree, so `git worktree remove` never deletes it, it is never committed, and cleanup must not touch it. `<run-id>` is `$VERIFY_RUN_ID` or a UTC timestamp. `capture.sh` refuses to overwrite: to repeat a recipe, use a new label or a new `VERIFY_RUN_ID`. The `<label>.lock` directory beside the files is the atomic claim that makes the refusal safe under concurrent runs; leave it in place. Proof standards:
 
 - Drive the real script on a real input, not a unit test of a copy. A unit suite counts only where the feature file says so.
 - Record the action and the result: the command, its exit code, and the line or file that shows the outcome.

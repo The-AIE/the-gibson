@@ -47,15 +47,19 @@ mkdir -p "$dir" || exit 2
 # Evidence is never overwritten. mkdir is atomic, so the lock directory is the claim:
 # of two concurrent captures with the same run-id/feature/label exactly one wins and
 # the other exits 2 before it writes anything. The marker is never removed.
-if [[ -e "$dir/$label.cmd" || -e "$dir/$label.out" || -e "$dir/$label.err" || -e "$dir/$label.rc" ]] \
+if [[ -e "$dir/$label.cmd" || -e "$dir/$label.out" || -e "$dir/$label.err" || -e "$dir/$label.rc" \
+      || -L "$dir/$label.cmd" || -L "$dir/$label.out" || -L "$dir/$label.err" || -L "$dir/$label.rc" ]] \
    || ! mkdir "$dir/$label.lock" 2>/dev/null; then
   echo "capture.sh: evidence already exists for $feature/$label in run $run_id; use a new label or VERIFY_RUN_ID" >&2
   exit 2
 fi
 
-printf '%s\n' "$*" > "$dir/$label.cmd"
+# Record the command shell-quoted, so the invocation can be replayed exactly.
+write_fail() { echo "capture.sh: could not write evidence ($1) under $dir; the run is NOT recorded" >&2; exit 2; }
+printf '%q ' "$@" > "$dir/$label.cmd" || write_fail cmd
+printf '\n' >> "$dir/$label.cmd" || write_fail cmd
 ( cd "$root" && "$@" ) > "$dir/$label.out" 2> "$dir/$label.err"
 rc=$?
-printf '%s\n' "$rc" > "$dir/$label.rc"
+printf '%s\n' "$rc" > "$dir/$label.rc" || write_fail rc
 echo "capture: $feature/$label exit=$rc evidence=$dir"
 exit "$rc"
