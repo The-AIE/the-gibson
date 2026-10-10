@@ -290,7 +290,9 @@ the G12 line in the human-gates list, the Tier C row of the Risk tiers table
 forbidden list ("merging Tier C/schema without G12"), and the pre-merge checklist
 line "Tier C / schema → G12 human approval recorded"; docs/06 (the Risk tiers
 table, "human merge gate", and its checklist line "Tier C / schema → human
-approval recorded (comment or approval from Mark)"); docs/14. The inventory in step 2 is the complete list.
+approval recorded (comment or approval from Mark)"); docs/14; and the GitHub
+milestone R0 description, which ends "Tier C/G12 and owner gates remain". The
+inventory in step 2 is the complete list.
 Amendment order (each lands separately, the existing text and sensors stand until
 its own change merges, none is done by this record):
 1. This record (memory-only).
@@ -302,17 +304,24 @@ its own change merges, none is done by this record):
    each authority sensor and fixture in the same pull request as the text it
    guards, so no sensor is ever red against its own doctrine.
 4. The contracts that reference a human G12 event are rewritten to the D-015
-   model. #225's contract specifies a report-only offline evaluator for a G12
+   model. What the sources say, so the rewrite targets the right text: #225
+   says Phase A "activates nothing" and that "Current G12 remains sole Tier-C
+   merge authority", and specifies a report-only offline evaluator for a G12
    event comment posted by the `mrhinkle` actor (provider `github-human-owner`) at
-   the exact head, and says it preserves G12 as a human merge gate until its
-   Phase B; #164 is ordered after it. Whether #164, #140 and #160 carry their own
-   G12 requirements has not been checked and is part of the inventory.
+   the exact head. #164 says to byte-preserve G12 "until B" and that "Only B's
+   owner-approved contract changes release authority". D-015 is Mark's owner
+   decision on that question for Tier C, so Phase B's contract is to be written
+   to D-015 and does not wait for a separate owner decision on the same point.
+   Whether #164, #140 and #160 carry other G12 requirements has not been checked
+   and is part of the inventory.
 Why: D-014 removed the owner from the loop, but D-011's owner merge action,
-AGENTS.md's human merge gate for Tier C and #225's contract still describe an
-owner signature that nobody provides. The R0 milestone orders #225 Phase A, the
-#161 decision, #225 Phase B and #164 ahead of R1's #140 and #160, so a contract
-that encodes the owner signature sits at the head of that chain. The fleet card's
-rule applies: doctrine and operation must not disagree.
+AGENTS.md's human merge gate for Tier C, the R0 milestone text ("Tier C/G12 and
+owner gates remain") and the #225 and #164 contracts still describe an owner
+signature that nobody provides. The R0 critical path runs #225 Phase A, the #161
+decision, #225 Phase B and #164, and the R1 milestone lists R0's #208, #225, #161
+and #164 as prerequisites of its own scope (#140, #160, #220, #96), so contracts
+that encode the owner signature sit on the path to 1.0. The fleet card's rule
+applies: doctrine and operation must not disagree.
 Rejected: keeping G12 as a recorded but unenforced human gate (doctrine and
 operation would disagree, the stale-rule failure); a narrower human gate for
 money, consent and PII only (partly reverses D-014, which already rejected a
@@ -321,8 +330,8 @@ Accepted risk: agents merge money, auth, PII, security, schema, incident-alertin
 and production-data changes on one cross-vendor review, with adversarial review
 still required. The floor must fail closed: with no E3 reviewer available the
 change waits, it does not drop to a lower level. Reviewer availability is the
-live weakness (Grok stalled repeatedly on 2026-10-09; Codex has no reviewer
-identity, #470), so availability problems delay merges instead of weakening them.
+live weakness (Grok stalled repeatedly on 2026-10-09; Codex is registered in
+config/review-evidence.v1.json with roles [author] only, #470), so availability problems delay merges instead of weakening them.
 Revisit when: a Tier C change merged on E3 + checks causes an incident the owner
 signature would plausibly have stopped; or Grok is the only E3 reviewer path for
 Tier C for more than a week; or the amendment sequence above exposes a sensor
