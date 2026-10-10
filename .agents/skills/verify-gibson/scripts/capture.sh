@@ -44,6 +44,11 @@ run_id="${VERIFY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$run_id" != *..* ]] || { echo "unknown flag: VERIFY_RUN_ID must match [A-Za-z0-9._-]+ with no dot-dot" >&2; exit 2; }
 dir="$common/gibson-verify-evidence/$run_id/$feature"
 mkdir -p "$dir" || exit 2
+# The resolved directory must really be inside the evidence root: a symlinked run-id or
+# feature directory must not redirect evidence elsewhere.
+evidence_root="$(cd "$common" && pwd -P)/gibson-verify-evidence"
+dir_real="$(cd "$dir" && pwd -P)" || exit 2
+[[ "$dir_real" == "$evidence_root/"* ]] || { echo "capture.sh: evidence path $dir resolves outside $evidence_root; refusing" >&2; exit 2; }
 # Evidence is never overwritten. mkdir is atomic, so the lock directory is the claim:
 # of two concurrent captures with the same run-id/feature/label exactly one wins and
 # the other exits 2 before it writes anything. The marker is never removed.
@@ -58,6 +63,8 @@ fi
 write_fail() { echo "capture.sh: could not write evidence ($1) under $dir; the run is NOT recorded" >&2; exit 2; }
 printf '%q ' "$@" > "$dir/$label.cmd" || write_fail cmd
 printf '\n' >> "$dir/$label.cmd" || write_fail cmd
+: > "$dir/$label.out" || write_fail out
+: > "$dir/$label.err" || write_fail err
 ( cd "$root" && "$@" ) > "$dir/$label.out" 2> "$dir/$label.err"
 rc=$?
 printf '%s\n' "$rc" > "$dir/$label.rc" || write_fail rc
