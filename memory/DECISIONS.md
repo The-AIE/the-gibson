@@ -245,3 +245,48 @@ labels as advisory (a label that does not hold is noise).
 Revisit when: a cross-vendor-reviewed change in a former carve-out class causes
 an incident the owner signature would plausibly have stopped, or when a Claude
 lane-bot identity exists and the trailer path can be retired.
+
+## D-015 · 2026-10-09 · G12 is no longer a human gate: the Tier C floor is E3 plus required checks
+Decided (Mark, 2026-10-09, "Go with 1", after asking whether G12 survived D-014):
+Tier C changes (money, auth, consent, PII, security, schema, delivery control)
+require **E3 (cross-vendor independent review, exact-head bound) plus the
+repository's required checks**, and no owner action of any kind. This supersedes
+the clause of D-011 that added "the repository owner's own merge action on top".
+Everything else in D-011 stands: E3 is still a claim, not proof, so the merging
+party re-runs the checks and reads the diff before merging on it; E4 (a named
+human reading the diff) remains rejected. The identifier G12 stays as a stable
+name for "Tier C review-independence floor" so existing sensors, receipts and
+issue text keep resolving until each is amended; it is no longer a human gate.
+Operation does not change: D-014 already clears every head this way. This record
+exists so the doctrine stops saying something the fleet does not do.
+Amendment order (each lands separately, the existing text and sensors stand until
+its own change merges, none is done by this record):
+1. This record (memory-only).
+2. An inventory of every G12 reference (about 25 files: AGENTS.md, docs/14 and
+   siblings, the release playbook, the policy candidate, the authority sensors
+   and their fixtures, formal-review/digest/decision-ledger scripts) with the
+   proposed edit for each.
+3. Doctrine text first (docs/14, AGENTS.md, playbooks/release.md), then each
+   authority sensor and fixture in the same pull request as the text it guards,
+   so no sensor is ever red against its own doctrine.
+4. #225 and #164 contracts rewritten to the D-015 model: no owner G12 event
+   evaluator, no owner-actor receipt, Tier C floor expressed as E3 + checks.
+Why: D-014 removed the owner from the loop but left D-011's owner merge action,
+docs/14's G12 human gate and #225's contract, which builds a validator for a G12
+event posted by the `mrhinkle` actor at the exact head. The chain #225A, #225B,
+#164, #140, #160 therefore waited on, and would have implemented, a signature
+nobody provides. Rule of the fleet card applies: doctrine and operation must not
+disagree.
+Rejected: keeping G12 as a recorded but unenforced human gate (doctrine and
+operation would disagree, the stale-rule failure); a narrower human gate for
+money, consent and PII only (partly reverses D-014, which already rejected a
+schema-only owner class).
+Accepted risk: agents merge money, auth, PII, security and schema changes on one
+cross-vendor review. The floor must fail closed: with no E3 reviewer available
+the change waits, it does not drop to a lower level. Reviewer availability is the
+live weakness (Grok stalled repeatedly on 2026-10-09; Codex has no reviewer
+identity, #470), so availability problems delay merges instead of weakening them.
+Revisit when: a Tier C change merged on E3 + checks causes an incident the owner
+signature would plausibly have stopped; or Grok is the only E3 reviewer path for
+Tier C for more than a week; or the amendment sequence above exposes a sensor
+that cannot be reconciled without weakening it.
