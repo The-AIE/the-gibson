@@ -248,24 +248,44 @@ lane-bot identity exists and the trailer path can be retired.
 
 ## D-015 · 2026-10-09 · G12 is no longer a human gate: the Tier C floor is E3 plus required checks
 Decided (Mark, 2026-10-09, "Go with 1", after asking whether G12 survived D-014):
-Tier C changes (money, auth, consent, PII, security, schema, delivery control)
-require **E3 (cross-vendor independent review, exact-head bound) plus the
-repository's required checks**, and no owner action of any kind. This supersedes
-the clause of D-011 that added "the repository owner's own merge action on top".
-Everything else in D-011 stands: E3 is still a claim, not proof, so the merging
-party re-runs the checks and reads the diff before merging on it; E4 (a named
-human reading the diff) remains rejected. The identifier G12 stays as a stable
-name for "Tier C review-independence floor" so existing sensors, receipts and
-issue text keep resolving until each is amended; it is no longer a human gate.
-Operation does not change: D-014 already clears every head this way. This record
-exists so the doctrine stops saying something the fleet does not do.
+Tier C changes (the classes G12 names: money, auth, consent, PII, security,
+schema) require **E3 (cross-vendor independent review, exact-head bound) plus the
+repository's required checks**, and no owner review, approval, attestation, label
+or merge action. This supersedes the clause of D-011 that added "the repository
+owner's own merge action on top". Everything else in D-011 stands: E3 is still a
+claim, not proof, so the merging party re-runs the checks and reads the diff
+before merging on it; E4 (a named human reading the diff) remains rejected. The
+identifier G12 stays as a stable name for "Tier C review-independence floor" so
+existing sensors, receipts and issue text keep resolving until each is amended.
+What this does NOT change, stated so a reader cannot skip it:
+- The hard blocks on ACTIONS in `~/.claude/FLEET.md` (secrets and keys, billing
+  and pricing, customer-facing legal pages, destructive operations, commits and
+  pushes nobody asked for), exactly as D-014 left them: they govern what an agent
+  may do, not who signs a review.
+- Delivery control (AGENTS.md "Delivery control (binding)"): audit, then
+  dry-run, then explicit human apply. It is not one of the classes G12 names and
+  is not touched here.
+- The ratchet (AGENTS.md "Self-modification bounds"): changes to human gates,
+  Tier definitions or hard-fail security layers are Tier C and "may only loosen
+  with the owner's sign-off". This record is itself such a loosening, because it
+  retires a human gate, and Mark's instruction above is the owner sign-off the
+  ratchet requires for THIS change and no other. The ratchet clause is not
+  amended here. How D-014 and that clause fit together for future loosenings is
+  OPEN: D-014 and AGENTS.md read differently, and AGENTS.md stays the authority
+  until an amendment to it merges; the question is listed for the inventory below. Until it is decided, any further loosening of a human
+  gate, Tier definition or hard-fail security layer still needs the owner's
+  sign-off as AGENTS.md says, and the amendments below may retire G12 as
+  described and nothing more.
+Merge operation for Tier C does not change: D-014 already clears every head on
+E3 plus checks. This record exists so the doctrine stops saying something the
+fleet does not do.
 Amendment order (each lands separately, the existing text and sensors stand until
 its own change merges, none is done by this record):
 1. This record (memory-only).
 2. An inventory of every G12 reference (about 25 files: AGENTS.md, docs/14 and
    siblings, the release playbook, the policy candidate, the authority sensors
    and their fixtures, formal-review/digest/decision-ledger scripts) with the
-   proposed edit for each.
+   proposed edit for each, plus the open D-014 versus ratchet contradiction.
 3. Doctrine text first (docs/14, AGENTS.md, playbooks/release.md), then each
    authority sensor and fixture in the same pull request as the text it guards,
    so no sensor is ever red against its own doctrine.
@@ -275,7 +295,7 @@ Why: D-014 removed the owner from the loop but left D-011's owner merge action,
 docs/14's G12 human gate and #225's contract, which builds a validator for a G12
 event posted by the `mrhinkle` actor at the exact head. The chain #225A, #225B,
 #164, #140, #160 therefore waited on, and would have implemented, a signature
-nobody provides. Rule of the fleet card applies: doctrine and operation must not
+nobody provides. The fleet card's rule applies: doctrine and operation must not
 disagree.
 Rejected: keeping G12 as a recorded but unenforced human gate (doctrine and
 operation would disagree, the stale-rule failure); a narrower human gate for
