@@ -291,8 +291,8 @@
       "id": "ri.tier-c",
       "description": "Tier C review floor (D-015): E3 at the exact head + required checks.",
       "tierId": "C",
-      "minimumRelationship": "human-gate",
-      "preferredRelationship": "human-gate",
+      "minimumRelationship": "cross-vendor",
+      "preferredRelationship": "cross-vendor",
       "humanGateId": "G12"
     }
   ],

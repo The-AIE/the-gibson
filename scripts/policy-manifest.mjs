@@ -1280,11 +1280,12 @@ const RI_SEMANTIC_PINS = {
     code: "E_RI_TIER_C",
     expect: {
       tierId: "C",
-      minimumRelationship: "human-gate",
-      preferredRelationship: "human-gate",
+      minimumRelationship: "cross-vendor",
+      preferredRelationship: "cross-vendor",
       humanGateId: "G12",
     },
-    // Tier C is the human-gate floor; generatorMustNotEqual is Law 5's pin.
+    // Tier C floor is E3 cross-vendor at the exact head + required checks (D-015).
+    // generatorMustNotEqual is Law 5's pin.
     forbid: ["generatorMustNotEqual"],
   },
 };
@@ -1944,6 +1945,7 @@ export function validateCandidate(candidate, options = {}) {
         "different-agent",
         "independent-approve",
         "cross-vendor-preferred",
+        "cross-vendor",
         "human-gate",
       ];
       if (!allowedMin.includes(/** @type {string} */ (r.minimumRelationship))) {
