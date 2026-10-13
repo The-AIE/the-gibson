@@ -193,8 +193,8 @@ cp "$REPO_ROOT/AGENTS.md" "$SANDBOX/AGENTS.md"
 cp "$REPO_ROOT/config/policy/mandatory-read-chain.v1.json" "$SANDBOX/config/policy/mandatory-read-chain.v1.json"
 cp "$REPO_ROOT/config/policy/rule-migration-audit.v1.json" "$SANDBOX/config/policy/rule-migration-audit.v1.json"
 cp "$REPO_ROOT/config/policy/role-contracts.v1.json" "$SANDBOX/config/policy/role-contracts.v1.json"
-cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
-  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/config/policy/gibson-core-v1.json" \
+  "$SANDBOX/config/policy/gibson-core-v1.json"
 cp "$REPO_ROOT/README.md" "$SANDBOX/README.md"
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
@@ -242,7 +242,7 @@ cp "$SANDBOX/AGENTS.md" "$SANDBOX/AGENTS.md.bak"
 
 refresh_sandbox_agents_digest() {
   AGENTS_PATH="$SANDBOX/AGENTS.md" \
-    CANDIDATE_PATH="$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json" \
+    CANDIDATE_PATH="$SANDBOX/config/policy/gibson-core-v1.json" \
     node --input-type=module -e '
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -391,8 +391,8 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "The policy-manifest candidate",
-  "Enumerations of gates, roles, tiers, stages, and forbidden pairs are canonical in `config/policy/candidates/gibson-core-v1.candidate.json`. The policy-manifest candidate"
+  "sole always-mandatory",
+  "Enumerations of gates, roles, tiers, stages, and forbidden pairs are canonical in `config/policy/candidates/gibson-core-v1.candidate.json`. sole always-mandatory"
 );
 fs.writeFileSync(p,t);
 ' "$SANDBOX/AGENTS.md"
@@ -406,15 +406,35 @@ else
 fi
 cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
 
+# Ratchet sentence must stay. Loosening the owner's sign-off is RED.
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("loosen with the owner'\''s sign-off")) process.exit(2);
+t=t.replace("loosen with the owner'\''s sign-off", "loosen freely");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_BINDING_FAMILY' >/dev/null; then
+  ok "mutation: loosened ratchet sentence fails"
+else
+  bad "mutation loosened ratchet (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "mutation: ratchet sentence restored GREEN" || bad "ratchet restore (rc=$rc): $out"
+
 # Candidate activated=true
 node -e '
 const fs=require("fs");
 const p=process.argv[1];
 const c=JSON.parse(fs.readFileSync(p,"utf8"));
-c.activated=true;
-c.authority="active";
+c.activated=false;
+c.authority="report-only";
+c.status="candidate";
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+' "$SANDBOX/config/policy/gibson-core-v1.json"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CANDIDATE_PREACTIVATION' >/dev/null; then
   echo "  planted candidate-activated failure line:"
@@ -423,8 +443,8 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CANDIDATE_PREACTIVATION' >/dev/nul
 else
   bad "mutation activated candidate (rc=$rc): $out"
 fi
-cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
-  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/config/policy/gibson-core-v1.json" \
+  "$SANDBOX/config/policy/gibson-core-v1.json"
 
 # Omit role-playbook disclosure
 node -e '
@@ -804,7 +824,7 @@ for (const s of c.provenance.sources) {
   if (String(s.path).startsWith("docs/")) s.role = "canonical-doctrine";
 }
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+' "$SANDBOX/config/policy/gibson-core-v1.json"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_PROVENANCE_ROLE' >/dev/null; then
   echo "  planted candidate-canonical-doctrine failure line:"
@@ -813,8 +833,8 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_PROVENANCE_ROLE' >/dev/null; then
 else
   bad "fixture candidate canonical-doctrine (rc=$rc): $out"
 fi
-cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
-  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/config/policy/gibson-core-v1.json" \
+  "$SANDBOX/config/policy/gibson-core-v1.json"
 
 # --- default builder cannot skip playbooks/builder.md ---
 node -e '
@@ -863,7 +883,7 @@ prove_legacy_green_structured_red() {
   local family="$3"
   local report
   report=$(
-    SEM="$SEM" AGENTS="$SANDBOX/AGENTS.md" CAND="$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json" \
+    SEM="$SEM" AGENTS="$SANDBOX/AGENTS.md" CAND="$SANDBOX/config/policy/gibson-core-v1.json" \
     FAMILY="$family" EXPECTED_CODE="$expected_code" \
     node --input-type=module -e '
 import { readFileSync } from "node:fs";
@@ -1242,7 +1262,7 @@ const live=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
 const fix=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
 live.provenance = fix.provenance;
 fs.writeFileSync(process.argv[1], JSON.stringify(live,null,2)+"\n");
-' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json" \
+' "$SANDBOX/config/policy/gibson-core-v1.json" \
   "$REPO_ROOT/config/policy/fixtures/authority-contradictions/candidate-canonical-doctrine.json"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_PROVENANCE_ROLE' >/dev/null; then
@@ -1252,8 +1272,8 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_PROVENANCE_ROLE' >/dev/null; then
 else
   bad "fixture unused candidate-canonical-doctrine (rc=$rc): $out"
 fi
-cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
-  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/config/policy/gibson-core-v1.json" \
+  "$SANDBOX/config/policy/gibson-core-v1.json"
 
 echo "# provenance path-role mutations"
 node -e '
@@ -1262,15 +1282,15 @@ const p=process.argv[1];
 const c=JSON.parse(fs.readFileSync(p,"utf8"));
 c.provenance.sources = c.provenance.sources.filter((s) => s.path !== "AGENTS.md");
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+' "$SANDBOX/config/policy/gibson-core-v1.json"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_PROVENANCE_ROLE' >/dev/null && echo "$out" | grep 'exactly one provenance source' >/dev/null; then
   ok "mutation: missing AGENTS.md provenance source fails"
 else
   bad "mutation missing AGENTS provenance (rc=$rc): $out"
 fi
-cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
-  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/config/policy/gibson-core-v1.json" \
+  "$SANDBOX/config/policy/gibson-core-v1.json"
 
 node -e '
 const fs=require("fs");
@@ -1279,15 +1299,15 @@ const c=JSON.parse(fs.readFileSync(p,"utf8"));
 const agents = c.provenance.sources.find((s) => s.path === "AGENTS.md");
 c.provenance.sources.push({ ...agents, id: "src.agents-contract-dup" });
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+' "$SANDBOX/config/policy/gibson-core-v1.json"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_PROVENANCE_ROLE' >/dev/null && echo "$out" | grep 'duplicate AGENTS.md' >/dev/null; then
   ok "mutation: duplicate AGENTS.md provenance source fails"
 else
   bad "mutation duplicate AGENTS provenance (rc=$rc): $out"
 fi
-cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
-  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/config/policy/gibson-core-v1.json" \
+  "$SANDBOX/config/policy/gibson-core-v1.json"
 
 node -e '
 const fs=require("fs");
@@ -1295,15 +1315,15 @@ const p=process.argv[1];
 const c=JSON.parse(fs.readFileSync(p,"utf8"));
 for (const s of c.provenance.sources) if (s.path === "AGENTS.md") s.role = "supporting";
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+' "$SANDBOX/config/policy/gibson-core-v1.json"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_PROVENANCE_ROLE' >/dev/null && echo "$out" | grep 'human-readable-contract' >/dev/null; then
   ok "mutation: AGENTS.md relabeled supporting fails"
 else
   bad "mutation AGENTS relabeled supporting (rc=$rc): $out"
 fi
-cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
-  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/config/policy/gibson-core-v1.json" \
+  "$SANDBOX/config/policy/gibson-core-v1.json"
 
 node -e '
 const fs=require("fs");
@@ -1311,15 +1331,15 @@ const p=process.argv[1];
 const c=JSON.parse(fs.readFileSync(p,"utf8"));
 for (const s of c.provenance.sources) if (s.path === "docs/14-human-gates.md") s.role = "human-readable-contract";
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+' "$SANDBOX/config/policy/gibson-core-v1.json"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_PROVENANCE_ROLE' >/dev/null && echo "$out" | grep 'docs/14-human-gates.md' >/dev/null; then
   ok "mutation: non-AGENTS relabeled human-readable-contract fails"
 else
   bad "mutation non-AGENTS human-readable-contract (rc=$rc): $out"
 fi
-cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
-  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/config/policy/gibson-core-v1.json" \
+  "$SANDBOX/config/policy/gibson-core-v1.json"
 
 node -e '
 const fs=require("fs");
@@ -1330,15 +1350,15 @@ for (const s of c.provenance.sources) {
   if (s.path === "docs/03-roles.md") s.role = "supporting";
 }
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+' "$SANDBOX/config/policy/gibson-core-v1.json"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_PROVENANCE_ROLE' >/dev/null && echo "$out" | grep 'explanatory-history' >/dev/null; then
   ok "mutation: docs relabeled compatibility/supporting fails"
 else
   bad "mutation docs relabeled (rc=$rc): $out"
 fi
-cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
-  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/config/policy/gibson-core-v1.json" \
+  "$SANDBOX/config/policy/gibson-core-v1.json"
 
 node -e '
 const fs=require("fs");
@@ -1348,15 +1368,15 @@ const agents = c.provenance.sources.find((s) => s.path === "AGENTS.md");
 const docs = c.provenance.sources.find((s) => s.path === "docs/14-human-gates.md");
 const tmp = agents.role; agents.role = docs.role; docs.role = tmp;
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+' "$SANDBOX/config/policy/gibson-core-v1.json"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_PROVENANCE_ROLE' >/dev/null; then
   ok "mutation: provenance path-role swap fails"
 else
   bad "mutation path-role swap (rc=$rc): $out"
 fi
-cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
-  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/config/policy/gibson-core-v1.json" \
+  "$SANDBOX/config/policy/gibson-core-v1.json"
 
 echo "# local override + job contracts"
 mkdir -p "$SANDBOX/local/playbooks"
@@ -1717,7 +1737,29 @@ fi
 prove_legacy_green_structured_red "alternate G1 duplicate" "E_GATE_DUPLICATE" "gates"
 cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
 
-# Benign narrative G17 in the Human gates section must remain allowed.
+# Narrative G17 outside the generated gate list must remain allowed.
+# The line sits after the pv:gates end marker, still in the Human gates section.
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+const needle="- **G16** ⛔ — Evidence of prompt-injection steering an agent.\n<!-- /pv -->\n";
+if (!t.includes(needle)) throw new Error("missing pv:gates end marker after G16");
+t=t.replace(
+  needle,
+  needle + "\nNarrative mention of unpublished G17 research does not add a stop.\n"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: narrative G17 outside the generated gate list remains green"
+else
+  bad "benign narrative G17 (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+# A narrative line inserted inside the generated block is a hand edit.
 node -e '
 const fs=require("fs");
 const p=process.argv[1];
@@ -1729,10 +1771,12 @@ t=t.replace(
 fs.writeFileSync(p,t);
 ' "$SANDBOX/AGENTS.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
-if [[ "$rc" -eq 0 ]]; then
-  ok "benign: narrative G17 mention in Human gates section remains green"
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_VIEW_DRIFT' >/dev/null && echo "$out" | grep 'policy view gates' >/dev/null; then
+  echo "  planted inside-pv:gates narrative failure line:"
+  echo "$out" | grep 'E_VIEW_DRIFT' | sed 's/^/    /'
+  ok "mutation: narrative line inserted inside pv:gates fails with E_VIEW_DRIFT"
 else
-  bad "benign narrative G17 (rc=$rc): $out"
+  bad "mutation narrative inside pv:gates (rc=$rc): $out"
 fi
 cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
 
