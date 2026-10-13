@@ -9,8 +9,9 @@ nav_order: 14
 
 > **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
 
-> 🙂 **In plain English:** The crew stops for you on sixteen conditions: money,
-> going live, private data, and similar owner decisions. It handles the rest.
+> 🙂 **In plain English:** The crew stops for you on the closed list in AGENTS.md:
+> money, going live, private data, and similar owner decisions. It handles the rest.
+> **G12** stays on that list and is retired as a stop (D-015).
 
 The closed stop list lives in [`AGENTS.md`](../AGENTS.md). This page restates
 those G1–G16 IDs for explanation and history only; it is not the operative
@@ -54,7 +55,7 @@ itself a last resort reserved for the incidents marked ⛔.
   gets built (not *how* — how is the agent's job).
 - **G11** — Work grew beyond the claimed scope (>2× estimate, or touching Tier C
   surface the issue didn't declare). Park, split, ask.
-- **G12** — Tier C merge approval (money/auth/consent/PII/security/schema).
+- **G12** — Tier C review floor (D-015): E3 at the exact head + required checks.
 - **G13** — Two agents want conflicting approaches and coordination failed (claim
   conflict that re-queueing didn't resolve).
 

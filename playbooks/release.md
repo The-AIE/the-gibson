@@ -16,10 +16,10 @@ gates:
   - CI green (gate + tests + security hard-fail)
   - review VERDICT: APPROVE; UX eval pass when applicable
   - DCO/Signed-off-by survives squash
-  - Tier C / schema → human approval
+  - Tier C / schema → G12 floor met (E3 at the exact head, required checks green)
   - one schema merge in flight fleet-wide
 forbidden:
-  - merging Tier C or schema without human gate
+  - merging Tier C or schema before the G12 floor is met
   - more than one schema merge in flight
   - force-pushing main
   - rotating secrets (G4)
