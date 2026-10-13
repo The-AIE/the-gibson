@@ -4,7 +4,7 @@ nav_exclude: true
 role: release
 inputs:
   - approved, all-gates-green PR
-  - human approval recorded for Tier C / schema (G12 / G1)
+  - E3 cross-vendor verdict at the exact head + required checks green for Tier C / schema (G12 floor, D-015)
 outputs:
   - merge to integration branch
   - verified deploy (commit SHA + READY)
@@ -140,7 +140,7 @@ Canonical: /path/to/target
    verdict source binds a commit SHA, it must match the current PR head —
    stale or absent/null head fails closed. UX eval PASS when user-visible.
 4. DCO / `Signed-off-by` intact through squash strategy.
-5. Tier C / schema → **human approval recorded** (PR comment/approval from owner).
+5. Tier C / schema → E3 cross-vendor verdict at the exact head + required checks green (G12 floor, D-015). Missing either one → the PR is not mergeable yet; request the cross-vendor review. Do not queue this for Mark.
 6. Schema PRs: no other schema merge in flight; migration file present
    (schema-guard).
 
@@ -452,8 +452,13 @@ Confirm issue closed by `Closes #` or close explicitly.
 
 ### Human-gated items
 
-If G12 / schema / other doc 14 gates apply and human has not approved: **queue for
-Mark**, move on (do not block unrelated work). Never force-push main (G3).
+If the Tier C / schema G12 floor applies and the E3 cross-vendor verdict at the
+exact head, or the required checks, is missing: the PR is not mergeable yet.
+Request the cross-vendor review. Do not queue that gap for Mark.
+
+If another doc 14 human gate applies (not the Tier C review floor) and the human
+has not approved: **queue for Mark**, move on (do not block unrelated work).
+Never force-push main (G3).
 
 ## Done means
 

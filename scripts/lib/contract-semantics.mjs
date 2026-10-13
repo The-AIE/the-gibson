@@ -6,6 +6,8 @@
  * normalized objects — not substring `includes()` of keywords.
  */
 
+import { CANONICAL_TIER_C_TREATMENT } from "./authority-config-canonical.mjs";
+
 export const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
 
 const STOP = new Set([
@@ -1328,11 +1330,41 @@ export function diffBindingPhrase(familyId, phrase, section, opts = {}) {
 }
 
 /**
+ * Keyword gaps for a Tier C treatment that already failed the canonical pin.
+ * Diagnostic only. Never a pass condition.
+ */
+function tierCKeywordHints(treat) {
+  const hints = [];
+  if (!/\bg12\b/i.test(treat)) hints.push("missing G12");
+  if (!/\bE3\b/.test(treat)) hints.push("missing E3");
+  if (!/exact head/i.test(treat)) hints.push("missing exact head");
+  if (!/required checks/i.test(treat)) hints.push("missing required checks");
+  if (!/adversarial review/i.test(treat)) hints.push("missing adversarial review");
+  if (!/fan-out|fan out/i.test(treat)) hints.push("missing fan-out");
+  if (/human merge/i.test(treat)) hints.push('names "human merge"');
+  if (/owner merge/i.test(treat)) hints.push('names "owner merge"');
+  if (/owner sign-off required/i.test(treat)) hints.push('names "owner sign-off required"');
+  if (/human approval required/i.test(treat)) hints.push('names "human approval required"');
+  if (/human attestation required/i.test(treat)) hints.push('names "human attestation required"');
+  if (/owner review required/i.test(treat)) hints.push('names "owner review required"');
+  return hints;
+}
+
+function tierCDiffHint(actual, expected) {
+  const a = String(actual);
+  const e = String(expected);
+  let i = 0;
+  const n = Math.min(a.length, e.length);
+  while (i < n && a.charCodeAt(i) === e.charCodeAt(i)) i += 1;
+  const from = Math.max(0, i - 12);
+  const to = i + 24;
+  return `differs at index ${i} (expected ${JSON.stringify(e.slice(from, to))}, got ${JSON.stringify(a.slice(from, to))}, lengths ${e.length}/${a.length})`;
+}
+
+/**
  * Tier A/B/C treatment semantics — IDs alone are not enough.
- * The Tier C branch is a doctrine-text wording check only. It requires the
- * treatment to name G12, E3, the exact head, required checks, adversarial
- * review, and fan-out, and it rejects a treatment that still names a human
- * or owner merge. It does not enforce that floor at runtime.
+ * Tier C passes only when the treatment equals CANONICAL_TIER_C_TREATMENT
+ * byte-for-byte. It does not enforce that floor at runtime.
  */
 export function diffTierTreatments(tiers) {
   const findings = [];
@@ -1359,55 +1391,12 @@ export function diffTierTreatments(tiers) {
   }
   const tierC = byId.get("C");
   if (tierC) {
-    const treat = collapseWs(tierC.treatment || "");
-    const hasG12 = /\bg12\b/i.test(treat);
-    const hasE3 = /\bE3\b/.test(treat);
-    const hasExactHead = /exact head/i.test(treat);
-    const hasRequiredChecks = /required checks/i.test(treat);
-    const hasAdversarial = /adversarial review/i.test(treat);
-    const hasFanout = /fan-out|fan out/i.test(treat);
-    const namesHumanMerge = /human merge/i.test(treat);
-    const namesOwnerMerge = /owner merge/i.test(treat);
-    if (
-      !hasG12 ||
-      !hasE3 ||
-      !hasExactHead ||
-      !hasRequiredChecks ||
-      !hasAdversarial ||
-      !hasFanout ||
-      namesHumanMerge ||
-      namesOwnerMerge
-    ) {
-      const gaps = [];
-      if (!hasG12) gaps.push("G12");
-      if (!hasE3) gaps.push("E3");
-      if (!hasExactHead) gaps.push("exact head");
-      if (!hasRequiredChecks) gaps.push("required checks");
-      if (!hasAdversarial) gaps.push("adversarial review");
-      if (!hasFanout) gaps.push("fan-out");
-      if (namesHumanMerge) gaps.push('still names "human merge"');
-      if (namesOwnerMerge) gaps.push('still names "owner merge"');
+    const treat = String(tierC.treatment ?? "");
+    if (treat !== CANONICAL_TIER_C_TREATMENT) {
+      const hints = tierCKeywordHints(treat);
       findings.push({
         code: "E_TIER_WEAKENING",
-        message: `Tier C treatment doctrine-text wording only; missing or stale: ${gaps.join(", ")}`,
-      });
-    } else if (
-      obligationNegated(treat, "E3") ||
-      obligationNegated(treat, "exact head") ||
-      obligationNegated(treat, "required checks") ||
-      obligationNegated(treat, "adversarial review") ||
-      obligationNegated(treat, "fan-out") ||
-      clauseWeakensBinding(treat, "E3") ||
-      clauseWeakensBinding(treat, "exact head") ||
-      clauseWeakensBinding(treat, "required checks") ||
-      clauseWeakensBinding(treat, "adversarial review") ||
-      clauseWeakensBinding(treat, "fan-out") ||
-      clauseWeakensBinding(treat)
-    ) {
-      findings.push({
-        code: "E_TIER_WEAKENING",
-        message:
-          "Tier C treatment doctrine-text wording only; weakens E3, exact head, required checks, adversarial review, or fan-out",
+        message: `Tier C treatment must equal the canonical pin byte-for-byte; ${tierCDiffHint(treat, CANONICAL_TIER_C_TREATMENT)}; keyword hints (not the pass condition): ${hints.length ? hints.join(", ") : "none"}`,
       });
     }
   }

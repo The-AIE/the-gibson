@@ -2453,30 +2453,53 @@ fi
 echo "# Tier C treatment polarity table"
 TIER_TABLE=$(
   SEM="$REPO_ROOT/scripts/lib/contract-semantics.mjs" \
+  CANON="$REPO_ROOT/scripts/lib/authority-config-canonical.mjs" \
   node --input-type=module -e '
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 const { diffTierTreatments } = await import(pathToFileURL(process.env.SEM).href);
-const canonical = "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful.";
+const { CANONICAL_TIER_C_TREATMENT } = await import(pathToFileURL(process.env.CANON).href);
+const canonical = CANONICAL_TIER_C_TREATMENT;
+const red = ["E_TIER_WEAKENING"];
+const evasions = [
+  ["owner-sign-off-required", "owner sign-off required"],
+  ["human-approval-required", "human approval required"],
+  ["human-attestation-required", "human attestation required"],
+  ["owner-review-required", "owner review required"],
+  ["fan-out-where-available", "fan-out and adversarial review where available"],
+  ["required-checks-as-appropriate", "required checks as appropriate"],
+  ["e3-only-if-available", "E3 only if available"],
+  ["fan-out-discretionary", "fan-out and adversarial review are discretionary"],
+  ["e3-where-possible", "E3 at the exact head where possible"],
+];
 const rows = [
   { name: "canonical-wording", treatment: canonical, expect: [] },
-  { name: "wording-still-names-human-merge-gate", treatment: "Fan-out + adversarial review + **G12** human merge gate (E3 at the exact head + required checks, D-015); serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "wording-still-names-owner-merge", treatment: "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. Min. owner merge.", expect: ["E_TIER_WEAKENING"] },
-  { name: "wording-missing-e3", treatment: "Fan-out + adversarial review + **G12** floor (at the exact head + required checks, D-015); serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "wording-missing-required-checks", treatment: "Fan-out + adversarial review + **G12** floor (E3 at the exact head, D-015); serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "wording-missing-exact-head", treatment: "Fan-out + adversarial review + **G12** floor (E3 + required checks, D-015); serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "wording-required-checks-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks cannot be skipped, D-015); serialize when stateful", expect: [] },
-  { name: "wording-e3-is-not-required", treatment: "Fan-out + adversarial review + **G12** floor (E3 is not required at the exact head + required checks, D-015); serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is not required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-not-operationally-required", treatment: "Fan-out + adversarial review + **G12** human merge is not operationally required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-not-technically-required", treatment: "Fan-out + adversarial review + **G12** human merge is not technically required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-not-always-required", treatment: "Fan-out + adversarial review + **G12** human merge is not always required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-not-in-any-way-required", treatment: "Fan-out + adversarial review + **G12** human merge is not in any way required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-technically-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-cannot-be-required", treatment: "Fan-out + adversarial review + **G12** human merge cannot be required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-does-not-have-to-happen", treatment: "Fan-out + adversarial review + **G12** human merge does not have to happen; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "missing-fan-out", treatment: "Optional review; G12 when convenient", expect: ["E_TIER_WEAKENING"] },
+  { name: "one-char-case-flip", treatment: "f" + canonical.slice(1), expect: red },
+  { name: "one-char-delete-last", treatment: canonical.slice(0, -1), expect: red },
+  { name: "one-char-insert", treatment: canonical.slice(0, 8) + "X" + canonical.slice(8), expect: red },
+  { name: "wording-still-names-human-merge-gate", treatment: "Fan-out + adversarial review + **G12** human merge gate (E3 at the exact head + required checks, D-015); serialize when stateful", expect: red },
+  { name: "wording-still-names-owner-merge", treatment: canonical + " Min. owner merge.", expect: red },
+  { name: "wording-missing-e3", treatment: "Fan-out + adversarial review + **G12** floor (at the exact head + required checks, D-015); serialize when stateful", expect: red },
+  { name: "wording-missing-required-checks", treatment: "Fan-out + adversarial review + **G12** floor (E3 at the exact head, D-015); serialize when stateful", expect: red },
+  { name: "wording-missing-exact-head", treatment: "Fan-out + adversarial review + **G12** floor (E3 + required checks, D-015); serialize when stateful", expect: red },
+  { name: "wording-required-checks-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks cannot be skipped, D-015); serialize when stateful", expect: red },
+  { name: "wording-e3-is-not-required", treatment: "Fan-out + adversarial review + **G12** floor (E3 is not required at the exact head + required checks, D-015); serialize when stateful", expect: red },
+  { name: "human-merge-is-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is not required; serialize when stateful", expect: red },
+  { name: "human-merge-is-not-operationally-required", treatment: "Fan-out + adversarial review + **G12** human merge is not operationally required; serialize when stateful", expect: red },
+  { name: "human-merge-is-not-technically-required", treatment: "Fan-out + adversarial review + **G12** human merge is not technically required; serialize when stateful", expect: red },
+  { name: "human-merge-is-not-always-required", treatment: "Fan-out + adversarial review + **G12** human merge is not always required; serialize when stateful", expect: red },
+  { name: "human-merge-is-not-in-any-way-required", treatment: "Fan-out + adversarial review + **G12** human merge is not in any way required; serialize when stateful", expect: red },
+  { name: "human-merge-is-technically-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful", expect: red },
+  { name: "human-merge-cannot-be-required", treatment: "Fan-out + adversarial review + **G12** human merge cannot be required; serialize when stateful", expect: red },
+  { name: "human-merge-does-not-have-to-happen", treatment: "Fan-out + adversarial review + **G12** human merge does not have to happen; serialize when stateful", expect: red },
+  { name: "human-merge-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful", expect: red },
+  { name: "missing-fan-out", treatment: "Optional review; G12 when convenient", expect: red },
 ];
+for (const [name, treatment] of evasions) {
+  rows.push({ name, treatment, expect: red });
+}
 const failed = [];
 for (const row of rows) {
   const got = diffTierTreatments([{ id: "C", definition: "Money", treatment: row.treatment }]).map((f) => f.code);
@@ -2484,6 +2507,31 @@ for (const row of rows) {
     failed.push(row.name + " got " + JSON.stringify(got) + " want " + JSON.stringify(row.expect));
   } else {
     console.log("TIER_OK " + row.name);
+  }
+}
+const semSrc = readFileSync(process.env.SEM, "utf8");
+const pin = "treat !== CANONICAL_TIER_C_TREATMENT";
+if (!semSrc.includes(pin)) {
+  failed.push("noop-mutation comparison pin missing");
+} else {
+  const canonHref = pathToFileURL(process.env.CANON).href;
+  const mutated = semSrc
+    .replaceAll(pin, "false")
+    .replaceAll("from " + JSON.stringify("./authority-config-canonical.mjs"), "from " + JSON.stringify(canonHref));
+  const dir = mkdtempSync(join(tmpdir(), "tier-c-noop-"));
+  const outPath = join(dir, "contract-semantics.mjs");
+  writeFileSync(outPath, mutated);
+  const { diffTierTreatments: noopDiff } = await import(pathToFileURL(outPath).href);
+  const quiet = [];
+  for (const [name, treatment] of evasions) {
+    const got = noopDiff([{ id: "C", definition: "Money", treatment }]).map((f) => f.code);
+    if (got.length !== 0) quiet.push(name + " still fired " + JSON.stringify(got));
+  }
+  rmSync(dir, { recursive: true, force: true });
+  if (quiet.length) {
+    failed.push("noop-mutation still fired: " + quiet.join(", "));
+  } else {
+    console.log("TIER_OK noop-mutation-nine-red-fail-to-fire");
   }
 }
 if (failed.length) {
@@ -3360,10 +3408,12 @@ assert_sensor_exact_code \
   "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful" \
   "E_TIER_WEAKENING" \
   "tier C wording human-merge-cannot-be-skipped" "tiers"
-assert_sensor_green \
+assert_sensor_exact_code \
   "Tier C wording required-checks cannot-be-skipped" \
   "$TIER_NEEDLE" \
-  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. Required checks cannot be skipped"
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. Required checks cannot be skipped" \
+  "E_TIER_WEAKENING" \
+  "tier C wording required-checks-cannot-be-skipped" "tiers"
 
 echo "# first-match contradiction masking"
 cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-historical-then-active-supersedes.md" \
@@ -6507,7 +6557,12 @@ const dir = mkdtempSync(join(tmpdir(), "gibson-241-teeth-"));
 
 async function loadMutant(mutatedSource, tag) {
   const file = join(dir, `mutant-${tag}.mjs`);
-  writeFileSync(file, mutatedSource);
+  const canonHref = pathToFileURL(process.env.CANON).href;
+  const rewritten = mutatedSource.replaceAll(
+    "from " + JSON.stringify("./authority-config-canonical.mjs"),
+    "from " + JSON.stringify(canonHref)
+  );
+  writeFileSync(file, rewritten);
   return import(pathToFileURL(file).href + `?t=${tag}-${Date.now()}`);
 }
 
@@ -7148,6 +7203,7 @@ process.exit(0);
 NODE
 TEETH_241=$(
   SEM="$REPO_ROOT/scripts/lib/contract-semantics.mjs" \
+  CANON="$REPO_ROOT/scripts/lib/authority-config-canonical.mjs" \
   HARNESS_REPO="$REPO_ROOT" \
   node "$TEETH_SCRIPT"
 )
