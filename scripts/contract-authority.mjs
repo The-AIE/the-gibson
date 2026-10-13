@@ -9,8 +9,8 @@
  *   discovered playbook markdown dispatch markers); that docs stay
  *   non-normative; that playbooks with operative gates:/forbidden:
  *   frontmatter do not carry a blanket non-normative banner; that required
- *   binding-rule families remain in AGENTS.md; and that the report-only
- *   policy-manifest candidate mirrors AGENTS.md without becoming authority.
+ *   binding-rule families remain in AGENTS.md; and that the three generated
+ *   AGENTS.md blocks match the policy manifest, which is not merge authority.
  *
  * WHY
  *   Mixed-authority prose made agents ingest ~100KB+ of explanation as if it
@@ -20,7 +20,7 @@
  * RISKS
  *   Structured semantic comparison of enumerations and obligation objects,
  *   not a full legal parser. Independent review still applies. Read-only.
- *   Does not activate the report-only candidate.
+ *   Does not treat the policy manifest as merge authority.
  *
  * USAGE
  *   node scripts/contract-authority.mjs
@@ -39,6 +39,7 @@ import {
   readContainedFile,
   loadJsonContained,
   hasDotDotSegment,
+  checkPolicyViewDrift,
 } from "./policy-manifest.mjs";
 import {
   parseFrontmatter,
@@ -121,7 +122,7 @@ function help() {
 WHAT IT DOES
   Checks AGENTS.md authority, fixed vs conditional role/job dispatch-prompt
   load, binding-rule families, docs/playbook authority honesty, and
-  report-only candidate mirror drift.
+  generated-view drift against the policy manifest.
 
 WHY
   Prevents the contract from growing back into a 100KB+ implied read chain
@@ -670,8 +671,8 @@ if (agentsText) {
   const authorityObj = {
     soleAlwaysMandatory: /sole always-mandatory human-readable/.test(canonicalBlock),
     docsOnDemand: /on-demand and non-normative/.test(agentsText),
-    checkedMirror: /checked mirror/.test(agentsText),
-    activatedFalse: /activated=false/.test(agentsText),
+    generatedViews: /config\/policy\/gibson-core-v1\.json/.test(agentsText),
+    notMergeAuthority: /not merge authority/.test(agentsText),
   };
   for (const [k, v] of Object.entries(authorityObj)) {
     if (!v) fail("E_AUTHORITY", `AGENTS.md missing authority property ${k}`);
@@ -902,20 +903,30 @@ if (agentsText) {
     );
   }
 
-  // Report-only candidate is a checked mirror of AGENTS authority — never the
-  // supplier of binding values, and never activated on this slice.
+  // Generated-views manifest is the source of three blocks, not merge authority.
   if (mirror) {
-    if (mirror.activated !== false) {
+    if (mirror.status !== "canonical") {
       fail(
         "E_CANDIDATE_PREACTIVATION",
-        `${mirrorRel} must keep activated=false until #164 (got ${JSON.stringify(mirror.activated)})`
+        `${mirrorRel} must keep status=canonical (got ${JSON.stringify(mirror.status)})`
       );
     }
-    if (mirror.authority !== "report-only") {
+    if (mirror.activated !== true) {
       fail(
         "E_CANDIDATE_PREACTIVATION",
-        `${mirrorRel} must keep authority=report-only until #164 (got ${JSON.stringify(mirror.authority)})`
+        `${mirrorRel} must keep activated=true (got ${JSON.stringify(mirror.activated)})`
       );
+    }
+    if (mirror.authority !== "generated-views") {
+      fail(
+        "E_CANDIDATE_PREACTIVATION",
+        `${mirrorRel} must keep authority=generated-views (got ${JSON.stringify(mirror.authority)})`
+      );
+    }
+    if (agentsText) {
+      for (const f of checkPolicyViewDrift(agentsText, mirror)) {
+        fail(f.code, f.message);
+      }
     }
     const prov = mirror.provenance && typeof mirror.provenance === "object"
       ? mirror.provenance

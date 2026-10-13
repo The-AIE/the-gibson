@@ -21,7 +21,7 @@ export const CANONICAL_TIER_C_TREATMENT =
 export const CANONICAL_SCHEMA_ID = "gibson.mandatory-read-chain.v1";
 export const CANONICAL_SCHEMA_VERSION = "1.2.0";
 export const CANONICAL_AUTHORITY =
-  "AGENTS.md is the sole always-mandatory human-readable contract for commit/PR/merge behavior. Role playbooks are conditionally mandatory session-start load when a role is dispatched. Non-role job dispatch prompts are conditionally mandatory when that job is active. docs/ is on-demand and non-normative. The policy-manifest candidate remains report-only / activated=false until #164 and is only a checked mirror.";
+  "AGENTS.md is the sole always-mandatory human-readable contract for commit/PR/merge behavior. Role playbooks are conditionally mandatory session-start load when a role is dispatched. Non-role job dispatch prompts are conditionally mandatory when that job is active. docs/ is on-demand and non-normative. Marked blocks in AGENTS.md are generated from config/policy/gibson-core-v1.json (authority generated-views). That file is not merge authority.";
 
 export const CANONICAL_MANDATORY_FILES = ["AGENTS.md"];
 export const CANONICAL_DOCS_GLOBS = ["docs/**/*.md"];
@@ -36,8 +36,7 @@ export const CANONICAL_ON_DEMAND = "On-demand (non-normative)";
 export const CANONICAL_DEFAULT_ROLE = "builder";
 export const CANONICAL_DEFAULT_PATH = "playbooks/builder.md";
 export const CANONICAL_ROLE_CONTRACTS = "config/policy/role-contracts.v1.json";
-export const CANONICAL_MIRROR =
-  "config/policy/candidates/gibson-core-v1.candidate.json";
+export const CANONICAL_MIRROR = "config/policy/gibson-core-v1.json";
 export const CANONICAL_AUDIT = "config/policy/rule-migration-audit.v1.json";
 export const CANONICAL_RULE_MIGRATION_AUDIT_SCHEMA_ID =
   "gibson.rule-migration-audit.v1";
@@ -260,8 +259,8 @@ export const CANONICAL_MACHINE_SOURCE_PATHS = [
 export const CANONICAL_REQUIRED_RULE_PATTERNS = [
   "sole always-mandatory human-readable",
   "on-demand and non-normative",
-  "checked mirror",
-  "activated=false",
+  "not merge authority",
+  "config/policy/gibson-core-v1.json",
   "Conditional session-start human-readable load",
   "when a role is dispatched",
   "playbooks/<role>.md",
@@ -419,6 +418,7 @@ export const CANONICAL_BINDING_FAMILIES = [
       "Tier definitions",
       "hard-fail security layers",
       "themselves Tier C (**G12**)",
+      "loosen with the owner's sign-off",
     ],
   },
   {

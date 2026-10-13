@@ -2,10 +2,10 @@
   "schemaId": "gibson.policy.manifest.schema.v1",
   "schemaVersion": "1.0.0",
   "manifestId": "gibson.core.policy",
-  "manifestVersion": "1.0.0",
-  "status": "candidate",
-  "authority": "report-only",
-  "activated": false,
+  "manifestVersion": "1.1.0",
+  "status": "canonical",
+  "authority": "generated-views",
+  "activated": true,
   "generatorVersion": "1.0.0",
   "validatorVersion": "1.0.0",
   "compatibility": {
@@ -13,8 +13,8 @@
     "forkExtensionRule": "namespaced-only",
     "coreIdPrefix": "gibson.",
     "upgrade": "Bump manifestVersion for additive clarifications within major 1. A new schema major requires a new schemaId/version pair and a migration note; validators must refuse unsupported majors.",
-    "rollback": "Revert to the previous candidate file and validatorVersion pin. Because this slice is report-only and not activated, rollback restores representation only — runtime gates are unchanged.",
-    "notes": "Forks extend with namespaced IDs under allowedNamespaces only. Core gibson.* IDs may not be shadowed. Precedence conflicts refuse closed. Generated doctrine views and activation remain #164."
+    "rollback": "Revert this manifest and the three marked AGENTS.md blocks together. The file is not merge authority; rollback restores the generated views only.",
+    "notes": "Forks extend with namespaced IDs under allowedNamespaces only. Core gibson.* IDs may not be shadowed. Precedence conflicts refuse closed. This file is the source of three generated views and is not merge authority."
   },
   "provenance": {
     "sources": [
@@ -22,7 +22,7 @@
         "id": "src.agents-contract",
         "path": "AGENTS.md",
         "digestAlgorithm": "sha256",
-        "digest": "689c170eef96a5dbaf15ad8f27ced0c07f29ebcb71c7fc1f38382154748f8772",
+        "digest": "4158ed640803546c93ff3b8e03cbba3b8779a8064b16a881eca4db295d9d9c7e",
         "role": "human-readable-contract"
       },
       {
@@ -65,36 +65,48 @@
   "humanGates": [
     {
       "id": "G1",
+      "kind": "human-stop",
+      "stop": true,
       "category": "destructive",
       "summary": "Schema-destructive change, non-additive migration, or manual write against a production database.",
       "severity": false
     },
     {
       "id": "G2",
+      "kind": "human-stop",
+      "stop": true,
       "category": "destructive",
       "summary": "Deleting user data, emptying buckets, removing deployments/envs/domains.",
       "severity": false
     },
     {
       "id": "G3",
+      "kind": "human-stop",
+      "stop": true,
       "category": "destructive",
       "summary": "Force-push to a shared branch; history rewrite.",
       "severity": false
     },
     {
       "id": "G4",
+      "kind": "human-stop",
+      "stop": true,
       "category": "destructive",
       "summary": "Secret rotation and any confirmed secret leak response.",
       "severity": false
     },
     {
       "id": "G5",
+      "kind": "human-stop",
+      "stop": true,
       "category": "money",
       "summary": "Any spend: new paid services, plan changes, domain purchases, paid API keys.",
       "severity": false
     },
     {
       "id": "G6",
+      "kind": "human-stop",
+      "stop": true,
       "category": "money",
       "summary": "Merge gate on billing/pricing/payment code (Tier C).",
       "severity": false,
@@ -104,36 +116,53 @@
     },
     {
       "id": "G7",
+      "kind": "human-stop",
+      "stop": true,
       "category": "outward-facing",
       "summary": "Production launches of user-visible surfaces (first public exposure).",
       "severity": false
     },
     {
       "id": "G8",
+      "kind": "human-stop",
+      "stop": true,
       "category": "outward-facing",
       "summary": "Sending anything to humans: email, SMS, social, newsletter, publishing packages, public repos.",
       "severity": false
     },
     {
       "id": "G9",
+      "kind": "human-stop",
+      "stop": true,
       "category": "outward-facing",
       "summary": "Anything using the owner identity or accounts beyond repo/CI scope.",
       "severity": false
     },
     {
       "id": "G10",
+      "kind": "human-stop",
+      "stop": true,
       "category": "scope-judgment",
       "summary": "Plan is ambiguous or contradictory on a decision that changes what gets built.",
       "severity": false
     },
     {
       "id": "G11",
+      "kind": "human-stop",
+      "stop": true,
       "category": "scope-judgment",
       "summary": "Work grew beyond claimed scope (>2× estimate or undeclared Tier C surface).",
       "severity": false
     },
     {
       "id": "G12",
+      "kind": "review-floor",
+      "stop": false,
+      "requires": [
+        "E3-exact-head",
+        "required-checks"
+      ],
+      "decision": "D-015",
       "category": "scope-judgment",
       "summary": "Tier C review floor (D-015): E3 at the exact head + required checks.",
       "severity": false,
@@ -143,24 +172,32 @@
     },
     {
       "id": "G13",
+      "kind": "human-stop",
+      "stop": true,
       "category": "scope-judgment",
       "summary": "Two agents want conflicting approaches and coordination failed.",
       "severity": false
     },
     {
       "id": "G14",
+      "kind": "human-stop",
+      "stop": true,
       "category": "access-security",
       "summary": "Credentials or approvals only a human holds.",
       "severity": false
     },
     {
       "id": "G15",
+      "kind": "human-stop",
+      "stop": true,
       "category": "access-security",
       "summary": "Active exploitation signal or vulnerability discovered live in production.",
       "severity": true
     },
     {
       "id": "G16",
+      "kind": "human-stop",
+      "stop": true,
       "category": "access-security",
       "summary": "Evidence of prompt-injection steering an agent.",
       "severity": true
@@ -170,6 +207,7 @@
     {
       "id": "A",
       "definition": "Routine: UI copy, isolated components, docs, tests.",
+      "treatment": "Solo independent review; standard gates",
       "evidenceMinimums": {
         "reviewDepth": "solo",
         "adversarialReview": false,
@@ -180,6 +218,7 @@
     {
       "id": "B",
       "definition": "Elevated: shared modules, API routes, data reads, >150 lines or >6 files.",
+      "treatment": "Full-lens review; UX eval if visible",
       "evidenceMinimums": {
         "reviewDepth": "full-lens",
         "adversarialReview": false,
@@ -191,10 +230,11 @@
     {
       "id": "C",
       "definition": "Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data.",
+      "treatment": "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful.",
       "evidenceMinimums": {
         "reviewDepth": "fan-out",
         "adversarialReview": true,
-        "humanMergeGate": true,
+        "humanMergeGate": false,
         "humanGateIds": [
           "G12"
         ],
@@ -207,39 +247,57 @@
   "roles": [
     {
       "id": "planner",
-      "summary": "Expand a brief into PLAN.md with testable acceptance criteria."
+      "summary": "Expand a brief into PLAN.md with testable acceptance criteria.",
+      "out": "`PLAN.md` with numbered testable acceptance criteria",
+      "forbidden": "implementation code"
     },
     {
       "id": "decomposer",
-      "summary": "Turn an approved plan into dependency-ordered contract-bearing issues."
+      "summary": "Turn an approved plan into dependency-ordered contract-bearing issues.",
+      "out": "dependency-ordered issues, each with a sprint contract",
+      "forbidden": "overlapping live claims; issues without contracts"
     },
     {
       "id": "builder",
-      "summary": "Claim one issue, implement in a worktree, open a green-gate PR."
+      "summary": "Claim one issue, implement in a worktree, open a green-gate PR.",
+      "out": "green-gate branch + PR; claim first",
+      "forbidden": "canonical checkout; merge; self-review; casual new deps"
     },
     {
       "id": "test-engineer",
-      "summary": "Attach executable checks for every contract criterion."
+      "summary": "Attach executable checks for every contract criterion.",
+      "out": "executable check per criterion; regression test per bug",
+      "forbidden": "weakening/deleting failing tests; happy-path-only on Tier C (**adversarial cases required**)"
     },
     {
       "id": "reviewer",
-      "summary": "Multi-lens review with APPROVE or REQUEST_CHANGES; never own generation."
+      "summary": "Multi-lens review with APPROVE or REQUEST_CHANGES; never own generation.",
+      "out": "`VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES` on the exact head; **six lenses** with **file:line** findings",
+      "forbidden": "merging; reviewing own generation; rubber-stamp LGTM"
     },
     {
       "id": "ux-evaluator",
-      "summary": "Grade live preview against design language; never evaluate from the diff alone."
+      "summary": "Grade live preview against design language; never evaluate from the diff alone.",
+      "out": "graded eval of the **live preview**",
+      "forbidden": "grading from the diff or the builder's description"
     },
     {
       "id": "security",
-      "summary": "Run security layers; adversarial pass on Tier C; no report-only softening of hard-fail."
+      "summary": "Run security layers; adversarial pass on Tier C; no report-only softening of hard-fail.",
+      "out": "**eight-layer** results; adversarial pass on Tier C",
+      "forbidden": "softening a hard-fail layer to report-only; **destructive production testing** (DAST vs preview/staging only)"
     },
     {
       "id": "release",
-      "summary": "Merge approved green work, verify deploy, clean claim; never rotate secrets."
+      "summary": "Merge approved green work, verify deploy, clean claim; never rotate secrets.",
+      "out": "merge, verify deploy, smoke, cleanup; **delivery-control** audit → dry-run → human-apply when asked",
+      "forbidden": "merging Tier C/schema before the G12 floor is met; more than one schema merge in flight; force-push main; rotating secrets (G4); silent `--apply` without dry-run"
     },
     {
       "id": "historian",
-      "summary": "File lessons and harness improvements from exhaust; append, do not rewrite history."
+      "summary": "File lessons and harness improvements from exhaust; append, do not rewrite history.",
+      "out": "append lessons/decisions; harness PRs",
+      "forbidden": "rewriting others' lessons; skipping a twice-failure"
     }
   ],
   "forbiddenRolePairs": [
@@ -365,7 +423,7 @@
         "G6",
         "G12"
       ],
-      "rationale": "G6 is the billing/pricing/payment merge gate (Tier C). G12 is Tier C merge approval. Both bind to Tier C without elevating A/B."
+      "rationale": "G6 is the billing/pricing/payment human merge gate (Tier C). G12 is the Tier C review floor (D-015): E3 at the exact head plus required checks, not a human merge stop. Both bind to Tier C without elevating A/B."
     }
   ],
   "forkExtensions": {
@@ -386,8 +444,10 @@
     "conflictDisposition": "refuse"
   },
   "notices": {
-    "authority": "This candidate is report-only. It is NOT an activated policy authority and must not be treated as merge, gate, or CI hard-fail authority.",
-    "activationOwner": "Parent issue #164 owns activation, generated doctrine views, and any runtime consumer migration.",
-    "generatedViews": "Generated AGENTS/doctrine views are out of scope for this slice. Adapters and generated blocks cannot become policy authorities."
+    "authority": "This manifest is the source of the three marked AGENTS.md blocks. It is not merge authority.",
+    "activationOwner": "Generated views only. Nothing reads this file as merge or release authority.",
+    "generatedViews": "AGENTS.md blocks gates, tiers, and roles are generated by policy-manifest.mjs render. Hand edits fail check-drift.",
+    "ratchet": "The ratchet may tighten autonomously; it may only loosen with the owner's sign-off.",
+    "deliveryControl": "audit first (read-only), then dry-run, then explicit human apply"
   }
 }

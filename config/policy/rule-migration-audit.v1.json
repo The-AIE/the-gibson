@@ -3,7 +3,7 @@
   "schemaVersion": "1.0.0",
   "issue": 208,
   "authority": "AGENTS.md",
-  "note": "Semantic rule→home audit for #208. Binding force lives in AGENTS.md or presently activated/operational machine sources named there. The report-only candidate is a checked mirror only until #164.",
+  "note": "Semantic rule→home audit for #208. Binding force lives in AGENTS.md or presently activated/operational machine sources named there. config/policy/gibson-core-v1.json is the source of three generated views and is not merge authority.",
   "families": [
     {
       "id": "authority-load-order",
