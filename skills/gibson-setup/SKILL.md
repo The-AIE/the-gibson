@@ -71,7 +71,7 @@ for free.
    webhook wake per `adapters/devin/README.md`. Devin = merge captain: reviews
    finished branches and owns PRs; it merges only in the explicit `--merge`
    handoff mode (docs/22) — the default leaves every merge to a human. Tier C
-   ends at the human gate in every mode (Law 7).
+   ends at the **G12** floor (E3 at the exact head + required checks) in every mode (Law 7).
 
 ## Rules
 
@@ -80,7 +80,7 @@ for free.
 - **Right-sized, never under-gated**: install the lean baseline everywhere; add
   the heavy machinery where the audit found risk surfaces. But Law 7 is not
   profile-dependent — if ANY money/auth/consent/PII/security/prod-data surface
-  exists, its human merge gate gets wired regardless of chosen profile. A
+  exists, its **G12** floor (E3 at the exact head + required checks) gets wired regardless of chosen profile. A
   static brochure site with a contact form still has a PII surface.
 - Every owner-credential step (branch protection, App installs, API keys) is an
   Ask Contract item — batched, never a drip.

@@ -151,12 +151,12 @@ Different agents (or fresh solo-loop hats):
 | UX (if UI) | `playbooks/ux-evaluator.md` | `BASE_URL=$(scripts/preview-url.sh N)` + Playwright |
 | Security | `playbooks/security.md` + CI | layers table on PR |
 
-You only intervene for Tier C / schema (G12) or other [human gates](docs/14-human-gates.md).
+You intervene for [human gates](docs/14-human-gates.md) (spend, live send, credentials, and the rest of G1–G11, G13–G16). Tier C / schema uses the **G12** floor (D-015): E3 at the exact head + required checks.
 
 ### 7.6 Merge + deploy + cleanup (release hat)
 
 ```bash
-# After APPROVE + CI green + (if Tier C) your approval comment:
+# After APPROVE + CI green + (if Tier C) G12 floor met (E3 at exact head + required checks):
 gh pr merge 88 --squash --delete-branch
 # verify Vercel READY for the merge commit; smoke happy path
 ~/Code/the-gibson/scripts/release-claim.sh 102
@@ -185,7 +185,7 @@ Same pipeline, one runner:
 | Start a feature | Brief → approve PLAN.md |
 | Quick fix | Issue with acceptance criteria |
 | See status | MC dashboard / digest / `gh issue list -l gibson` |
-| Approve a Tier C merge | Reply on the PR (G12) |
+| See a Tier C merge clear | **G12** floor: E3 at the exact head + required checks |
 | Stop everything on a repo | `gibson-halt` label |
 | Overnight grind | `scripts/loop.sh --runner grok` |
 | Teach the fleet | PR a lesson to `memory/LESSONS.md` |

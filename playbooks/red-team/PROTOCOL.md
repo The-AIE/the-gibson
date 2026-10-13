@@ -128,8 +128,8 @@ audit from the outside, and what the target must build itself.
 | 4. Background scanning of MCP servers / extensions | Is there any check at all on third-party servers? Are versions pinned? | Yes — the scanner and the pinning |
 | 5. Secondary model flagging injection/jailbreak patterns | Phase 4 already does this adversarially, per subsystem | Optional — valuable at fleet scale, not a substitute for layers 1–4 |
 
-Layers 1 and 5 have Gibson analogues already: the human approval gate
-(`docs/14-human-gates.md`) and the Phase-4 AI adversarial pass. Do not let that
+Layers 1 and 5 have Gibson analogues already: the owner human gates
+(`docs/14-human-gates.md`; **G12** is the D-015 review floor, not an owner stop) and the Phase-4 AI adversarial pass. Do not let that
 similarity become a reason to skip verifying them in the target — our gate protects
 *our* fleet, not the customer's.
 
