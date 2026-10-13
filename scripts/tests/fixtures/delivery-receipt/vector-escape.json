@@ -1,0 +1,10 @@
+{
+  "name": "escape",
+  "omitDigest": false,
+  "input": {
+    "b": "a\"b",
+    "a": "line\n"
+  },
+  "canonical": "{\"a\":\"line\\n\",\"b\":\"a\\\"b\"}",
+  "digest": "66969d62a1437209db52994200d64dba716b5354886e29cb5f14eecfcabcec80"
+}
