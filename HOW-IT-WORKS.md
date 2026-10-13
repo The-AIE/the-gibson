@@ -236,7 +236,7 @@ The Gibson supports two operating shapes:
 
 - **Single-platform / solo loop:** one runner cycles through fresh role contexts and
   file handoffs. A separate model or vendor is still preferred for review; Tier C
-  remains human-gated.
+  still uses the **G12** floor (E3 at the exact head + required checks) and fails closed without E3.
 - **Multi-model fleet:** a coordinator assigns disjoint work to several vendor
   pools, with cross-vendor review and one serialized merge train.
 
@@ -379,8 +379,8 @@ AI-surface, and runtime findings.
 **Gate:** hard-fail layers pass; report-only findings receive owners and follow-up.
 
 Tier C surfaces — authentication, money, consent/PII, security boundaries, schema,
-and production data — require frontier-grade adversarial review and a human merge
-gate.
+and production data — require frontier-grade adversarial review and the **G12**
+floor (E3 at the exact head + required checks, D-015).
 
 #### 7. Merge
 
@@ -388,7 +388,7 @@ gate.
 **Executor:** release role.
 **Output:** reviewed merge on the protected integration path.
 **Gate:** exact-head checks, acceptance evidence, sign-off/DCO, review independence,
-and any required owner approval.
+the **G12** floor when Tier C, and any remaining doc 14 human gate.
 
 The merge train is serialized. The release role re-reads live state immediately
 before merge because an earlier green snapshot can become stale.
@@ -586,7 +586,7 @@ The author cannot approve its own work. Independence includes:
 
 Cross-vendor review is the default because it adds different training and tool
 failure modes. Single-platform mode is a documented degradation using a distinct
-model/fresh context; it does not weaken Tier C owner gates.
+model/fresh context; it does not weaken the **G12** floor (E3 at the exact head + required checks).
 
 #### Risk-shaped depth
 
@@ -594,7 +594,7 @@ model/fresh context; it does not weaken Tier C owner gates.
 - **Tier B:** shared or multi-file behavior, full review lenses and applicable UX
   evaluation.
 - **Tier C:** money, auth, consent/PII, security boundaries, schema, or production
-  data; frontier adversarial review, serialized stateful work, and human approval.
+  data; frontier adversarial review, serialized stateful work, and the **G12** floor (E3 at the exact head + required checks, D-015).
 
 Risk may increase when the actual diff expands. It does not silently decrease
 because a builder labeled the issue optimistically.

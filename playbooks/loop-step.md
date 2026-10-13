@@ -139,7 +139,7 @@ touch /path/to/target/gibson/HALT
 - Entry: green PR#.
 - Read-only multi-lens review. Prefer `REVIEWER_CMD` cross-vendor if set
   (especially Tier B/C). Else adversarial self-pass **from files only** + flag
-  human merge gate for Tier C.
+  the **G12** floor for Tier C (E3 at the exact head + required checks).
 - Verdict APPROVE → next `ux-evaluator` (or `security` if no UI).
 - REQUEST_CHANGES → next `builder`, round += 1; if `round` has reached the
   per-tier cap in `config/review-round-caps.json` (default A=1 / B=2 / C=3) the
@@ -162,7 +162,9 @@ touch /path/to/target/gibson/HALT
 ### If `{{hat}}` = release
 
 - Entry: all gates green.
-- If human-gated (Tier C/schema): queue for Mark, set next issue triage, **do not
+- If Tier C/schema: the **G12** floor (E3 at the exact head + required checks)
+  must be met before merge; if either is missing, request the cross-vendor review
+  and set next issue triage. Other doc 14 human gates: queue for Mark, **do not
   merge**.
 - If `RELEASE_CMD` is set: shell out to it for the actual merge, passing the PR
   number and repo path — the runner that built and/or reviewed this PR must not

@@ -47,16 +47,16 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 │   ── context reset ──
 │   6. REVIEW    lens review of the PR; Tier C → cross-vendor if  [reviewer hat]
 │                REVIEWER_CMD is set, else adversarial self-pass
-│                + flag for human merge gate
+│                + flag for G12 floor (E3 + required checks)
 │   ── context reset ──
 │   7. UX-EVAL   Playwright vs. the PR's preview deployment       [ux-evaluator hat]
 │   8. SECURITY  CI layers run on the PR automatically; read      [security hat]
 │                results; adversarial pass on Tier B/C
 │   9. RESOLVE   REQUEST_CHANGES? → back to 4 (bounded: 3 rounds, [builder hat]
 │                then park the PR + write a handoff note)
-│  10. MERGE     if gates green and NOT human-gated → merge,      [release hat]
-│                verify deploy, smoke, cleanup. Human-gated →
-│                queue it for Mark, move on.
+│  10. MERGE     if gates green and G12 floor met: merge when     [release hat]
+│                not otherwise human-gated. Other human gates →
+│                queue for Mark, move on.
 │  11. RETRO     any lesson? file it; harness fix if small        [historian hat]
 │  12. JOURNAL   append loop-state.md: what/why/next; report to MC
 └── 13. REPEAT   next issue. Stop only for: human gate on ALL remaining work,
@@ -320,7 +320,7 @@ installed and no second vendor is available, run:
 | Law 5 | Different vendor | Fresh context + alt model counts as present reviewer |
 | Escalation | `--reviewers codex,claude` | Same-vendor alt-model second opinion (no deadlock) |
 | Tier B | One independent APPROVE | Prefer **two** independent fresh-context APPROVE verdicts when available |
-| Tier C | Human gate (docs/14 G12) | **Unchanged** — still human-gated |
+| Tier C | **G12** floor (E3 + required checks) | **Unchanged** — fail closed without E3 |
 | Missing review path | Fail closed (block handoff) | Fail closed only if the configured solo review path itself breaks |
 
 Default `--reviewers` under `--solo-platform` becomes `<runner>:review` (e.g.

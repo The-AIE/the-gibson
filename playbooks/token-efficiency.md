@@ -540,7 +540,7 @@ minimization, not efficiency.
 
 1. Implement on S (or G if sensors are strong) in a dedicated worktree.
 2. Review and security adversarial on **F from another vendor**.
-3. Human merge gate (docs/14 / Tier C). Metered or capped subscription spend here
+3. **G12** floor (docs/14 / Tier C, D-015): E3 at the exact head + required checks. Metered or capped subscription spend here
    is expected; grinding auth on G-only with no F review is not.
 
 ---
