@@ -1,0 +1,87 @@
+{
+  "schema": "gibson.delivery.v1",
+  "schemaVersion": "1.0.0",
+  "authority": "report-only",
+  "subject": {
+    "repository": "example/example",
+    "pr": 1,
+    "issue": null,
+    "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "mergeSha": "cccccccccccccccccccccccccccccccccccccccc"
+  },
+  "actors": {
+    "builder": {
+      "login": "aie-agent-lanes-grok[bot]",
+      "vendor": "grok"
+    },
+    "reviewer": {
+      "login": "devin-ai-integration[bot]",
+      "vendor": "devin"
+    },
+    "releaser": {
+      "login": "unknown",
+      "vendor": "unknown"
+    }
+  },
+  "review": {
+    "independenceLevel": "E3",
+    "reviewedHeadSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reviewerVendor": "devin",
+    "verdict": "APPROVE",
+    "source": "review"
+  },
+  "gates": [
+    {
+      "name": "review-evidence",
+      "conclusion": "success",
+      "appSlug": "github-actions",
+      "appId": 1,
+      "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "completedAt": "2026-10-01T00:05:00Z"
+    }
+  ],
+  "requiredChecks": {
+    "status": "known",
+    "entries": [
+      {
+        "context": "review-evidence",
+        "appId": 1
+      }
+    ]
+  },
+  "tier": "C",
+  "g12": {
+    "applies": true,
+    "met": true,
+    "reasons": [
+      "tier-c",
+      "level-e3",
+      "head-bound",
+      "checks-success"
+    ]
+  },
+  "policyManifestDigest": "unknown",
+  "deployment": {
+    "status": "unknown"
+  },
+  "cleanup": {
+    "status": "unknown"
+  },
+  "lessons": {
+    "status": "unknown"
+  },
+  "cost": {
+    "status": "unknown"
+  },
+  "baseRef": "main",
+  "defaultBranch": "main",
+  "paginationExhausted": true,
+  "commentEditors": {
+    "status": "known"
+  },
+  "disposition": "delivered",
+  "reasons": [],
+  "bundleDigest": "3202aaf79d5885ea35e046657463b589fb29b4732ff3273f83d5f872f6032bf0",
+  "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+}

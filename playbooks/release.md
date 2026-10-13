@@ -57,6 +57,8 @@ unhealthy, **do not merge** — harden or escalate ([docs/23](../docs/23-deliver
 # independence, or merge/release authority. A verified empty reservation does
 # not launder later ordinary commits. `claim.sh` requires both live snapshots
 # to be OPEN; report-only inspection of a stable CLOSED or MERGED PR is allowed.
+# Report-only delivery receipt (#160). Not merge, deploy, or canary authority.
+node <path-to-gibson>/scripts/delivery-receipt.mjs --help
 #
 # Post-merge positive canary (#273): after the schema writer/reader land, the
 # first new v2 claim must classify exactly one reservation before implementation
