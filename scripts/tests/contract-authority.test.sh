@@ -1905,6 +1905,89 @@ fi
 prove_legacy_green_structured_red "tier C treatment" "E_TIER_WEAKENING" "tiers"
 cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
 
+echo "# second risk-tier table cannot hide behind the first"
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+const start=t.indexOf("| Tier | Definition | Treatment |");
+const marker="serialize when stateful.";
+const end=t.indexOf(marker, start);
+if (start<0 || end<0) throw new Error("canonical tier table not found");
+const lineEnd=t.indexOf("\n", end);
+const block=t.slice(start, lineEnd===-1 ? t.length : lineEnd);
+fs.writeFileSync(p, t+"\n\n## Second risk-tier table\n\n"+block+"\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_TABLE_DUPLICATE' >/dev/null; then
+  ok "mutation: second identical Tier | Definition | Treatment table fails with E_TIER_TABLE_DUPLICATE"
+else
+  bad "mutation second identical tier table (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "second identical tier table" "E_TIER_TABLE_DUPLICATE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+const second=[
+  "|  TIER  |  DEFINITION  |  TREATMENT  |",
+  "|---|---|---|",
+  "| **A** | Routine: UI copy, isolated components, docs, tests. | Solo independent review; standard gates |",
+  "| **B** | Elevated: shared modules, API routes, data reads, >150 lines or >6 files. | Full-lens review; UX eval if visible |",
+  "| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Optional review; G12 when convenient |",
+].join("\n");
+fs.writeFileSync(p, t+"\n\n## Decoy risk tiers\n\n"+second+"\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_TABLE_DUPLICATE' >/dev/null; then
+  ok "mutation: second weakened Tier C table fails with E_TIER_TABLE_DUPLICATE"
+else
+  bad "mutation second weakened tier table (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "second weakened tier table" "E_TIER_TABLE_DUPLICATE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const lines=fs.readFileSync(p,"utf8").split("\n");
+const start=lines.findIndex((l)=>l==="| Tier | Definition | Treatment |");
+if (start<0) throw new Error("tier header missing");
+const kept=lines.filter((_,i)=>i<start || i>start+4);
+if (kept.some((l)=>l.includes("| Tier |") || l.includes("| **C** |"))) {
+  throw new Error("tier table was not removed");
+}
+fs.writeFileSync(p, kept.join("\n"));
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_OMISSION' >/dev/null && ! echo "$out" | grep 'E_TIER_TABLE_DUPLICATE' >/dev/null; then
+  ok "mutation: zero risk-tier tables still fail with E_TIER_OMISSION"
+else
+  bad "mutation zero tier tables (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+const needle="| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. |";
+const extra="| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Optional review; G12 when convenient |";
+if (!t.includes(needle)) throw new Error("canonical C row missing");
+t=t.replace(needle, needle+"\n"+extra);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_DUPLICATE' >/dev/null && echo "$out" | grep 'E_TIER_WEAKENING' >/dev/null; then
+  ok "mutation: canonical C then weakened C in one table fails with E_TIER_DUPLICATE"
+else
+  bad "mutation duplicate C row (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "duplicate tier id in one table" "E_TIER_DUPLICATE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
 # Benign control: "not just the smell" must not trip polarity.
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -eq 0 ]] && grep -q 'not just' "$SANDBOX/AGENTS.md"; then
@@ -2457,9 +2540,9 @@ TIER_TABLE=$(
   node --input-type=module -e '
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-const { diffTierTreatments } = await import(pathToFileURL(process.env.SEM).href);
+const { diffTierTreatments, parseRiskTiers, extractMarkdownTable, countMarkdownTables } = await import(pathToFileURL(process.env.SEM).href);
 const { CANONICAL_TIER_C_TREATMENT } = await import(pathToFileURL(process.env.CANON).href);
 const canonical = CANONICAL_TIER_C_TREATMENT;
 const red = ["E_TIER_WEAKENING"];
@@ -2508,6 +2591,85 @@ for (const row of rows) {
   } else {
     console.log("TIER_OK " + row.name);
   }
+}
+const weakened = "Optional review; G12 when convenient";
+const dupCases = [
+  {
+    name: "api-canonical-then-weakened-C",
+    tiers: [
+      { id: "C", definition: "Money", treatment: canonical },
+      { id: "C", definition: "Money", treatment: weakened },
+    ],
+    expect: ["E_TIER_DUPLICATE", "E_TIER_WEAKENING"],
+  },
+  {
+    name: "api-weakened-then-canonical-C",
+    tiers: [
+      { id: "C", definition: "Money", treatment: weakened },
+      { id: "C", definition: "Money", treatment: canonical },
+    ],
+    expect: ["E_TIER_DUPLICATE", "E_TIER_WEAKENING"],
+  },
+  {
+    name: "api-duplicate-canonical-C",
+    tiers: [
+      { id: "C", definition: "Money", treatment: canonical },
+      { id: "C", definition: "Money", treatment: canonical },
+    ],
+    expect: ["E_TIER_DUPLICATE"],
+  },
+];
+for (const row of dupCases) {
+  const got = diffTierTreatments(row.tiers).map((f) => f.code);
+  if (JSON.stringify(got) !== JSON.stringify(row.expect)) {
+    failed.push(row.name + " got " + JSON.stringify(got) + " want " + JSON.stringify(row.expect));
+  } else {
+    console.log("TIER_OK " + row.name);
+  }
+}
+const agentsPath = join(dirname(process.env.SEM), "..", "..", "AGENTS.md");
+const agentsSrc = readFileSync(agentsPath, "utf8");
+if (countMarkdownTables(agentsSrc, ["Tier", "Definition", "Treatment"]) !== 1) {
+  failed.push("live AGENTS.md tier-table count is not 1");
+} else if (diffTierTreatments(parseRiskTiers(agentsSrc)).length !== 0) {
+  failed.push("live AGENTS.md tier treatments are not green");
+} else {
+  console.log("TIER_OK live-agents-one-table-green");
+}
+const cRow = agentsSrc.split("\n").find((l) => l.startsWith("| **C** |"));
+if (!cRow) {
+  failed.push("temp-copy mutation missing canonical C row");
+} else {
+  const dir2 = mkdtempSync(join(tmpdir(), "tier-c-dup-row-"));
+  const copyPath = join(dir2, "AGENTS.md");
+  writeFileSync(copyPath, agentsSrc.replace(cRow, cRow + "\n| **C** | Money | " + weakened + " |"));
+  const parsed = parseRiskTiers(readFileSync(copyPath, "utf8"));
+  const got = diffTierTreatments(parsed).map((f) => f.code);
+  rmSync(dir2, { recursive: true, force: true });
+  const want = ["E_TIER_DUPLICATE", "E_TIER_WEAKENING"];
+  if (JSON.stringify(got) !== JSON.stringify(want)) {
+    failed.push("temp-copy duplicate C row got " + JSON.stringify(got) + " want " + JSON.stringify(want));
+  } else {
+    console.log("TIER_OK temp-copy-canonical-then-weakened-C");
+  }
+}
+const secondTable = [
+  "",
+  "## Decoy risk tiers",
+  "",
+  "|  tier | definition | treatment |",
+  "|---|---|---|",
+  "| **C** | Money | " + weakened + " |",
+  "",
+].join("\n");
+const doubled = agentsSrc + secondTable;
+const firstOnly = extractMarkdownTable(doubled, ["Tier", "Definition", "Treatment"]);
+if (firstOnly.length !== 3) {
+  failed.push("extractMarkdownTable return contract changed: " + firstOnly.length);
+} else if (countMarkdownTables(doubled, ["Tier", "Definition", "Treatment"]) !== 2) {
+  failed.push("second case-folded tier table was not counted");
+} else {
+  console.log("TIER_OK extract-first-count-both");
 }
 const semSrc = readFileSync(process.env.SEM, "utf8");
 const pin = "treat !== CANONICAL_TIER_C_TREATMENT";

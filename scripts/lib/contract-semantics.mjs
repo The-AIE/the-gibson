@@ -312,6 +312,27 @@ export function extractMarkdownTable(text, headerCells) {
   return [];
 }
 
+/**
+ * Count every markdown table whose header matches `headerCells`.
+ * Header cells are whitespace-collapsed and compared case-insensitively,
+ * the same match `extractMarkdownTable` uses. This does not change that
+ * function's first-table return. Callers that must fail closed on a
+ * second table use the count.
+ */
+export function countMarkdownTables(text, headerCells) {
+  const lines = String(text).split(/\r?\n/);
+  const want = headerCells.map((h) => collapseWs(h).toLowerCase());
+  let count = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].includes("|")) continue;
+    const cells = splitTableRow(lines[i]);
+    if (cells.length !== want.length) continue;
+    const got = cells.map((c) => c.toLowerCase());
+    if (got.every((c, idx) => c === want[idx])) count += 1;
+  }
+  return count;
+}
+
 function splitTableRow(line) {
   const t = line.trim();
   if (!t.startsWith("|")) return [];
@@ -1365,39 +1386,49 @@ function tierCDiffHint(actual, expected) {
  * Tier A/B/C treatment semantics — IDs alone are not enough.
  * Tier C passes only when the treatment equals CANONICAL_TIER_C_TREATMENT
  * byte-for-byte. It does not enforce that floor at runtime.
+ * A repeated tier id is a finding. Rows are not collapsed last-wins;
+ * every row is checked, so a later canonical row cannot hide an earlier
+ * weakened one.
  */
 export function diffTierTreatments(tiers) {
   const findings = [];
-  const byId = new Map();
+  const rows = [];
   for (const t of Array.isArray(tiers) ? tiers : []) {
     const id = String(t.id || "")
       .replace(/\*/g, "")
       .trim();
-    if (id) byId.set(id, t);
+    if (id) rows.push({ id, tier: t });
   }
-  const tierA = byId.get("A");
-  if (tierA && !/independent review/i.test(tierA.treatment || "")) {
-    findings.push({
-      code: "E_TIER_WEAKENING",
-      message: "Tier A treatment missing independent review",
-    });
+  const counts = new Map();
+  for (const row of rows) counts.set(row.id, (counts.get(row.id) || 0) + 1);
+  for (const [id, n] of counts) {
+    if (n > 1) {
+      findings.push({
+        code: "E_TIER_DUPLICATE",
+        message: `tier id ${id} duplicated (${n} times); refusing last-wins`,
+      });
+    }
   }
-  const tierB = byId.get("B");
-  if (tierB && !/full-lens review/i.test(tierB.treatment || "")) {
-    findings.push({
-      code: "E_TIER_WEAKENING",
-      message: "Tier B treatment missing full-lens review",
-    });
-  }
-  const tierC = byId.get("C");
-  if (tierC) {
-    const treat = String(tierC.treatment ?? "");
-    if (treat !== CANONICAL_TIER_C_TREATMENT) {
-      const hints = tierCKeywordHints(treat);
+  for (const { id, tier } of rows) {
+    if (id === "A" && !/independent review/i.test(tier.treatment || "")) {
       findings.push({
         code: "E_TIER_WEAKENING",
-        message: `Tier C treatment must equal the canonical pin byte-for-byte; ${tierCDiffHint(treat, CANONICAL_TIER_C_TREATMENT)}; keyword hints (not the pass condition): ${hints.length ? hints.join(", ") : "none"}`,
+        message: "Tier A treatment missing independent review",
       });
+    } else if (id === "B" && !/full-lens review/i.test(tier.treatment || "")) {
+      findings.push({
+        code: "E_TIER_WEAKENING",
+        message: "Tier B treatment missing full-lens review",
+      });
+    } else if (id === "C") {
+      const treat = String(tier.treatment ?? "");
+      if (treat !== CANONICAL_TIER_C_TREATMENT) {
+        const hints = tierCKeywordHints(treat);
+        findings.push({
+          code: "E_TIER_WEAKENING",
+          message: `Tier C treatment must equal the canonical pin byte-for-byte; ${tierCDiffHint(treat, CANONICAL_TIER_C_TREATMENT)}; keyword hints (not the pass condition): ${hints.length ? hints.join(", ") : "none"}`,
+        });
+      }
     }
   }
   return findings;
@@ -1531,8 +1562,18 @@ export function structuredAgentsEnumerationFindings(agentsText, candidate) {
     }
   }
 
+  const tierHeader = ["Tier", "Definition", "Treatment"];
+  const tierTableCount = countMarkdownTables(agentsText, tierHeader);
   const tierRows = parseRiskTiers(agentsText);
+  if (tierTableCount > 1) {
+    findings.push({
+      code: "E_TIER_TABLE_DUPLICATE",
+      message: `AGENTS.md has ${tierTableCount} Tier | Definition | Treatment tables; expected exactly one`,
+    });
+  }
   const tiers = tierRows.map((t) => t.id);
+  // Zero matching tables: parseRiskTiers returns no rows, and the closed
+  // list below reports E_TIER_OMISSION. That is the missing-table finding.
   findings.push(...diffClosedSequence("TIER", tiers, EXPECTED_TIERS));
   findings.push(...diffTierTreatments(tierRows));
 
