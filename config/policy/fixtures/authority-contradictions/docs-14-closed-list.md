@@ -53,7 +53,7 @@ itself a last resort reserved for the incidents marked ⛔.
   gets built (not *how* — how is the agent's job).
 - **G11** — Work grew beyond the claimed scope (>2× estimate, or touching Tier C
   surface the issue didn't declare). Park, split, ask.
-- **G12** — Tier C merge approval (money/auth/consent/PII/security/schema).
+- **G12** — Tier C review floor (D-015): E3 at the exact head + required checks.
 - **G13** — Two agents want conflicting approaches and coordination failed (claim
   conflict that re-queueing didn't resolve).
 

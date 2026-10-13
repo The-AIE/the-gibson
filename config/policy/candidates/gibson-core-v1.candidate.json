@@ -22,21 +22,21 @@
         "id": "src.agents-contract",
         "path": "AGENTS.md",
         "digestAlgorithm": "sha256",
-        "digest": "9f7585ec4e8eb44df0a05ce9b915e11a1f1b1ad4207edcfd010bdfd696570d8c",
+        "digest": "689c170eef96a5dbaf15ad8f27ced0c07f29ebcb71c7fc1f38382154748f8772",
         "role": "human-readable-contract"
       },
       {
         "id": "src.human-gates",
         "path": "docs/14-human-gates.md",
         "digestAlgorithm": "sha256",
-        "digest": "2e252d8bed5e145353ec826164006a850879cf6b34a1c739655b369c4fbd7029",
+        "digest": "2a775da934bec92d85658402d772d2adedc6f25bcc35e2507503f85efa8c5cc9",
         "role": "explanatory-history"
       },
       {
         "id": "src.quality-gates",
         "path": "docs/06-quality-gates.md",
         "digestAlgorithm": "sha256",
-        "digest": "c55d12f6e19e01a41b2c060880c3f8b75c2b6109fb069ec6a9b92201f7fb3b57",
+        "digest": "7c8505ff68c7a1dacc4eaed1d40e16baf0c20b00062d7024b7c22ad668365013",
         "role": "explanatory-history"
       },
       {
@@ -135,7 +135,7 @@
     {
       "id": "G12",
       "category": "scope-judgment",
-      "summary": "Tier C merge approval (money/auth/consent/PII/security/schema).",
+      "summary": "Tier C review floor (D-015): E3 at the exact head + required checks.",
       "severity": false,
       "relatedTierIds": [
         "C"
@@ -289,7 +289,7 @@
     },
     {
       "id": "ri.tier-c",
-      "description": "Tier C: adversarial fan-out plus human merge gate G12. Unchanged under solo-platform.",
+      "description": "Tier C review floor (D-015): E3 at the exact head + required checks.",
       "tierId": "C",
       "minimumRelationship": "human-gate",
       "preferredRelationship": "human-gate",

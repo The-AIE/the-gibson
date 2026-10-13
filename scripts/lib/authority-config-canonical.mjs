@@ -459,7 +459,7 @@ export const CANONICAL_BINDING_FAMILIES = [
       "| **A** | Routine:",
       "| **B** | Elevated:",
       "| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data.",
-      "**G12**",
+      "**G12** floor (E3 at the exact head + required checks, D-015)",
       "serialize when stateful",
       "Diffs may drift **into** Tier C; they never drift out without a reviewer saying so",
     ],
@@ -473,7 +473,7 @@ export const CANONICAL_BINDING_FAMILIES = [
       "Signed-off-by",
       "exact committed head SHA",
       "`release` verifies, in order",
-      "Tier C / schema → **G12** human approval recorded",
+      "Tier C / schema → **G12** floor met (D-015).",
     ],
   },
   {

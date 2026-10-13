@@ -183,7 +183,7 @@ vendor-blind on purpose. Sensors live in `scripts/test-integrity.mjs` and
 |---|---|---|
 | **A** | Routine: UI copy, isolated components, docs, tests | Solo review pass; standard gates |
 | **B** | Elevated: shared modules, API routes, data reads, >150 lines or >6 files | Full-lens review; UX eval if visible |
-| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data | Everything below + adversarial review + human merge gate + serialized where stateful |
+| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data | Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. |
 
 Tier is assigned at decomposition and re-checked at review (diffs drift into Tier C;
 they never drift out without a reviewer saying so).
@@ -204,8 +204,9 @@ canonical taxonomy (issue #161) replaces that loose language. `AGENTS.md`
 cites this table by level name rather than restating it, per its own hard
 byte cap — but this page is non-normative (banner above): it restates the
 vocabulary for readability. `AGENTS.md`'s citation and the decisions in
-`memory/DECISIONS.md` (D-011, D-012) remain the authority for what each
-tier actually requires.
+`memory/DECISIONS.md` (D-015 for the Tier C floor, D-012 for A/B) remains the
+authority for what each tier actually requires. D-015 supersedes only D-011's
+owner-merge clause.
 
 | Level | Meaning |
 |---|---|
@@ -225,10 +226,15 @@ level above E0 for that head.
 
 **Decided minimums:**
 
-- Tier C requires **E3 + the owner's own merge action** (D-011,
-  `memory/DECISIONS.md`) — a cross-vendor E3 review is a claim, not proof;
-  the merging party still re-runs checks and reads the diff before merging
-  on it. This does not permit merging on an unread AI approval.
+- Tier C requires the **G12** floor (D-015, `memory/DECISIONS.md`): E3 at the
+  exact head + required checks. A cross-vendor E3 review
+  stays a claim until the merging party re-runs the checks and reads the diff.
+  An unread AI approval leaves the
+  floor unmet. The Tier C row check in `scripts/lib/contract-semantics.mjs`
+  (`diffTierTreatments`) checks that wording only. Runtime enforcement is
+  `scripts/pr-review-evidence.mjs` (exact-head review evidence) plus
+  branch-protection required checks today, and the #160 delivery-receipt
+  verifier later.
 - Tier A and Tier B require **E2** (D-012) — a separate evaluator identity
   or same-vendor different model, independently invoked and read-only.
   Rules out a same-actor self-check or fresh-context pass counting as
@@ -238,7 +244,7 @@ level above E0 for that head.
 Schema and security-boundary changes were not given a separate decision:
 `AGENTS.md`'s Risk tiers table above already routes
 money/auth/security-boundary/schema/prod-data changes into Tier C, so they
-inherit D-011's minimum rather than needing one of their own.
+inherit the Tier C floor (D-015) rather than needing one of their own.
 
 **Still undecided:** delivery-control (`AGENTS.md`'s own separate binding
 section, not part of the Risk tiers table above) has no minimum yet — #161's
@@ -282,7 +288,7 @@ Six lenses; findings cite file:line and state the failure scenario, not just the
 2. CI green (gate + tests + security hard-fail layers).
 3. Review verdict APPROVE; UX eval pass (when applicable).
 4. DCO/`Signed-off-by` survives the squash.
-5. Tier C / schema → **human approval recorded** (comment or approval from Mark).
+5. Tier C / schema → **G12** floor met (D-015).
 6. Schema PRs: serialized, migration file present (schema-guard CI check).
 
 ## Drift sensors (continuous, outside change cycles)

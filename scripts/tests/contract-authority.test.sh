@@ -1891,7 +1891,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
   "Optional review; G12 when convenient"
 );
 fs.writeFileSync(p,t);
@@ -2456,9 +2456,16 @@ TIER_TABLE=$(
   node --input-type=module -e '
 import { pathToFileURL } from "node:url";
 const { diffTierTreatments } = await import(pathToFileURL(process.env.SEM).href);
-const canonical = "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful";
+const canonical = "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful.";
 const rows = [
-  { name: "canonical-treatment", treatment: canonical, expect: [] },
+  { name: "canonical-wording", treatment: canonical, expect: [] },
+  { name: "wording-still-names-human-merge-gate", treatment: "Fan-out + adversarial review + **G12** human merge gate (E3 at the exact head + required checks, D-015); serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "wording-still-names-owner-merge", treatment: "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. Min. owner merge.", expect: ["E_TIER_WEAKENING"] },
+  { name: "wording-missing-e3", treatment: "Fan-out + adversarial review + **G12** floor (at the exact head + required checks, D-015); serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "wording-missing-required-checks", treatment: "Fan-out + adversarial review + **G12** floor (E3 at the exact head, D-015); serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "wording-missing-exact-head", treatment: "Fan-out + adversarial review + **G12** floor (E3 + required checks, D-015); serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "wording-required-checks-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks cannot be skipped, D-015); serialize when stateful", expect: [] },
+  { name: "wording-e3-is-not-required", treatment: "Fan-out + adversarial review + **G12** floor (E3 is not required at the exact head + required checks, D-015); serialize when stateful", expect: ["E_TIER_WEAKENING"] },
   { name: "human-merge-is-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is not required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
   { name: "human-merge-is-not-operationally-required", treatment: "Fan-out + adversarial review + **G12** human merge is not operationally required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
   { name: "human-merge-is-not-technically-required", treatment: "Fan-out + adversarial review + **G12** human merge is not technically required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
@@ -2467,7 +2474,7 @@ const rows = [
   { name: "human-merge-is-technically-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
   { name: "human-merge-cannot-be-required", treatment: "Fan-out + adversarial review + **G12** human merge cannot be required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
   { name: "human-merge-does-not-have-to-happen", treatment: "Fan-out + adversarial review + **G12** human merge does not have to happen; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful", expect: [] },
+  { name: "human-merge-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
   { name: "missing-fan-out", treatment: "Optional review; G12 when convenient", expect: ["E_TIER_WEAKENING"] },
 ];
 const failed = [];
@@ -2983,14 +2990,14 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
 ' "$SANDBOX/AGENTS.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_WEAKENING' >/dev/null; then
-  ok "sensor: Tier C human merge is-not-required fails with E_TIER_WEAKENING"
+  ok "sensor: Tier C wording that still names human merge is-not-required fails with E_TIER_WEAKENING"
 else
   bad "sensor tier-C human-merge-is-not-required (rc=$rc): $out"
 fi
@@ -3002,14 +3009,14 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not operationally required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
 ' "$SANDBOX/AGENTS.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_WEAKENING' >/dev/null; then
-  ok "sensor: Tier C human merge is-not-operationally-required fails with E_TIER_WEAKENING"
+  ok "sensor: Tier C wording that still names human merge is-not-operationally-required fails with E_TIER_WEAKENING"
 else
   bad "sensor tier-C human-merge-is-not-operationally-required (rc=$rc): $out"
 fi
@@ -3153,7 +3160,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not technically required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
@@ -3161,7 +3168,7 @@ fs.writeFileSync(p,t);
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 tier_n=$(printf '%s\n' "$out" | grep -c 'E_TIER_WEAKENING' || true)
 if [[ "$rc" -ne 0 ]] && [[ "$tier_n" -eq 1 ]]; then
-  ok "sensor: Tier C human merge is-not-technically-required fails with E_TIER_WEAKENING"
+  ok "sensor: Tier C wording that still names human merge is-not-technically-required fails with E_TIER_WEAKENING"
 else
   bad "sensor tier-C human-merge-is-not-technically-required (rc=$rc n=$tier_n): $out"
 fi
@@ -3173,7 +3180,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not always required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
@@ -3181,7 +3188,7 @@ fs.writeFileSync(p,t);
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 tier_n=$(printf '%s\n' "$out" | grep -c 'E_TIER_WEAKENING' || true)
 if [[ "$rc" -ne 0 ]] && [[ "$tier_n" -eq 1 ]]; then
-  ok "sensor: Tier C human merge is-not-always-required fails with E_TIER_WEAKENING"
+  ok "sensor: Tier C wording that still names human merge is-not-always-required fails with E_TIER_WEAKENING"
 else
   bad "sensor tier-C human-merge-is-not-always-required (rc=$rc n=$tier_n): $out"
 fi
@@ -3250,7 +3257,7 @@ fs.writeFileSync(p, t.replace(s, r));
 
 APPLY_NEEDLE='then **explicit human apply**'
 LINE_NEEDLE='findings cite **file:line**'
-TIER_NEEDLE='Fan-out + adversarial review + **G12** human merge gate; serialize when stateful'
+TIER_NEEDLE='Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful'
 
 assert_sensor_exact_code \
   "optional slash unrelated cannot-be-skipped" \
@@ -3324,33 +3331,39 @@ assert_sensor_exact_code \
   "E_BINDING_NEGATION"
 
 assert_sensor_exact_code \
-  "Tier C human merge is-not-in-any-way-required" \
+  "Tier C wording still naming human merge is-not-in-any-way-required" \
   "$TIER_NEEDLE" \
   "Fan-out + adversarial review + **G12** human merge is not in any way required; serialize when stateful" \
   "E_TIER_WEAKENING" \
-  "tier C human-merge-is-not-in-any-way-required" "tiers"
+  "tier C wording human-merge-is-not-in-any-way-required" "tiers"
 assert_sensor_exact_code \
-  "Tier C human merge is-technically-not-required" \
+  "Tier C wording still naming human merge is-technically-not-required" \
   "$TIER_NEEDLE" \
   "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful" \
   "E_TIER_WEAKENING" \
-  "tier C human-merge-is-technically-not-required" "tiers"
+  "tier C wording human-merge-is-technically-not-required" "tiers"
 assert_sensor_exact_code \
-  "Tier C human merge cannot-be-required" \
+  "Tier C wording still naming human merge cannot-be-required" \
   "$TIER_NEEDLE" \
   "Fan-out + adversarial review + **G12** human merge cannot be required; serialize when stateful" \
   "E_TIER_WEAKENING" \
-  "tier C human-merge-cannot-be-required" "tiers"
+  "tier C wording human-merge-cannot-be-required" "tiers"
 assert_sensor_exact_code \
-  "Tier C human merge does-not-have-to-happen" \
+  "Tier C wording still naming human merge does-not-have-to-happen" \
   "$TIER_NEEDLE" \
   "Fan-out + adversarial review + **G12** human merge does not have to happen; serialize when stateful" \
   "E_TIER_WEAKENING" \
-  "tier C human-merge-does-not-have-to-happen" "tiers"
-assert_sensor_green \
-  "Tier C human merge cannot-be-skipped" \
+  "tier C wording human-merge-does-not-have-to-happen" "tiers"
+assert_sensor_exact_code \
+  "Tier C wording still naming human merge cannot-be-skipped" \
   "$TIER_NEEDLE" \
-  "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful"
+  "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful" \
+  "E_TIER_WEAKENING" \
+  "tier C wording human-merge-cannot-be-skipped" "tiers"
+assert_sensor_green \
+  "Tier C wording required-checks cannot-be-skipped" \
+  "$TIER_NEEDLE" \
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. Required checks cannot be skipped"
 
 echo "# first-match contradiction masking"
 cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-historical-then-active-supersedes.md" \

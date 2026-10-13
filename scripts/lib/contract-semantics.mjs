@@ -1328,8 +1328,11 @@ export function diffBindingPhrase(familyId, phrase, section, opts = {}) {
 }
 
 /**
- * Tier A/B/C treatment semantics — IDs alone are not enough. Tier C
- * must keep fan-out + adversarial review + G12 human merge strength.
+ * Tier A/B/C treatment semantics — IDs alone are not enough.
+ * The Tier C branch is a doctrine-text wording check only. It requires the
+ * treatment to name G12, E3, the exact head, required checks, adversarial
+ * review, and fan-out, and it rejects a treatment that still names a human
+ * or owner merge. It does not enforce that floor at runtime.
  */
 export function diffTierTreatments(tiers) {
   const findings = [];
@@ -1357,28 +1360,54 @@ export function diffTierTreatments(tiers) {
   const tierC = byId.get("C");
   if (tierC) {
     const treat = collapseWs(tierC.treatment || "");
-    const lower = treat.toLowerCase();
     const hasG12 = /\bg12\b/i.test(treat);
-    const hasHumanMerge = /human merge/.test(lower);
-    const hasAdversarial = /adversarial review/.test(lower);
-    const hasFanout = /fan-out|fan out/.test(lower);
-    if (!hasG12 || !hasHumanMerge || !hasAdversarial || !hasFanout) {
+    const hasE3 = /\bE3\b/.test(treat);
+    const hasExactHead = /exact head/i.test(treat);
+    const hasRequiredChecks = /required checks/i.test(treat);
+    const hasAdversarial = /adversarial review/i.test(treat);
+    const hasFanout = /fan-out|fan out/i.test(treat);
+    const namesHumanMerge = /human merge/i.test(treat);
+    const namesOwnerMerge = /owner merge/i.test(treat);
+    if (
+      !hasG12 ||
+      !hasE3 ||
+      !hasExactHead ||
+      !hasRequiredChecks ||
+      !hasAdversarial ||
+      !hasFanout ||
+      namesHumanMerge ||
+      namesOwnerMerge
+    ) {
+      const gaps = [];
+      if (!hasG12) gaps.push("G12");
+      if (!hasE3) gaps.push("E3");
+      if (!hasExactHead) gaps.push("exact head");
+      if (!hasRequiredChecks) gaps.push("required checks");
+      if (!hasAdversarial) gaps.push("adversarial review");
+      if (!hasFanout) gaps.push("fan-out");
+      if (namesHumanMerge) gaps.push('still names "human merge"');
+      if (namesOwnerMerge) gaps.push('still names "owner merge"');
       findings.push({
         code: "E_TIER_WEAKENING",
-        message:
-          "Tier C treatment missing required human merge / adversarial review strength",
+        message: `Tier C treatment doctrine-text wording only; missing or stale: ${gaps.join(", ")}`,
       });
     } else if (
-      obligationNegated(treat, "human merge") ||
+      obligationNegated(treat, "E3") ||
+      obligationNegated(treat, "exact head") ||
+      obligationNegated(treat, "required checks") ||
       obligationNegated(treat, "adversarial review") ||
       obligationNegated(treat, "fan-out") ||
-      clauseWeakensBinding(treat, "human merge") ||
+      clauseWeakensBinding(treat, "E3") ||
+      clauseWeakensBinding(treat, "exact head") ||
+      clauseWeakensBinding(treat, "required checks") ||
       clauseWeakensBinding(treat, "adversarial review") ||
+      clauseWeakensBinding(treat, "fan-out") ||
       clauseWeakensBinding(treat)
     ) {
       findings.push({
         code: "E_TIER_WEAKENING",
-        message: "Tier C treatment weakens human merge / adversarial review",
+        message:
+          "Tier C treatment doctrine-text wording only; weakens E3, exact head, required checks, adversarial review, or fan-out",
       });
     }
   }
