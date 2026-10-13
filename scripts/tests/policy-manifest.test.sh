@@ -3573,6 +3573,127 @@ chmod 644 "$DRIFT/config/policy/gibson-core-v1.json"
 out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && ok "unreadable manifest restored GREEN" || bad "unreadable manifest restore (rc=$rc): $out"
 
+echo
+echo "=== encoding: BOM, CR, invalid UTF-8, NUL ==="
+out=$(run_tool check-drift --repo-root "$REPO_ROOT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "current files check-drift GREEN" || bad "current files check-drift (rc=$rc): $out"
+
+# name, which file (agents|manifest), how (bom|crlf|lone-cr|bad-utf8|nul)
+encode_file() {
+  "$NODE" -e '
+    const fs = require("fs");
+    const p = process.argv[1];
+    const how = process.argv[2];
+    const b = fs.readFileSync(p);
+    let out;
+    if (how === "bom") {
+      out = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), b]);
+    } else if (how === "crlf") {
+      const s = b.toString("utf8");
+      if (!s.includes("\n") || s.includes("\r")) process.exit(2);
+      out = Buffer.from(s.replace(/\n/g, "\r\n"), "utf8");
+    } else if (how === "lone-cr") {
+      let at = -1;
+      for (let i = 0; i < b.length - 1; i++) {
+        if (b[i] !== 0x0d && b[i] !== 0x0a && b[i + 1] !== 0x0a && b[i + 1] !== 0x0d) {
+          at = i + 1;
+          break;
+        }
+      }
+      if (at < 0) process.exit(2);
+      out = Buffer.concat([b.subarray(0, at), Buffer.from([0x0d]), b.subarray(at)]);
+    } else if (how === "bad-utf8") {
+      out = Buffer.concat([b, Buffer.from([0xff])]);
+    } else if (how === "nul") {
+      out = Buffer.concat([b, Buffer.from([0x00])]);
+    } else {
+      process.exit(2);
+    }
+    fs.writeFileSync(p, out);
+  ' "$1" "$2"
+}
+
+encoding_red() {
+  local name="$1" file="$2" how="$3"
+  encode_file "$file" "$how" || { bad "$name fixture"; return; }
+  out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+  if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'E_VIEW_ENCODING' >/dev/null && echo "$out" | grep -F 'check-drift:' >/dev/null; then
+    ok "$name RED E_VIEW_ENCODING"
+  else
+    bad "$name RED (rc=$rc): $out"
+  fi
+  cp "$REPO_ROOT/AGENTS.md" "$DRIFT/AGENTS.md"
+  cp "$CANDIDATE" "$DRIFT/config/policy/gibson-core-v1.json"
+  out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+  [[ "$rc" -eq 0 ]] && ok "$name restored GREEN" || bad "$name restored (rc=$rc): $out"
+}
+
+encoding_red "AGENTS.md leading BOM" "$DRIFT/AGENTS.md" bom
+encoding_red "AGENTS.md CRLF" "$DRIFT/AGENTS.md" crlf
+encoding_red "AGENTS.md lone CR" "$DRIFT/AGENTS.md" lone-cr
+encoding_red "AGENTS.md invalid UTF-8" "$DRIFT/AGENTS.md" bad-utf8
+encoding_red "AGENTS.md NUL" "$DRIFT/AGENTS.md" nul
+encoding_red "manifest leading BOM" "$DRIFT/config/policy/gibson-core-v1.json" bom
+encoding_red "manifest CRLF" "$DRIFT/config/policy/gibson-core-v1.json" crlf
+encoding_red "manifest lone CR" "$DRIFT/config/policy/gibson-core-v1.json" lone-cr
+encoding_red "manifest invalid UTF-8" "$DRIFT/config/policy/gibson-core-v1.json" bad-utf8
+encoding_red "manifest NUL" "$DRIFT/config/policy/gibson-core-v1.json" nul
+
+echo
+echo "=== mutation: removing viewEncodingFindings lets a BOM pass ==="
+ENC_MUT="$ROOT/policy-manifest-no-encoding.mjs"
+cp "$TOOL" "$ENC_MUT"
+if ! "$NODE" -e '
+  const fs = require("fs");
+  const p = process.argv[1];
+  let s = fs.readFileSync(p, "utf8");
+  const name = "export function viewEncodingFindings";
+  const start = s.indexOf(name);
+  if (start < 0) throw new Error("missing viewEncodingFindings");
+  const brace = s.indexOf("{", start);
+  let depth = 0, end = -1;
+  for (let i = brace; i < s.length; i++) {
+    if (s[i] === "{") depth++;
+    else if (s[i] === "}") {
+      depth--;
+      if (depth === 0) { end = i + 1; break; }
+    }
+  }
+  if (end < 0) throw new Error("cannot end viewEncodingFindings");
+  const body = "export function viewEncodingFindings() {\n  return [];\n}";
+  s = s.slice(0, start) + body + s.slice(end);
+  if (!s.includes(body)) throw new Error("encoding check was not removed");
+  if (s.indexOf("push(\"leading BOM\")") >= 0 || s.indexOf("0xfeff") >= 0) {
+    throw new Error("BOM check still present");
+  }
+  fs.writeFileSync(p, s);
+' "$ENC_MUT"; then
+  bad "encoding mutation surgery failed"
+fi
+if ! "$NODE" --check "$ENC_MUT" 2>/dev/null; then
+  bad "encoding mutation produced invalid syntax"
+fi
+if encode_file "$DRIFT/AGENTS.md" bom; then
+  MUT_RC=0
+  MUT_OUT=$("$NODE" "$ENC_MUT" check-drift --repo-root "$DRIFT" 2>&1) || MUT_RC=$?
+  if [[ "$MUT_RC" -eq 0 ]] && ! echo "$MUT_OUT" | grep -F 'E_VIEW_ENCODING' >/dev/null; then
+    ok "encoding mutation: BOM RED fails to fire"
+  else
+    bad "encoding mutation still fired BOM (rc=$MUT_RC): $MUT_OUT"
+  fi
+else
+  bad "BOM mutation fixture"
+fi
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'E_VIEW_ENCODING' >/dev/null; then
+  ok "unmutated tool still RED E_VIEW_ENCODING on the same BOM"
+else
+  bad "unmutated tool missed BOM (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/AGENTS.md" "$DRIFT/AGENTS.md"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "BOM mutation restored GREEN" || bad "BOM mutation restore (rc=$rc): $out"
+
 RENDER="$ROOT/render164"
 mkdir -p "$RENDER/config/policy"
 cp "$CANDIDATE" "$RENDER/config/policy/gibson-core-v1.json"
