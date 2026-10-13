@@ -6,6 +6,8 @@
  *
  *   node scripts/tests/delivery-receipt-cases.mjs
  * Prints the temp directory that holds the materialized bundles.
+ * applyOps throws `${caseName}: ${op} ${path}` and this process exits 1
+ * when a patch does not apply. A throw aborts the rest of the suite.
  */
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,36 +20,119 @@ function decode(seg) {
   return seg.replace(/~1/g, "/").replace(/~0/g, "~");
 }
 
-export function applyOps(doc, ops) {
+function arrayIndex(token) {
+  if (typeof token !== "string" || !/^(0|[1-9][0-9]*)$/.test(token)) return null;
+  const n = Number(token);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+function container(value) {
+  return value != null && typeof value === "object";
+}
+
+function failClosed(caseName, op, path) {
+  throw new Error(`${caseName}: ${op} ${path}`); // MUTATION_ANCHOR_PATCH_CLOSED
+}
+
+export function applyOps(doc, ops, caseName = "") {
   for (const op of ops) {
-    if (typeof op.path !== "string" || !op.path.startsWith("/")) {
-      throw new Error(`bad patch path ${JSON.stringify(op.path)}`);
+    const name = typeof op?.op === "string" ? op.op : "";
+    const path = typeof op?.path === "string" ? op.path : "";
+    if (name !== "add" && name !== "remove" && name !== "replace") {
+      failClosed(caseName, name || "?", path || JSON.stringify(op?.path));
+      continue;
     }
-    const parts = op.path.split("/").slice(1).map(decode);
+    if (!path.startsWith("/")) {
+      failClosed(caseName, name, path || JSON.stringify(op?.path));
+      continue;
+    }
+    const parts = path.split("/").slice(1).map(decode);
     let cur = doc;
+    let live = true;
     for (let i = 0; i < parts.length - 1; i += 1) {
-      const key = Array.isArray(cur) ? Number(parts[i]) : parts[i];
-      if (cur == null || cur[key] == null) throw new Error(`missing ${op.path}`);
-      cur = cur[key];
+      const token = parts[i];
+      let next;
+      if (Array.isArray(cur)) {
+        const idx = arrayIndex(token);
+        if (idx != null && idx < cur.length) next = cur[idx];
+      } else if (container(cur) && Object.hasOwn(cur, token)) {
+        next = cur[token];
+      }
+      if (!container(next)) {
+        failClosed(caseName, name, path);
+        live = false;
+        break;
+      }
+      cur = next;
+    }
+    if (!live) continue;
+    if (!container(cur)) {
+      failClosed(caseName, name, path);
+      continue;
     }
     const last = parts[parts.length - 1];
-    if (op.op === "remove") {
-      if (Array.isArray(cur)) cur.splice(Number(last), 1);
-      else delete cur[last];
-    } else if (op.op === "add" || op.op === "replace") {
-      const value = structuredClone(op.value);
+    if (name === "remove") {
       if (Array.isArray(cur)) {
-        const index = last === "-" ? cur.length : Number(last);
-        if (op.op === "add") cur.splice(index, 0, value);
-        else cur[index] = value;
+        const idx = arrayIndex(last);
+        if (idx == null || idx >= cur.length) {
+          failClosed(caseName, name, path);
+          continue;
+        }
+        cur.splice(idx, 1);
+      } else if (!Object.hasOwn(cur, last)) {
+        failClosed(caseName, name, path);
       } else {
-        cur[last] = value;
+        delete cur[last];
       }
+    } else if (Array.isArray(cur)) {
+      let idx = 0;
+      let indexOk = false;
+      if (name === "add" && last === "-") {
+        idx = cur.length;
+        indexOk = true;
+      } else {
+        const parsed = arrayIndex(last);
+        const limit = name === "add" ? cur.length : cur.length - 1;
+        if (parsed != null && parsed <= limit) {
+          idx = parsed;
+          indexOk = true;
+        }
+      }
+      if (!indexOk) {
+        failClosed(caseName, name, path);
+        continue;
+      }
+      const value = structuredClone(op.value);
+      if (name === "add") cur.splice(idx, 0, value);
+      else cur[idx] = value;
+    } else if (name === "replace" && !Object.hasOwn(cur, last)) {
+      failClosed(caseName, name, path);
     } else {
-      throw new Error(`bad patch op ${op.op}`);
+      cur[last] = structuredClone(op.value);
     }
   }
   return doc;
+}
+
+export function materialize(base, overlays) {
+  const docs = [];
+  for (const [name, ops] of Object.entries(overlays)) {
+    if (name.startsWith("_")) continue;
+    if (!/^[a-z0-9-]+$/.test(name)) {
+      const err = new Error("overlay name is invalid");
+      err.status = 2;
+      throw err;
+    }
+    if (!Array.isArray(ops)) {
+      const err = new Error(`overlay ${name} is not a patch list`);
+      err.status = 2;
+      throw err;
+    }
+    const doc = structuredClone(base);
+    applyOps(doc, ops, name);
+    docs.push([name, doc]);
+  }
+  return docs;
 }
 
 function main() {
@@ -58,19 +143,15 @@ function main() {
   const out = mkdtempSync(join(tmpdir(), "gibson-delivery-cases-"));
   const base = JSON.parse(readFileSync(join(FIXTURES, "delivered-tier-c.json"), "utf8"));
   const overlays = JSON.parse(readFileSync(join(FIXTURES, "overlays.json"), "utf8"));
+  let docs;
+  try {
+    docs = materialize(base, overlays);
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(err.status === 2 ? 2 : 1);
+  }
   writeFileSync(join(out, "delivered-tier-c.json"), JSON.stringify(base));
-  for (const [name, ops] of Object.entries(overlays)) {
-    if (name.startsWith("_")) continue;
-    if (!/^[a-z0-9-]+$/.test(name)) {
-      process.stderr.write(`overlay name is invalid\n`);
-      process.exit(2);
-    }
-    if (!Array.isArray(ops)) {
-      process.stderr.write(`overlay ${name} is not a patch list\n`);
-      process.exit(2);
-    }
-    const doc = structuredClone(base);
-    applyOps(doc, ops);
+  for (const [name, doc] of docs) {
     writeFileSync(join(out, `${name}.json`), JSON.stringify(doc));
   }
   process.stdout.write(`${out}\n`);

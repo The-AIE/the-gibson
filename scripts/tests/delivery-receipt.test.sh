@@ -18,11 +18,95 @@ bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 command -v node >/dev/null || { echo "delivery-receipt.test.sh: node required"; exit 1; }
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-delivery.XXXXXX")
 trap 'rm -rf "$ROOT" ${CASES:+"$CASES"}' EXIT
-CASES=$(node "$SCRIPT_DIR/delivery-receipt-cases.mjs") || {
+CASES_JS="$SCRIPT_DIR/delivery-receipt-cases.mjs"
+CASES=$(node "$CASES_JS") || {
   echo "delivery-receipt.test.sh: could not materialize cases"
   exit 1
 }
 [ -d "$CASES" ] || { echo "delivery-receipt.test.sh: case dir missing"; exit 1; }
+
+# 0 = failed closed with case, op, and path. 1 = applied. 2 = failed some other way.
+probe_mat() {
+  local module="$1" name="$2" ops="$3" expect="$4"
+  local err="$ROOT/$name.mat.err" out="$ROOT/$name.mat.out"
+  node --input-type=module - "$module" "$FIX/delivered-tier-c.json" "$name" "$ops" >"$out" 2>"$err" <<'JS'
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const [modulePath, basePath, name, opsJson] = process.argv.slice(2);
+const { materialize } = await import(pathToFileURL(modulePath).href);
+const base = JSON.parse(readFileSync(basePath, "utf8"));
+try {
+  materialize(base, { [name]: JSON.parse(opsJson) });
+} catch (err) {
+  process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+  process.exit(1);
+}
+JS
+  if [ "$?" -eq 0 ]; then
+    return 1
+  fi
+  if grep -F -q -- "$expect" "$err"; then
+    return 0
+  fi
+  return 2
+}
+
+run_closed_table() {
+  local module="$1" want="$2"
+  local name op path ops expect rc
+  while IFS='|' read -r name op path ops; do
+    [ -n "${name:-}" ] || continue
+    expect="$name: $op $path"
+    probe_mat "$module" "$name" "$ops" "$expect"
+    rc=$?
+    if [ "$want" = "closed" ]; then
+      if [ "$rc" -eq 0 ]; then
+        ok "$name fails materialization"
+      else
+        bad "$name: materialization did not fail closed (rc=$rc) $(cat "$ROOT/$name.mat.err" 2>/dev/null)"
+      fi
+    elif [ "$rc" -eq 1 ]; then
+      ok "mutation $name self-test went red"
+    else
+      bad "mutation $name stayed green (rc=$rc)"
+    fi
+  done <<'EOF'
+bad-remove-index|remove|/inputs/reviews/99|[{"op":"remove","path":"/inputs/reviews/99"}]
+bad-replace-key|replace|/inputs/reviews/missing|[{"op":"replace","path":"/inputs/reviews/missing","value":1}]
+bad-intermediate|replace|/inputs/missing-parent/child|[{"op":"replace","path":"/inputs/missing-parent/child","value":1}]
+bad-unknown-op|move|/inputs/reviews/0|[{"op":"move","path":"/inputs/reviews/0","from":"/inputs/pull"}]
+EOF
+}
+
+echo "# patch materializer fails closed"
+node -e '
+  const fs = require("fs");
+  const overlays = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const dir = process.argv[2];
+  const names = Object.keys(overlays).filter((k) => !k.startsWith("_"));
+  if (names.length === 0) process.exit(1);
+  for (const name of names) {
+    const file = dir + "/" + name + ".json";
+    if (!fs.existsSync(file)) {
+      process.stderr.write("missing " + name + "\n");
+      process.exit(1);
+    }
+    JSON.parse(fs.readFileSync(file, "utf8"));
+  }
+' "$FIX/overlays.json" "$CASES" \
+  && ok "every committed overlay applies cleanly" \
+  || bad "a committed overlay did not apply"
+run_closed_table "$CASES_JS" closed
+
+echo "# mutation: silent applyOps makes the closed self-tests red"
+SILENT="$ROOT/silent-cases/delivery-receipt-cases.mjs"
+mkdir -p "$ROOT/silent-cases"
+sed "/MUTATION_ANCHOR_PATCH_CLOSED/d" "$CASES_JS" >"$SILENT"
+if node --check "$SILENT"; then
+  run_closed_table "$SILENT" open
+else
+  bad "silent applyOps mutant does not parse"
+fi
 
 ORIG_SHA=$(shasum -a 256 "$EVAL" | awk 'NR==1 { print $1 }')
 
