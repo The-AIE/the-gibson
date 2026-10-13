@@ -1,0 +1,11 @@
+{
+  "name": "omit-digest",
+  "omitDigest": true,
+  "input": {
+    "digest": "nope",
+    "m": true,
+    "a": null
+  },
+  "canonical": "{\"a\":null,\"m\":true}",
+  "digest": "85cb23bc756a35f2d9d6479993b17f80d0000a462489e2f71aa0b56707b0b444"
+}

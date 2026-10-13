@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gibson.delivery.v1",
+  "title": "Gibson delivery receipt v1 (report-only)",
+  "description": "Deterministic read model over GitHub facts for one pull request. Report-only. It grants no merge, deploy, or canary authority. Domains this slice cannot source are the string unknown, never an inferred pass or zero.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "authority",
+    "subject",
+    "actors",
+    "review",
+    "gates",
+    "requiredChecks",
+    "tier",
+    "g12",
+    "policyManifestDigest",
+    "cost",
+    "deployment",
+    "cleanup",
+    "lessons",
+    "baseRef",
+    "defaultBranch",
+    "paginationExhausted",
+    "commentEditors",
+    "disposition",
+    "reasons",
+    "bundleDigest",
+    "digest"
+  ],
+  "properties": {
+    "schema": { "type": "string", "const": "gibson.delivery.v1" },
+    "schemaVersion": { "type": "string", "const": "1.0.0" },
+    "authority": { "type": "string", "const": "report-only" },
+    "subject": { "$ref": "#/$defs/subject" },
+    "actors": { "$ref": "#/$defs/actors" },
+    "review": { "$ref": "#/$defs/review" },
+    "gates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/gate" }
+    },
+    "requiredChecks": { "$ref": "#/$defs/requiredChecks" },
+    "tier": { "type": "string", "enum": ["A", "B", "C", "unknown"] },
+    "g12": { "$ref": "#/$defs/g12" },
+    "policyManifestDigest": {
+      "type": "string",
+      "const": "unknown",
+      "description": "Reserved until the policy manifest digest exists (#164). Never inferred."
+    },
+    "cost": { "$ref": "#/$defs/cost" },
+    "deployment": { "$ref": "#/$defs/unknownStatus" },
+    "cleanup": { "$ref": "#/$defs/unknownStatus" },
+    "lessons": { "$ref": "#/$defs/unknownStatus" },
+    "baseRef": { "$ref": "#/$defs/refOrNull" },
+    "defaultBranch": { "$ref": "#/$defs/refOrNull" },
+    "paginationExhausted": { "type": "boolean" },
+    "commentEditors": { "$ref": "#/$defs/commentEditors" },
+    "disposition": {
+      "type": "string",
+      "enum": ["delivered", "parked", "blocked", "failed", "rolled_back", "incomplete"]
+    },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.:/@+-]{0,119}$" }
+    },
+    "bundleDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of the canonical JSON of this object with the digest field omitted."
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "refOrNull": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9._/-]{1,200}$"
+    },
+    "vendor": {
+      "type": "string",
+      "enum": ["grok", "codex", "claude", "devin", "coderabbit", "independent", "owner", "human", "unknown"]
+    },
+    "login": { "type": "string", "pattern": "^(unknown|[A-Za-z0-9][A-Za-z0-9_.\\[\\]-]{0,79})$" },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "pr", "issue", "baseSha", "headSha", "mergeSha"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "pr": { "type": "integer", "minimum": 1 },
+        "issue": { "type": ["integer", "null"], "minimum": 1 },
+        "baseSha": { "$ref": "#/$defs/sha" },
+        "headSha": { "$ref": "#/$defs/sha" },
+        "mergeSha": { "oneOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["login", "vendor"],
+      "properties": {
+        "login": { "$ref": "#/$defs/login" },
+        "vendor": { "$ref": "#/$defs/vendor" }
+      }
+    },
+    "actors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["builder", "reviewer", "releaser"],
+      "properties": {
+        "builder": { "$ref": "#/$defs/actor" },
+        "reviewer": { "$ref": "#/$defs/actor" },
+        "releaser": { "$ref": "#/$defs/actor" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["independenceLevel", "reviewedHeadSha", "reviewerVendor", "verdict", "source"],
+      "properties": {
+        "independenceLevel": { "type": "string", "enum": ["E0", "E1", "E2", "E3", "E4", "unknown"] },
+        "reviewedHeadSha": { "oneOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] },
+        "reviewerVendor": { "$ref": "#/$defs/vendor" },
+        "verdict": { "type": "string", "enum": ["APPROVE", "CHANGES_REQUESTED", "NONE", "unknown"] },
+        "source": { "type": "string", "enum": ["review", "comment", "unknown"] }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "conclusion", "appSlug", "appId", "headSha", "completedAt"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "conclusion": {
+          "type": "string",
+          "enum": ["success", "failure", "neutral", "cancelled", "timed_out", "action_required", "skipped", "stale", "startup_failure", "unknown"]
+        },
+        "appSlug": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "appId": { "type": ["integer", "null"], "minimum": 0 },
+        "headSha": { "$ref": "#/$defs/sha" },
+        "completedAt": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "requiredEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["context", "appId"],
+      "properties": {
+        "context": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "appId": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "requiredChecks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "entries"],
+      "properties": {
+        "status": { "type": "string", "enum": ["known", "unknown"] },
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/requiredEntry" } }
+      }
+    },
+    "g12": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applies", "met", "reasons"],
+      "properties": {
+        "applies": { "type": "boolean" },
+        "met": { "oneOf": [{ "type": "boolean" }, { "type": "string", "const": "unknown" }] },
+        "reasons": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_.:/@+-]{0,119}$" }
+        }
+      }
+    },
+    "costRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ts", "vendor", "model", "usd", "tokensIn", "tokensOut"],
+      "properties": {
+        "ts": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "vendor": { "$ref": "#/$defs/vendor" },
+        "model": { "type": ["string", "null"], "maxLength": 80 },
+        "usd": { "type": ["number", "null"], "minimum": 0 },
+        "tokensIn": { "type": ["number", "null"], "minimum": 0 },
+        "tokensOut": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "cost": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": { "status": { "type": "string", "const": "unknown" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "rows", "usdTotal"],
+          "properties": {
+            "status": { "type": "string", "const": "joined" },
+            "rows": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/costRow" } },
+            "usdTotal": { "type": ["number", "null"], "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "unknownStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "type": "string", "const": "unknown" } }
+    },
+    "commentEditors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "type": "string", "enum": ["known", "unknown"] } }
+    }
+  }
+}
