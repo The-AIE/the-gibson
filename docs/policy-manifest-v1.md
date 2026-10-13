@@ -42,7 +42,7 @@ owned by `AGENTS.md`:
 - human gates **G1–G16** (authority: `AGENTS.md`; `docs/14` is explanatory history)
 - risk tiers **A / B / C** and evidence minimums (authority: `AGENTS.md`; `docs/06` is explanation)
 - nine roles and forbidden same-unit pairs (authority: `AGENTS.md`; `docs/03` is explanation)
-- review-independence relationships (Law 5, tier floors, Tier C → G12)
+- review-independence relationships (Law 5, tier floors, Tier C cross-vendor floor + G12)
 - workflow stage names **plan → retro** (authority: `AGENTS.md`; `docs/02` is explanation)
 
 ## What this is not
@@ -168,7 +168,8 @@ The pure validator refuses (non-exhaustive):
   - `ri.tier-b` → tier `B`, `independent-approve`, preferred
     `two-fresh-context-approve`; **absent** `humanGateId`,
     `generatorMustNotEqual` (`E_RI_TIER_B`)
-  - `ri.tier-c` → tier `C`, `human-gate` / preferred `human-gate`, gate `G12`;
+  - `ri.tier-c` → tier `C`, `cross-vendor` / preferred `cross-vendor`, gate `G12`
+    (Tier C floor is E3 cross-vendor at the exact head + required checks, D-015);
     **absent** `generatorMustNotEqual` (`E_RI_TIER_C`)
   - Descriptive fields (`id`, `description`) remain schema-governed only
 - unsafe fork namespaces (including core `gibson.` shadow)

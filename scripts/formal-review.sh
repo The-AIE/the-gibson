@@ -23,7 +23,7 @@ WHY
 RISKS
   - Posts a real review on the PR (undo: dismiss review in GitHub UI).
   - Never uses GH_TOKEN / default gh auth for the review API call.
-  - Tier C still requires a human (docs/14 G12) — this script does not merge.
+  - Tier C still requires the G12 floor (E3 at the exact head + required checks, D-015) — this script stops short of the merge.
 
 USAGE
   formal-review.sh --pr N --repo owner/name --event approve|request-changes|comment \

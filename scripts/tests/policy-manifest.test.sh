@@ -42,9 +42,11 @@ fi
 # Only after a validated temporary root: install cleanup and write child paths.
 trap 'rm -rf -- "${ROOT:?}"' EXIT
 # Copied policy-manifest mutants import ./lib/contract-semantics.mjs relative
-# to the copy sitting in ROOT.
+# to the copy sitting in ROOT. That module imports its Tier C pin from the
+# sibling canonical module, so the copy must include both files.
 mkdir -p "$ROOT/lib"
 cp "$REPO_ROOT/scripts/lib/contract-semantics.mjs" "$ROOT/lib/contract-semantics.mjs"
+cp "$REPO_ROOT/scripts/lib/authority-config-canonical.mjs" "$ROOT/lib/authority-config-canonical.mjs"
 BIN="$ROOT/bin"
 mkdir -p "$BIN"
 FORBIDDEN_LOG="$ROOT/forbidden.log"
@@ -416,7 +418,7 @@ else
   bad "rename gate missing expected error code"
 fi
 
-# 3) change minimum review relationship (Tier C human-gate → independent-approve)
+# 3) change minimum review relationship (Tier C cross-vendor → independent-approve)
 mut_validate "m-ri.json" '
   c.reviewIndependence = c.reviewIndependence.map(r =>
     r.id === "ri.tier-c"
@@ -754,11 +756,11 @@ mut_validate "m-ri-b-tier.json" '
 [[ "$rc" -ne 0 ]] && ok "ri.tier-b tierId pin fails closed" || bad "ri.tier-b tierId pin passed"
 has "ri.tier-b tierId pin code" "$out" "E_RI_TIER_B"
 
-# 26) ri.tier-c: preferred human-gate → cross-vendor (schema-valid, wrong)
+# 26) ri.tier-c: preferred cross-vendor → human-gate (schema-valid, wrong pin)
 mut_validate "m-ri-c-pref.json" '
   c.reviewIndependence = c.reviewIndependence.map(r =>
     r.id === "ri.tier-c"
-      ? Object.assign({}, r, { preferredRelationship: "cross-vendor" })
+      ? Object.assign({}, r, { preferredRelationship: "human-gate" })
       : r
   );
 ' --no-digest-check
@@ -786,6 +788,76 @@ mut_validate "m-ri-c-tier.json" '
 ' --no-digest-check
 [[ "$rc" -ne 0 ]] && ok "ri.tier-c tierId pin fails closed" || bad "ri.tier-c tierId pin passed"
 has "ri.tier-c tierId pin code" "$out" "E_RI_TIER_C"
+
+# 26d) ri.tier-c minimum human-gate is below the E3 floor (D-015)
+mut_validate "m-ri-c-min-human-gate.json" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-c"
+      ? Object.assign({}, r, { minimumRelationship: "human-gate" })
+      : r
+  );
+' --no-digest-check
+[[ "$rc" -ne 0 ]] && ok "ri.tier-c human-gate minimum fails closed" || bad "ri.tier-c human-gate minimum passed"
+has "ri.tier-c human-gate minimum code" "$out" "E_RI_TIER_C"
+
+# 26e) ri.tier-c minimum independent-approve is below the E3 floor
+mut_validate "m-ri-c-min-independent.json" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-c"
+      ? Object.assign({}, r, { minimumRelationship: "independent-approve" })
+      : r
+  );
+' --no-digest-check
+[[ "$rc" -ne 0 ]] && ok "ri.tier-c independent-approve minimum fails closed" || bad "ri.tier-c independent-approve minimum passed"
+has "ri.tier-c independent-approve minimum code" "$out" "E_RI_TIER_C"
+
+# 26f) ri.tier-c cross-vendor at minimum and preferred is the floor (GREEN)
+mut_validate "m-ri-c-min-cross-vendor.json" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-c"
+      ? Object.assign({}, r, {
+          minimumRelationship: "cross-vendor",
+          preferredRelationship: "cross-vendor",
+          humanGateId: "G12"
+        })
+      : r
+  );
+' --no-digest-check
+[[ "$rc" -eq 0 ]] && ok "ri.tier-c cross-vendor floor passes" || bad "ri.tier-c cross-vendor floor failed (rc=$rc)"
+lacks "ri.tier-c cross-vendor floor code" "$out" "E_RI_TIER_C"
+
+# 26g) revert the expect pin to human-gate on a temp copy of the validator.
+# The same cross-vendor candidate must go RED. The copy sits in ROOT so its
+# ./lib imports resolve to the suite's already-copied contract modules.
+PIN_TOOL="$ROOT/policy-manifest-tier-c-pin-human-gate.mjs"
+cp "$TOOL" "$PIN_TOOL"
+"$NODE" -e '
+  const fs = require("fs");
+  const p = process.argv[1];
+  const s = fs.readFileSync(p, "utf8");
+  const from = [
+    "minimumRelationship: \"cross-vendor\",",
+    "      preferredRelationship: \"cross-vendor\",",
+    "      humanGateId: \"G12\",",
+  ].join("\n");
+  const to = [
+    "minimumRelationship: \"human-gate\",",
+    "      preferredRelationship: \"human-gate\",",
+    "      humanGateId: \"G12\",",
+  ].join("\n");
+  const n = s.split(from).length - 1;
+  if (n !== 1) {
+    console.error("tier-c expect pin marker count=" + n);
+    process.exit(2);
+  }
+  fs.writeFileSync(p, s.replace(from, to));
+' "$PIN_TOOL" || bad "tier-c expect pin marker missing or not unique"
+if ! "$NODE" --check "$PIN_TOOL" 2>/dev/null; then
+  bad "tier-c pin mutation produced invalid syntax"
+fi
+out=$("$NODE" "$PIN_TOOL" validate --manifest "m-ri-c-min-cross-vendor.json" --repo-root "$MUT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "reverted human-gate expect pin rejects cross-vendor" || bad "reverted human-gate expect pin accepted cross-vendor"
+has "reverted pin code" "$out" "E_RI_TIER_C"
 
 # ---------------------------------------------------------------------------
 # RI exact presence/absence — schema-valid optional semantic fields forbidden

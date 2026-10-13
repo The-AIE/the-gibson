@@ -377,6 +377,7 @@
               "different-agent",
               "independent-approve",
               "cross-vendor-preferred",
+              "cross-vendor",
               "human-gate"
             ]
           },
