@@ -22,6 +22,7 @@ ok()  { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
 contains() { if echo "$2" | grep -F -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-preflight-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -59,6 +60,83 @@ BASE
 }
 
 run() { GH_FIXTURE="$1" "$PREFLIGHT" 1 --repo acme/app ${2:-} 2>&1; }
+
+REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
+EVIDENCE_CFG="$REPO_ROOT/config/review-evidence.v1.json"
+HEAD_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+PREV_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+GROK_BOT='aie-agent-lanes-grok[bot]'
+DEVIN_BOT='devin-ai-integration[bot]'
+
+# pr-review-evidence --fixture dir. $1 dest, $2 kind: e3-head | e3-stale | same-vendor
+write_evidence_fixture() {
+  local dest="$1" kind="$2"
+  mkdir -p "$dest"
+  python3 - "$dest" "$kind" "$HEAD_SHA" "$PREV_SHA" "$GROK_BOT" "$DEVIN_BOT" <<'PY'
+import json, os, sys
+dest, kind, head, prev, grok, devin = sys.argv[1:7]
+review_sha = prev if kind == "e3-stale" else head
+reviewer = grok if kind == "same-vendor" else devin
+commit = {
+    "sha": head,
+    "author": {"login": grok},
+    "committer": {"login": grok},
+    "commit": {
+        "verification": {"verified": True, "reason": "fixture"},
+        "author": {"email": "x@example.invalid"},
+        "committer": {"email": "x@example.invalid"},
+    },
+}
+review = {
+    "id": 1,
+    "user": {"login": reviewer, "type": "Bot"},
+    "state": "APPROVED",
+    "commit_id": review_sha,
+    "submitted_at": "2026-09-04T10:00:00Z",
+    "performed_via_github_app": None,
+}
+pull = {"number": 1, "state": "open", "commits": 1, "head": {"sha": head}, "user": {"login": "builder-bot"}}
+def dump(name, obj):
+    with open(os.path.join(dest, name), "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+dump("pull.json", pull)
+dump("commits.json", [commit])
+dump("reviews.json", [review])
+dump("comments.json", [])
+PY
+}
+
+run_tierc() {
+  local pr_json="$1" ev_dir="${2:-}"
+  if [[ -n "$ev_dir" ]]; then
+    GIBSON_REVIEW_EVIDENCE_FIXTURE="$ev_dir" GH_FIXTURE="$pr_json" "$PREFLIGHT" 1 --repo acme/app 2>&1
+  else
+    env -u GIBSON_REVIEW_EVIDENCE_FIXTURE GH_FIXTURE="$pr_json" "$PREFLIGHT" 1 --repo acme/app 2>&1
+  fi
+}
+
+# Copy production script + evaluator into $1. A symlink breaks the evaluator's
+# `import.meta.url === argv[1]` main-guard (Node sees the link path), so the
+# copy is a byte-identical file; --fixture still swaps only transport.
+stage_mut() {
+  local dest="$1"
+  mkdir -p "$dest"
+  cp "$PREFLIGHT" "$dest/release-preflight.sh"
+  cp "$SCRIPT_DIR/../pr-review-evidence.mjs" "$dest/pr-review-evidence.mjs"
+  echo "$dest/release-preflight.sh"
+}
+
+run_mut() {
+  local script="$1" pr_json="$2" ev_dir="${3:-}"
+  if [[ -n "$ev_dir" ]]; then
+    env GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+      GIBSON_REVIEW_EVIDENCE_FIXTURE="$ev_dir" GH_FIXTURE="$pr_json" \
+      bash "$script" 1 --repo acme/app 2>&1
+  else
+    env GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" GH_FIXTURE="$pr_json" \
+      bash "$script" 1 --repo acme/app 2>&1
+  fi
+}
 
 echo "baseline · a green, approved, tier-B PR is READY"
 f=$(fixture green '.')
@@ -847,13 +925,170 @@ check "pending checks block" "$rc" "1"
 echo "Law 7 / posture · no admin path for Tier C or post-launch"
 f_tierc=$(fixture tierc '.labels = [{"name": "tier-c"}] |
   .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": "STARTUP_FAILURE", "steps": []}]')
-out=$(run "$f_tierc"); rc=$?
+out=$(run_tierc "$f_tierc"); rc=$?
 check "tier-c downgrades ADMIN-CANDIDATE to BLOCKED" "$rc" "1"
-contains "cites the human gate" "$out" "human merge gate"
+contains "names the G12 floor" "$out" "Tier C floor (G12, D-015) not met"
+lacks "does not cite the retired human merge gate" "$out" "human merge gate"
+contains "no admin path remains" "$out" "no admin path"
 
 out=$(run "$f_infra" --launched); rc=$?
 check "--launched removes the admin path" "$rc" "1"
 contains "says escalate" "$out" "escalate to the owner"
+
+echo "D-015 G12 floor · Tier C mergeable only on E3 at exact head + green checks"
+write_evidence_fixture "$ROOT/ev-e3" e3-head
+write_evidence_fixture "$ROOT/ev-stale" e3-stale
+write_evidence_fixture "$ROOT/ev-same" same-vendor
+
+f_tierc_green=$(fixture tierc_green '.labels = [{"name": "tier-c"}]')
+out=$(run_tierc "$f_tierc_green" "$ROOT/ev-e3"); rc=$?
+check "Tier C + E3 at head + checks green is READY" "$rc" "0"
+contains "green floor verdict READY" "$out" "READY"
+lacks "green floor has no G12 blocker" "$out" "Tier C floor (G12, D-015) not met"
+
+# Mutation: restore the retired unconditional human-gate blocker → green case BLOCKED.
+mut_green=$(stage_mut "$ROOT/mut-green")
+python3 - "$mut_green" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = '''  if [[ ${#_floor_parts[@]} -gt 0 ]]; then
+    _floor_msg=""
+    for _p in "${_floor_parts[@]}"; do
+      if [[ -z "$_floor_msg" ]]; then
+        _floor_msg="$_p"
+      else
+        _floor_msg="$_floor_msg; $_p"
+      fi
+    done
+    BLOCKERS+=("Tier C floor (G12, D-015) not met: $_floor_msg")
+  fi'''
+new = old + '\n  BLOCKERS+=("Tier C is a human merge gate (Law 7) — no admin path, whatever the CI is doing")'
+if old not in s:
+    raise SystemExit("mutation anchor missing: floor_parts block")
+open(p, "w", encoding="utf-8").write(s.replace(old, new, 1))
+PY
+out=$(run_mut "$mut_green" "$f_tierc_green" "$ROOT/ev-e3"); rc=$?
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F "human merge gate" >/dev/null; then
+  ok "mutation green: injecting retired human-gate blocker BLOCKS a floor-passing head"
+else
+  bad "mutation green did not block (rc=$rc): $out"
+fi
+
+f_tierc_stale=$(fixture tierc_stale '.labels = [{"name": "tier-c"}]')
+out=$(run_tierc "$f_tierc_stale" "$ROOT/ev-stale"); rc=$?
+check "E3 at an older head is BLOCKED" "$rc" "1"
+contains "stale E3 names the floor" "$out" "Tier C floor (G12, D-015) not met"
+contains "stale E3 names unbound head" "$out" "E3 not bound to this head"
+
+mut_stale=$(stage_mut "$ROOT/mut-stale")
+python3 - "$mut_stale" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+# Force the evaluator result to look like E3-at-head pass.
+needle = '    _ev_out=$("${_ev_args[@]}" 2>/dev/null) || true'
+repl = '''    _ev_out=$("${_ev_args[@]}" 2>/dev/null) || true
+    _ev_out='{"state":"success","reason":"pass"}'
+'''
+if needle not in s:
+    raise SystemExit("mutation anchor missing: evaluator capture")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+out=$(run_mut "$mut_stale" "$f_tierc_stale" "$ROOT/ev-stale"); rc=$?
+if echo "$out" | grep -F "E3 not bound to this head" >/dev/null; then
+  bad "mutation stale: forcing pass still reported unbound head: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation stale: ignoring evaluator reason lets an older-head E3 READY"
+else
+  bad "mutation stale unexpected (rc=$rc): $out"
+fi
+
+f_tierc_same=$(fixture tierc_same '.labels = [{"name": "tier-c"}]')
+out=$(run_tierc "$f_tierc_same" "$ROOT/ev-same"); rc=$?
+check "same-vendor review is BLOCKED" "$rc" "1"
+contains "same-vendor names the floor" "$out" "Tier C floor (G12, D-015) not met"
+contains "same-vendor names the part" "$out" "same-vendor review"
+
+mut_same=$(stage_mut "$ROOT/mut-same")
+python3 - "$mut_same" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = '    elif [[ "$_ev_reason" == "same-vendor-reviewer" ]]; then\n      _floor_parts+=("same-vendor review")'
+repl = '    elif [[ "$_ev_reason" == "same-vendor-reviewer" ]]; then\n      :'
+if needle not in s:
+    raise SystemExit("mutation anchor missing: same-vendor clause")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+out=$(run_mut "$mut_same" "$f_tierc_same" "$ROOT/ev-same"); rc=$?
+if echo "$out" | grep -F "same-vendor review" >/dev/null; then
+  bad "mutation same-vendor: clause still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation same-vendor: dropping the same-vendor floor clause lets it READY"
+else
+  bad "mutation same-vendor unexpected (rc=$rc): $out"
+fi
+
+f_tierc_red=$(fixture tierc_red '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": "FAILURE", "steps": [{"name": "test"}]}]')
+out=$(run_tierc "$f_tierc_red" "$ROOT/ev-e3"); rc=$?
+check "checks red is BLOCKED" "$rc" "1"
+contains "red checks name the floor" "$out" "Tier C floor (G12, D-015) not met"
+contains "red checks name the part" "$out" "required checks not green"
+
+mut_red=$(stage_mut "$ROOT/mut-red")
+python3 - "$mut_red" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = '''  if [[ "$PENDING" -gt 0 || "$FAILED_N" -gt 0 ]]; then
+    _floor_parts+=("required checks not green")
+  fi'''
+repl = '''  if [[ "$PENDING" -gt 0 || "$FAILED_N" -gt 0 ]]; then
+    :
+  fi'''
+if needle not in s:
+    raise SystemExit("mutation anchor missing: checks-green floor clause")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+out=$(run_mut "$mut_red" "$f_tierc_red" "$ROOT/ev-e3"); rc=$?
+if echo "$out" | grep -F "required checks not green" >/dev/null; then
+  bad "mutation checks-red: floor still named required checks: $out"
+elif echo "$out" | grep -F "fix the code" >/dev/null && [[ "$rc" -eq 1 ]]; then
+  ok "mutation checks-red: dropping the floor checks clause loses that part (product-red still blocks)"
+else
+  bad "mutation checks-red unexpected (rc=$rc): $out"
+fi
+
+f_tierc_unread=$(fixture tierc_unread '.labels = [{"name": "tier-c"}]')
+out=$(run_tierc "$f_tierc_unread"); rc=$?
+check "evidence unreadable is BLOCKED" "$rc" "1"
+contains "unreadable names the floor" "$out" "Tier C floor (G12, D-015) not met"
+contains "unreadable names the part" "$out" "evidence unreadable"
+
+mut_unread=$(stage_mut "$ROOT/mut-unread")
+python3 - "$mut_unread" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+n1 = '    if [[ -z "$_ev_state" || -z "$_ev_reason" ]]; then\n      _floor_parts+=("evidence unreadable")'
+r1 = '    if [[ -z "$_ev_state" || -z "$_ev_reason" ]]; then\n      :'
+n2 = '    elif [[ "$_ev_reason" == "api-error" || "$_ev_reason" == "config-error" ]]; then\n      _floor_parts+=("evidence unreadable")'
+r2 = '    elif [[ "$_ev_reason" == "api-error" || "$_ev_reason" == "config-error" ]]; then\n      :'
+if n1 not in s or n2 not in s:
+    raise SystemExit("mutation anchor missing: unreadable clauses")
+s = s.replace(n1, r1, 1).replace(n2, r2, 1)
+open(p, "w", encoding="utf-8").write(s)
+PY
+out=$(run_mut "$mut_unread" "$f_tierc_unread"); rc=$?
+if echo "$out" | grep -F "evidence unreadable" >/dev/null; then
+  bad "mutation unreadable: clause still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation unreadable: dropping fail-closed unreadable lets missing evidence READY"
+else
+  bad "mutation unreadable unexpected (rc=$rc): $out"
+fi
 
 echo "hygiene · drafts and conflicts block"
 f_draft=$(fixture draft '.isDraft = true | .mergeable = "CONFLICTING"')
