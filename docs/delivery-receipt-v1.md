@@ -138,8 +138,14 @@ node scripts/delivery-receipt.mjs verify --receipt receipt.json --bundle bundle.
 
 Optional on `collect`: `--ledger PATH` (local `gibson.cost.v1` JSONL) and
 `--config PATH` (default `config/review-evidence.v1.json`). The ledger path is
-not stored. Commit messages keep only `Agent-Vendor:` lines. Comment bodies
-keep only the review-evidence marker blocks. Absolute paths are refused.
+not stored. Commit messages keep only `Agent-Vendor:` lines. A comment
+marker is re-serialized from the fields `pr-review-evidence` reads
+(`head-sha`, `result`, and the attestation vendor fields). Any other marker
+text is dropped. `project` and `verify` refuse a bundle that still contains
+a host path or a marker that is not that re-serialization. `delivered`
+requires every collect source, including pulls-for-head and both
+required-check endpoints, exactly once and exhausted. `pullsForHeadStatus`
+is `known` only when that pulls-for-head source is present and exhausted.
 
 Exit codes: `0` pass, `1` verify or project fail, `2` usage or I/O.
 

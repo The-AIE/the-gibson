@@ -21,8 +21,10 @@
  *   prove the bundle still matches GitHub. Re-collect to re-check. `evaluate()`
  *   in pr-review-evidence.mjs is an open-PR predicate: a merged PR is not open,
  *   so a second call is made only when the bundle shows no other open PR on
- *   that head. Cost, deploy, cleanup, and lessons do not block `delivered` in
- *   this slice. `rolled_back` is reserved and never emitted.
+ *   that head and the pulls-for-head source is present and exhausted. A
+ *   marker keeps only the fields pr-review-evidence reads. Cost, deploy,
+ *   cleanup, and lessons do not block `delivered` in this slice.
+ *   `rolled_back` is reserved and never emitted.
  *
  * USAGE
  *   node scripts/delivery-receipt.mjs collect --repo OWNER/REPO --pr N --out FILE [--ledger PATH] [--config PATH]
@@ -36,7 +38,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluate, resolveAuthors, trailerVendors, validateConfig } from "./pr-review-evidence.mjs";
+import { evaluate, MARKER_FIELDS, parseBlock, resolveAuthors, trailerVendors, validateConfig } from "./pr-review-evidence.mjs";
 
 const SCHEMA = "gibson.delivery.v1";
 const BUNDLE_SCHEMA = "gibson.delivery-bundle.v1";
@@ -151,13 +153,55 @@ function uniq(list) {
   return [...new Set(list)];
 }
 
+const FIELD_TOKEN = /^[a-z0-9_-]{1,40}$/;
+
+function cleanAuthorVendor(raw) {
+  if (typeof raw !== "string") return null;
+  const parts = raw.split(",").map((p) => p.trim()).filter(Boolean);
+  if (parts.length === 0 || !parts.every((p) => FIELD_TOKEN.test(p))) return null;
+  return parts.join(",");
+}
+
+/** Re-serialize one marker from the evaluator's field list. Unexpected text is dropped. */
+export function redactMarkerBlock(block) {
+  if (typeof block !== "string") return "";
+  const named = block.match(/<!--\s*(review-evidence:v1|owner-review-attestation:v1|owner-attested-review:v1)\b/i);
+  if (!named) return "";
+  const marker = Object.keys(MARKER_FIELDS).find((k) => k.toLowerCase() === named[1].toLowerCase());
+  if (!marker) return "";
+  const spec = MARKER_FIELDS[marker];
+  const parsed = parseBlock(block, marker, spec);
+  if (!parsed) return "";
+  const fields = { ...parsed };
+  if (!isSha(fields["head-sha"])) return "";
+  if (marker === "owner-review-attestation:v1") {
+    const vendors = cleanAuthorVendor(fields["author-vendor"]);
+    if (!vendors) return "";
+    fields["author-vendor"] = vendors;
+  }
+  if (marker === "owner-attested-review:v1" && !FIELD_TOKEN.test(fields["reviewer-vendor"] ?? "")) return "";
+  if ((marker === "review-evidence:v1" || marker === "owner-attested-review:v1") && fields.result !== "pass" && fields.result !== "fail") return "";
+  const lines = [`<!-- ${marker}`];
+  for (const f of spec) lines.push(`${f}: ${fields[f]}`);
+  lines.push("-->");
+  return lines.join("\n");
+}
+
+function retainMarker(block) {
+  let redacted = null;
+  redacted = redactMarkerBlock(block); // MUTATION_ANCHOR_MARKER_REDACT
+  if (redacted == null) return block;
+  return redacted;
+}
+
 export function markerOnly(body) {
   if (typeof body !== "string" || body.length === 0) return "";
   const out = [];
   MARKER_RE.lastIndex = 0;
   let m = MARKER_RE.exec(body);
   while (m) {
-    out.push(m[0]);
+    const kept = retainMarker(m[0]);
+    if (kept) out.push(kept);
     m = MARKER_RE.exec(body);
   }
   return out.join("\n");
@@ -504,13 +548,93 @@ function vendorOfLogin(config, login) {
 function paginationOk(sources) {
   if (!Array.isArray(sources) || sources.length === 0) return false;
   for (const s of sources) {
-    if (!s || typeof s.endpoint !== "string") return false;
-    if (s.endpoint.includes("://") || s.endpoint.startsWith("/") || s.endpoint.split("/").includes("..")) return false;
-    if (s.exhausted !== true) return false;
-    if (!Number.isInteger(s.pages) || s.pages < 1) return false;
-    if (typeof s.sha256 !== "string" || !SHA256.test(s.sha256)) return false;
+    if (!sourceRecordOk(s)) return false;
   }
   return true;
+}
+
+/** Every endpoint collect() records, in collect order. `{branch}` is encodeURIComponent(base ref). */
+export const REQUIRED_SOURCE_TEMPLATES = [
+  "repos/{repository}",
+  "repos/{repository}/pulls/{pr}",
+  "repos/{repository}/pulls/{pr}/commits",
+  "repos/{repository}/pulls/{pr}/reviews",
+  "repos/{repository}/issues/{pr}/comments",
+  "repos/{repository}/commits/{head}/pulls",
+  "repos/{repository}/issues/{pr}/timeline",
+  "repos/{repository}/pulls/{pr}/files",
+  "repos/{repository}/commits/{head}/check-runs",
+  "repos/{repository}/commits/{head}/statuses",
+  "repos/{repository}/branches/{branch}/protection/required_status_checks",
+  "repos/{repository}/rules/branches/{branch}",
+  "graphql:closing-issues",
+  "graphql:comment-editors",
+];
+
+const PULLS_FOR_HEAD_TEMPLATE = "repos/{repository}/commits/{head}/pulls";
+
+function sourceRecordOk(s) {
+  if (!s || typeof s.endpoint !== "string") return false;
+  if (s.endpoint.includes("://") || s.endpoint.startsWith("/") || s.endpoint.split("/").includes("..")) return false;
+  if (s.exhausted !== true) return false;
+  if (!Number.isInteger(s.pages) || s.pages < 1) return false;
+  if (typeof s.sha256 !== "string" || !SHA256.test(s.sha256)) return false;
+  return true;
+}
+
+export function requiredSourceEndpoints(subject) {
+  const repository = subject?.repository;
+  const pr = subject?.pr;
+  const head = typeof subject?.head === "string" ? subject.head.toLowerCase() : "";
+  const branch = typeof subject?.branch === "string" ? subject.branch : null;
+  if (typeof repository !== "string" || !REPO.test(repository)) return null;
+  if (!Number.isInteger(pr) || pr < 1 || !isSha(head) || branch == null) return null;
+  const map = {
+    "{repository}": repository,
+    "{pr}": String(pr),
+    "{head}": head,
+    "{branch}": encodeURIComponent(branch),
+  };
+  return REQUIRED_SOURCE_TEMPLATES.map((t) => t.replace(/\{repository\}|\{pr\}|\{head\}|\{branch\}/g, (k) => map[k]));
+}
+
+function inventorySatisfied(sources, required) {
+  if (!Array.isArray(sources) || !Array.isArray(required)) return false;
+  if (sources.length !== required.length) return false;
+  const seen = new Set();
+  for (const s of sources) {
+    if (!s || typeof s.endpoint !== "string" || seen.has(s.endpoint)) return false;
+    if (!required.includes(s.endpoint)) return false;
+    seen.add(s.endpoint);
+  }
+  return seen.size === required.length;
+}
+
+/**
+ * Loose paginationOk accepts any exhausted list. Delivered requires the
+ * collector's inventory exactly once, each exhausted. pulls-for-head is
+ * "known" only when that source itself is present and exhausted.
+ */
+export function bindSourceInventory(bundle) {
+  const inputs = bundle?.inputs ?? {};
+  const pull = inputs.pull ?? {};
+  const head = typeof pull?.head?.sha === "string" ? pull.head.sha.toLowerCase() : "";
+  const branch = typeof pull?.base?.ref === "string" ? pull.base.ref : "";
+  const required = requiredSourceEndpoints({
+    repository: bundle?.repository,
+    pr: bundle?.pr,
+    head,
+    branch,
+  });
+  const sources = Array.isArray(bundle?.sources) ? bundle.sources : [];
+  const paginationExhausted = paginationOk(sources) && inventorySatisfied(sources, required);
+  let pullsForHeadStatus = "unknown";
+  if (required && inputs.pullsForHeadStatus === "known") {
+    const ep = required[REQUIRED_SOURCE_TEMPLATES.indexOf(PULLS_FOR_HEAD_TEMPLATE)];
+    const hits = sources.filter((s) => s && s.endpoint === ep);
+    if (hits.length === 1 && sourceRecordOk(hits[0])) pullsForHeadStatus = "known";
+  }
+  return { paginationExhausted, pullsForHeadStatus };
 }
 
 function deliveredGaps(facts) {
@@ -587,6 +711,7 @@ export function projectBundle(bundle) {
   if (!bundle || typeof bundle !== "object" || Array.isArray(bundle)) {
     throw new Error("project:not-an-object");
   }
+  assertBundleRedacted(bundle); // MUTATION_ANCHOR_BUNDLE_LEAK
   if (bundle.schema !== BUNDLE_SCHEMA) throw new Error("project:bundle-schema");
   const repo = safeRepo(bundle.repository);
   const pr = bundle.pr;
@@ -606,7 +731,12 @@ export function projectBundle(bundle) {
   const mergeRaw = typeof pull?.merge_commit_sha === "string" ? pull.merge_commit_sha.toLowerCase() : null;
   const mergeSha = mergeRaw && isSha(mergeRaw) ? mergeRaw : null;
   const issue = Number.isInteger(inputs.issue) && inputs.issue > 0 ? inputs.issue : null;
-  const ev = evaluateBundle({ ...inputs, config }, pr);
+  let sourceGate = {
+    paginationExhausted: paginationOk(bundle.sources),
+    pullsForHeadStatus: inputs.pullsForHeadStatus === "known" ? "known" : "unknown",
+  };
+  sourceGate = bindSourceInventory(bundle); // MUTATION_ANCHOR_SOURCE_INVENTORY
+  const ev = evaluateBundle({ ...inputs, config, pullsForHeadStatus: sourceGate.pullsForHeadStatus }, pr);
   const shaped = reviewFromEvaluation(ev, inputs.reviews);
   if (shaped.passLogins.length === 1) {
     shaped.reviewerLogin = shaped.passLogins[0];
@@ -638,7 +768,7 @@ export function projectBundle(bundle) {
   const cost = joinCost(inputs.costEvents, pr);
   const baseRef = safeRef(pull?.base?.ref);
   const defaultBranch = safeRef(inputs.repository?.defaultBranch);
-  const paginationExhausted = paginationOk(bundle.sources) && inputs.pullsForHeadStatus !== "unknown";
+  const paginationExhausted = sourceGate.paginationExhausted;
   const commentEditors = inputs.commentEditors?.status === "known" ? { status: "known" } : { status: "unknown" };
   const contradictory = pull?.merged === true && pull?.state === "open";
   const state = typeof pull?.state === "string" ? pull.state : "";
@@ -1158,6 +1288,25 @@ function assertNoHostLeak(text) {
   }
 }
 
+function assertMarkersRedacted(body) {
+  if (typeof body !== "string" || !body.includes("<!--")) return;
+  MARKER_RE.lastIndex = 0;
+  let m = MARKER_RE.exec(body);
+  while (m) {
+    if (m[0] !== redactMarkerBlock(m[0])) throw new Error("redaction:marker");
+    m = MARKER_RE.exec(body);
+  }
+}
+
+function assertBundleRedacted(bundle) {
+  assertNoHostLeak(canonicalJson(bundle, false));
+  const comments = bundle?.inputs?.comments;
+  if (!Array.isArray(comments)) return;
+  for (const c of comments) {
+    if (c && typeof c.body === "string") assertMarkersRedacted(c.body);
+  }
+}
+
 function loadLedger(path) {
   if (!path) return [];
   let text;
@@ -1219,19 +1368,19 @@ function collectIssueNumber(repo, pr) {
   const [owner, name] = repo.split("/");
   const q = "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){closingIssuesReferences(first:10){nodes{number}}}}}";
   const res = ghSpawn(["api", "graphql", "-f", `query=${q}`, "-F", `o=${owner}`, "-F", `r=${name}`, "-F", `n=${pr}`]);
-  if (res.status !== 0) return { issue: null, source: source("graphql", { ok: false, pages: 0, error: httpClass(res.stderr) }) };
+  if (res.status !== 0) return { issue: null, source: source("graphql:closing-issues", { ok: false, pages: 0, error: httpClass(res.stderr) }) };
   let parsed;
   try {
     parsed = JSON.parse(res.stdout);
   } catch {
-    return { issue: null, source: source("graphql", { ok: false, pages: 0, error: "unreadable" }) };
+    return { issue: null, source: source("graphql:closing-issues", { ok: false, pages: 0, error: "unreadable" }) };
   }
   const nodes = parsed?.data?.repository?.pullRequest?.closingIssuesReferences?.nodes;
   let issue = null;
   if (Array.isArray(nodes) && nodes.length === 1 && Number.isInteger(nodes[0]?.number)) issue = nodes[0].number;
   return {
     issue,
-    source: { endpoint: "graphql", pages: 1, exhausted: true, sha256: sha256Text(res.stdout) },
+    source: { endpoint: "graphql:closing-issues", pages: 1, exhausted: true, sha256: sha256Text(res.stdout) },
   };
 }
 
@@ -1342,9 +1491,12 @@ function collect(args) {
   const filesCall = ghPages(`${base}/pulls/${pr}/files?per_page=100`);
   const checkRunsCall = ghPages(`${base}/commits/${head}/check-runs?per_page=100`);
   const statusesCall = ghPages(`${base}/commits/${head}/statuses?per_page=100`);
-  const branch = encodeURIComponent(pull.base.ref ?? "");
-  const protectionCall = ghPages(`${base}/branches/${branch}/protection/required_status_checks`);
-  const rulesCall = ghPages(`${base}/rules/branches/${branch}`);
+  const rawBranch = typeof pull.base.ref === "string" ? pull.base.ref : "";
+  const endpoints = requiredSourceEndpoints({ repository: args.repo, pr, head, branch: rawBranch });
+  if (!endpoints) usage("cannot name required sources");
+  const ep = (template) => endpoints[REQUIRED_SOURCE_TEMPLATES.indexOf(template)];
+  const protectionCall = ghPages(ep("repos/{repository}/branches/{branch}/protection/required_status_checks"));
+  const rulesCall = ghPages(ep("repos/{repository}/rules/branches/{branch}"));
   const must = [commitsCall, reviewsCall, commentsCall, pullsForHeadCall, timelineCall, filesCall];
   for (const call of must) if (!call.ok) usage(`required source unreadable (${call.error})`);
   const commitsFlat = flattenPages(commitsCall, (p) => (Array.isArray(p) ? p : null));
@@ -1410,20 +1562,20 @@ function collect(args) {
   const issueInfo = collectIssueNumber(args.repo, pr);
   const costEvents = ledger;
   const sources = [
-    source(`${base}`, repoCall),
-    source(`${base}/pulls/${pr}`, pullCall),
-    source(`${base}/pulls/${pr}/commits`, commitsCall),
-    source(`${base}/pulls/${pr}/reviews`, reviewsCall),
-    source(`${base}/issues/${pr}/comments`, commentsCall),
-    source(`${base}/commits/${head}/pulls`, pullsForHeadCall),
-    source(`${base}/issues/${pr}/timeline`, timelineCall),
-    source(`${base}/pulls/${pr}/files`, filesCall),
-    source(`${base}/commits/${head}/check-runs`, checkRunsCall.ok ? checkRunsCall : { ok: false, pages: 0, error: checkRunsCall.error }, checkRunsExhausted),
-    source(`${base}/commits/${head}/statuses`, statusesCall.ok ? statusesCall : { ok: false, pages: 0, error: statusesCall.error }, statusesExhausted),
-    source(`${base}/branches/${branch}/protection/required_status_checks`, protectionCall.ok ? protectionCall : { ok: false, pages: 0, error: protectionCall.error }),
-    source(`${base}/rules/branches/${branch}`, rulesCall.ok ? rulesCall : { ok: false, pages: 0, error: rulesCall.error }),
+    source(ep("repos/{repository}"), repoCall),
+    source(ep("repos/{repository}/pulls/{pr}"), pullCall),
+    source(ep("repos/{repository}/pulls/{pr}/commits"), commitsCall),
+    source(ep("repos/{repository}/pulls/{pr}/reviews"), reviewsCall),
+    source(ep("repos/{repository}/issues/{pr}/comments"), commentsCall),
+    source(ep(PULLS_FOR_HEAD_TEMPLATE), pullsForHeadCall),
+    source(ep("repos/{repository}/issues/{pr}/timeline"), timelineCall),
+    source(ep("repos/{repository}/pulls/{pr}/files"), filesCall),
+    source(ep("repos/{repository}/commits/{head}/check-runs"), checkRunsCall.ok ? checkRunsCall : { ok: false, pages: 0, error: checkRunsCall.error }, checkRunsExhausted),
+    source(ep("repos/{repository}/commits/{head}/statuses"), statusesCall.ok ? statusesCall : { ok: false, pages: 0, error: statusesCall.error }, statusesExhausted),
+    source(ep("repos/{repository}/branches/{branch}/protection/required_status_checks"), protectionCall.ok ? protectionCall : { ok: false, pages: 0, error: protectionCall.error }),
+    source(ep("repos/{repository}/rules/branches/{branch}"), rulesCall.ok ? rulesCall : { ok: false, pages: 0, error: rulesCall.error }),
     issueInfo.source,
-    { endpoint: "graphql", pages: editors.pages || 0, exhausted: editors.ok === true, sha256: editors.ok ? editors.sha256 : sha256Text("unreadable") },
+    { endpoint: ep("graphql:comment-editors"), pages: editors.pages || 0, exhausted: editors.ok === true, sha256: editors.ok ? editors.sha256 : sha256Text("unreadable") },
   ];
   // A failed optional source is recorded exhausted:false. project will not
   // call that delivered. Required PR inputs already exited above.

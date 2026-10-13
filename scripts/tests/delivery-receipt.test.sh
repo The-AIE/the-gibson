@@ -95,6 +95,12 @@ expect_row "non-default base is never delivered" non-default-base.json \
   "incomplete	non-default-base	C	true	true	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
 expect_row "pagination not exhausted" pagination-not-exhausted.json \
   "incomplete	pagination-not-exhausted	C	true	true	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
+expect_row "omitted pulls-for-head source with an empty listing is not delivered" omitted-pulls-for-head.json \
+  "incomplete	review-not-approve,head-mismatch,vendor-unknown,g12-not-met,pagination-not-exhausted,not-e3	C	true	false	unknown	NONE	unknown	grok	unknown	unknown	unknown	unknown	unknown	report-only"
+expect_row "fabricated single source is not delivered" fabricated-single-source.json \
+  "incomplete	review-not-approve,head-mismatch,vendor-unknown,g12-not-met,pagination-not-exhausted,not-e3	C	true	false	unknown	NONE	unknown	grok	unknown	unknown	unknown	unknown	unknown	report-only"
+expect_row "duplicate source is not delivered" duplicate-source.json \
+  "incomplete	pagination-not-exhausted	C	true	true	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
 expect_row "unvendored owner is unknown even with an independent reviewer" unvendored-owner.json \
   "incomplete	vendor-unknown	C	true	true	unknown	APPROVE	E3	unknown	independent	unknown	unknown	unknown	unknown	report-only"
 expect_row "missing tier label assumes Tier C and can still deliver" tier-unknown-missing.json \
@@ -187,22 +193,80 @@ done
 
 echo "# redaction and schema"
 node --input-type=module <<EOF
-import { allowlistCommit, markerOnly, allowlistPull } from "${EVAL}";
+import { readFileSync, writeFileSync } from "node:fs";
+import { allowlistCommit, markerOnly, allowlistPull, projectBundle } from "${EVAL}";
 const leaked = "SECRET token and /Users/example/path";
+const sha = "a".repeat(40);
 const commit = allowlistCommit({
   sha: "d".repeat(40),
   author: { login: "aie-agent-lanes-grok[bot]" },
   committer: { login: "aie-agent-lanes-grok[bot]" },
   commit: { message: leaked + "\nAgent-Vendor: grok\n", verification: { verified: false } },
 });
-const body = markerOnly(leaked + "\n<!-- review-evidence:v1\nhead-sha: " + "a".repeat(40) + "\nresult: pass\n-->\n");
-const pull = allowlistPull({ title: leaked, body: leaked, html_url: "https://example.invalid", labels: [{ name: "bug" }, { name: "tier-c" }], number: 1, state: "open", head: { sha: "a".repeat(40) }, base: { sha: "b".repeat(40), ref: "main" } });
-const text = JSON.stringify({ commit, body, pull });
+const inside = (marker, fields) => "<!-- " + marker + "\n" + fields + "\n" + leaked + "\n-->";
+const evidence = inside("review-evidence:v1", "head-sha: " + sha + "\nresult: pass");
+const attestation = inside("owner-review-attestation:v1", "head-sha: " + sha + "\nauthor-vendor: grok");
+const external = inside("owner-attested-review:v1", "head-sha: " + sha + "\nreviewer-vendor: codex\nresult: pass");
+const dirty = markerOnly([leaked, evidence, attestation, external].join("\n"));
+const clean = markerOnly("<!-- review-evidence:v1\nhead-sha: " + sha + "\nresult: pass\n-->");
+const valued = markerOnly("<!-- review-evidence:v1\nhead-sha: " + sha + " " + leaked + "\nresult: pass\n-->");
+const pull = allowlistPull({ title: leaked, body: leaked, html_url: "https://example.invalid", labels: [{ name: "bug" }, { name: "tier-c" }], number: 1, state: "open", head: { sha }, base: { sha: "b".repeat(40), ref: "main" } });
+const text = JSON.stringify({ commit, dirty, valued, pull });
 if (text.includes("SECRET") || text.includes("/Users/") || text.includes("html_url") || pull.labels.length !== 1) process.exit(1);
 if (commit.commit.message !== "Agent-Vendor: grok") process.exit(1);
-if (!body.startsWith("<!-- review-evidence:v1")) process.exit(1);
+if (dirty !== "") process.exit(1);
+if (!clean.startsWith("<!-- review-evidence:v1") || !clean.includes("result: pass") || clean.includes("SECRET")) process.exit(1);
+const secretOnly = "<!-- review-evidence:v1\nhead-sha: " + sha + "\nresult: pass\nSECRET-INSIDE-MARKER\n-->";
+const bundle = JSON.parse(readFileSync("${FIX}/delivered-tier-c.json", "utf8"));
+bundle.inputs.comments = [{
+  id: 9,
+  user: { login: "someone", type: "User" },
+  author_association: "NONE",
+  performed_via_github_app: null,
+  created_at: "2026-10-01T00:00:00Z",
+  body: secretOnly,
+}];
+writeFileSync("${ROOT}/leak-marker.json", JSON.stringify(bundle));
+let markerThrew = false;
+try { projectBundle(bundle); } catch (e) { markerThrew = String(e.message || "").includes("redaction:marker"); }
+if (!markerThrew) process.exit(1);
+const pathBundle = JSON.parse(readFileSync("${FIX}/delivered-tier-c.json", "utf8"));
+pathBundle.inputs.commits[0].commit.message = "Agent-Vendor: grok\n/Users/example/path";
+writeFileSync("${ROOT}/leak-path.json", JSON.stringify(pathBundle));
+let pathThrew = false;
+try { projectBundle(pathBundle); } catch (e) { pathThrew = String(e.message || "").includes("redaction:absolute-path"); }
+if (!pathThrew) process.exit(1);
 EOF
-[ $? -eq 0 ] && ok "allowlist drops bodies, paths, and non-tier labels" || bad "allowlist kept a secret or a path"
+[ $? -eq 0 ] && ok "allowlist drops secrets and host paths inside markers" || bad "allowlist kept a secret or a path"
+
+node "$EVAL" project --bundle "$ROOT/leak-marker.json" >"$ROOT/leak-project.out" 2>"$ROOT/leak-project.err"
+rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'redaction:marker' "$ROOT/leak-project.out"; then
+  ok "project refuses a secret inside an existing marker"
+else
+  bad "project accepted a marker secret rc=$rc $(cat "$ROOT/leak-project.out")"
+fi
+node "$EVAL" verify --receipt "$ROOT/a.json" --bundle "$ROOT/leak-marker.json" >"$ROOT/leak-verify.out" 2>"$ROOT/leak-verify.err"
+rc=$?
+if [ "$rc" -eq 1 ] && grep -qx 'contradictory' "$ROOT/leak-verify.out"; then
+  ok "verify refuses a bundle whose marker is not redacted"
+else
+  bad "verify accepted a marker secret rc=$rc $(cat "$ROOT/leak-verify.out")"
+fi
+node "$EVAL" project --bundle "$ROOT/leak-path.json" >"$ROOT/leak-path.out" 2>"$ROOT/leak-path.err"
+rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'redaction:absolute-path' "$ROOT/leak-path.out"; then
+  ok "project refuses a host path in an existing bundle"
+else
+  bad "project accepted a host path rc=$rc $(cat "$ROOT/leak-path.out")"
+fi
+node "$EVAL" verify --receipt "$ROOT/a.json" --bundle "$ROOT/leak-path.json" >"$ROOT/leak-path-verify.out" 2>"$ROOT/leak-path-verify.err"
+rc=$?
+if [ "$rc" -eq 1 ] && grep -qx 'contradictory' "$ROOT/leak-path-verify.out"; then
+  ok "verify refuses a host path in an existing bundle"
+else
+  bad "verify accepted a host path rc=$rc $(cat "$ROOT/leak-path-verify.out")"
+fi
 
 if grep -R -E -n '/Users/|/home/|/private/var/|html_url|SECRET' "$FIX" >/dev/null; then
   bad "fixture text contains a forbidden leak"
@@ -313,6 +377,49 @@ expect_mut_project "app-id" "MUTATION_ANCHOR_APP_ID" "app-id-mismatch.json"
 expect_mut_project "unknown-vendor" "MUTATION_ANCHOR_UNKNOWN_VENDOR" "unvendored-owner.json"
 expect_mut_project "pagination" "MUTATION_ANCHOR_PAGINATION" "pagination-not-exhausted.json"
 expect_mut_project "non-default-base" "MUTATION_ANCHOR_NON_DEFAULT_BASE" "non-default-base.json"
+expect_mut_project "source-inventory" "MUTATION_ANCHOR_SOURCE_INVENTORY" "omitted-pulls-for-head.json"
+
+expect_mut_marker() {
+  local dest="$ROOT/mut-marker"
+  if ! mutant_for "MUTATION_ANCHOR_MARKER_REDACT" "$dest"; then bad "marker mutant does not parse"; return; fi
+  node --input-type=module <<EOF
+import { markerOnly } from "${EVAL}";
+import { markerOnly as poisoned } from "${dest}/delivery-receipt.mjs";
+const sha = "a".repeat(40);
+const dirty = "<!-- review-evidence:v1\nhead-sha: " + sha + "\nresult: pass\nSECRET /Users/example/path\n-->";
+const orig = markerOnly(dirty);
+const mut = poisoned(dirty);
+if (orig.includes("SECRET") || orig.includes("/Users/")) process.exit(2);
+if (!mut.includes("SECRET") || !mut.includes("/Users/example/path")) process.exit(3);
+EOF
+  if [ $? -eq 0 ]; then
+    ok "mutation marker-redact: secret inside a marker is retained when the fix is removed"
+    echo "    receipt marker-redact: original markerOnly dropped the secret, mutant kept it"
+  else
+    bad "mutation marker-redact did not turn the inside-marker secret red"
+  fi
+}
+expect_mut_marker
+
+expect_mut_leak() {
+  local dest="$ROOT/mut-bundle-leak"
+  if ! mutant_for "MUTATION_ANCHOR_BUNDLE_LEAK" "$dest"; then bad "bundle-leak mutant does not parse"; return; fi
+  node "$EVAL" project --bundle "$ROOT/leak-marker.json" >"$ROOT/leak.orig" 2>"$ROOT/leak.orig.err"
+  local o=$?
+  node "$dest/delivery-receipt.mjs" project --bundle "$ROOT/leak-marker.json" >"$ROOT/leak.mut" 2>"$ROOT/leak.mut.err"
+  local m=$?
+  local disp=""
+  if [ "$m" -eq 0 ]; then
+    disp=$(node -e 'const fs=require("fs"); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).disposition)' "$ROOT/leak.mut")
+  fi
+  if [ "$o" -eq 1 ] && grep -q 'redaction:marker' "$ROOT/leak.orig" && [ "$m" -eq 0 ] && [ "$disp" = "delivered" ]; then
+    ok "mutation bundle-leak: project $o -> $m"
+    echo "    receipt bundle-leak: original project exit $o, mutant project exit $m disposition $disp"
+  else
+    bad "mutation bundle-leak: orig $o mut $m disp=$disp orig=$(cat "$ROOT/leak.orig") mut=$(cat "$ROOT/leak.mut")"
+  fi
+}
+expect_mut_leak
 
 node --input-type=module <<EOF
 import { readFileSync, writeFileSync } from "node:fs";

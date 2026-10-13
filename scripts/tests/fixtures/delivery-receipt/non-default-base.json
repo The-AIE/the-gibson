@@ -6,7 +6,85 @@
   "ghApiVersion": "2022-11-28",
   "sources": [
     {
+      "endpoint": "repos/example/example",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
       "endpoint": "repos/example/example/pulls/1",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/pulls/1/commits",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/pulls/1/reviews",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/issues/1/comments",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pulls",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/issues/1/timeline",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/pulls/1/files",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/statuses",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/branches/feature/protection/required_status_checks",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/rules/branches/feature",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "graphql:closing-issues",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "graphql:comment-editors",
       "pages": 1,
       "exhausted": true,
       "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
