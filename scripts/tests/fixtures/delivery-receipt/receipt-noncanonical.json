@@ -1,0 +1,87 @@
+{
+  "tier": "C",
+  "subject": {
+    "repository": "example/example",
+    "pr": 1,
+    "mergeSha": "cccccccccccccccccccccccccccccccccccccccc",
+    "issue": null,
+    "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "schemaVersion": "1.0.0",
+  "schema": "gibson.delivery.v1",
+  "review": {
+    "verdict": "APPROVE",
+    "source": "review",
+    "reviewerVendor": "devin",
+    "reviewedHeadSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "independenceLevel": "E3"
+  },
+  "requiredChecks": {
+    "status": "known",
+    "entries": [
+      {
+        "context": "review-evidence",
+        "appId": 1
+      }
+    ]
+  },
+  "reasons": [],
+  "policyManifestDigest": "unknown",
+  "paginationExhausted": true,
+  "lessons": {
+    "status": "unknown"
+  },
+  "gates": [
+    {
+      "name": "review-evidence",
+      "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "conclusion": "success",
+      "completedAt": "2026-10-01T00:05:00Z",
+      "appSlug": "github-actions",
+      "appId": 1
+    }
+  ],
+  "g12": {
+    "reasons": [
+      "tier-c",
+      "level-e3",
+      "head-bound",
+      "checks-success"
+    ],
+    "met": true,
+    "applies": true
+  },
+  "disposition": "delivered",
+  "digest": "c5c6f4fb62641c84f32cf0ba5de55b749e939a5cef4dbe7b807a5a6bc18b5f2a",
+  "deployment": {
+    "status": "unknown"
+  },
+  "defaultBranch": "main",
+  "cost": {
+    "status": "unknown"
+  },
+  "commentEditors": {
+    "status": "known"
+  },
+  "cleanup": {
+    "status": "unknown"
+  },
+  "bundleDigest": "3202aaf79d5885ea35e046657463b589fb29b4732ff3273f83d5f872f6032bf0",
+  "baseRef": "main",
+  "authority": "report-only",
+  "actors": {
+    "reviewer": {
+      "vendor": "devin",
+      "login": "devin-ai-integration[bot]"
+    },
+    "releaser": {
+      "vendor": "unknown",
+      "login": "unknown"
+    },
+    "builder": {
+      "vendor": "grok",
+      "login": "aie-agent-lanes-grok[bot]"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "key-order",
+  "omitDigest": false,
+  "input": {
+    "z": 1,
+    "a": "x"
+  },
+  "canonical": "{\"a\":\"x\",\"z\":1}",
+  "digest": "8d6a75ac86d8b51bb56acfbb96108ed81474aa3504c317f77c0c576bde387cd3"
+}
