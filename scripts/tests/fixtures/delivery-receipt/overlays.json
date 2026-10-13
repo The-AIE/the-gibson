@@ -1,0 +1,510 @@
+{
+  "_comment": "RFC 6902 patches applied to delivered-tier-c.json. Each name is the case the full bundle used to be. Empty list means the case is the base bundle.",
+  "unknown-cost-deploy": [],
+  "stale-reviewed-head": [
+    {
+      "op": "replace",
+      "path": "/inputs/reviews/0/commit_id",
+      "value": "9999999999999999999999999999999999999999"
+    }
+  ],
+  "same-vendor": [
+    {
+      "op": "replace",
+      "path": "/inputs/reviews/0/user/login",
+      "value": "aie-agent-lanes-grok[bot]"
+    }
+  ],
+  "app-id-mismatch": [
+    {
+      "op": "replace",
+      "path": "/inputs/checkRuns/0/appId",
+      "value": 99
+    }
+  ],
+  "missing-required-check": [
+    {
+      "op": "add",
+      "path": "/inputs/requiredChecks/entries/1",
+      "value": {
+        "context": "lint",
+        "appId": 1
+      }
+    }
+  ],
+  "tier-c-without-e3": [
+    {
+      "op": "remove",
+      "path": "/inputs/reviews/0"
+    }
+  ],
+  "forged-trailer-unverified": [
+    {
+      "op": "replace",
+      "path": "/inputs/commits/0/author/login",
+      "value": "not-a-lane"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/commits/0/committer/login",
+      "value": "not-a-lane"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/commits/0/commit/verification/verified",
+      "value": false
+    }
+  ],
+  "forged-trailer-on-lane-bot": [
+    {
+      "op": "replace",
+      "path": "/inputs/commits/0/commit/message",
+      "value": "Agent-Vendor: claude"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/commits/0/commit/verification/verified",
+      "value": false
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/reviews/0/user/login",
+      "value": "aie-agent-lanes-grok[bot]"
+    }
+  ],
+  "unlisted-lane-bot": [
+    {
+      "op": "replace",
+      "path": "/inputs/commits/0/author/login",
+      "value": "aie-agent-lanes-other[bot]"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/commits/0/committer/login",
+      "value": "aie-agent-lanes-other[bot]"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/commits/0/commit/verification/verified",
+      "value": false
+    }
+  ],
+  "required-checks-unreadable": [
+    {
+      "op": "replace",
+      "path": "/inputs/requiredChecks/status",
+      "value": "unknown"
+    },
+    {
+      "op": "remove",
+      "path": "/inputs/requiredChecks/entries/0"
+    }
+  ],
+  "dismissed-newer-review": [
+    {
+      "op": "add",
+      "path": "/inputs/reviews/1",
+      "value": {
+        "id": 2,
+        "user": {
+          "login": "devin-ai-integration[bot]",
+          "type": "Bot"
+        },
+        "state": "DISMISSED",
+        "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "submitted_at": "2026-10-01T01:00:00Z"
+      }
+    }
+  ],
+  "approve-after-dismiss": [
+    {
+      "op": "replace",
+      "path": "/inputs/reviews/0/state",
+      "value": "DISMISSED"
+    },
+    {
+      "op": "add",
+      "path": "/inputs/reviews/1",
+      "value": {
+        "id": 2,
+        "user": {
+          "login": "devin-ai-integration[bot]",
+          "type": "Bot"
+        },
+        "state": "APPROVED",
+        "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "submitted_at": "2026-10-01T01:00:00Z"
+      }
+    }
+  ],
+  "edited-review-comment": [
+    {
+      "op": "remove",
+      "path": "/inputs/reviews/0"
+    },
+    {
+      "op": "add",
+      "path": "/inputs/comments/0",
+      "value": {
+        "id": 7,
+        "user": {
+          "login": "devin-ai-integration[bot]",
+          "type": "Bot"
+        },
+        "author_association": "NONE",
+        "performed_via_github_app": {
+          "slug": "devin-ai-integration",
+          "id": 811515
+        },
+        "created_at": "2026-10-01T00:00:00Z",
+        "body": "<!-- review-evidence:v1\nhead-sha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nresult: pass\n-->",
+        "edited": true,
+        "editor": {
+          "login": "someone"
+        }
+      }
+    }
+  ],
+  "base-retarget": [
+    {
+      "op": "add",
+      "path": "/inputs/timeline/0",
+      "value": {
+        "event": "base_ref_changed",
+        "created_at": "2026-10-02T00:00:00Z"
+      }
+    }
+  ],
+  "shared-head": [
+    {
+      "op": "replace",
+      "path": "/inputs/pull/state",
+      "value": "open"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merged",
+      "value": false
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merge_commit_sha",
+      "value": null
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pullsForHead/0/state",
+      "value": "open"
+    },
+    {
+      "op": "add",
+      "path": "/inputs/pullsForHead/1",
+      "value": {
+        "number": 2,
+        "state": "open",
+        "head": {
+          "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    }
+  ],
+  "ambiguous-cost": [
+    {
+      "op": "replace",
+      "path": "/inputs/costEvents",
+      "value": [
+        {
+          "schema": "gibson.cost.v1",
+          "ts": "2026-10-01T00:00:00Z",
+          "runner": "grok",
+          "pr": 1,
+          "join_key": "same-key"
+        },
+        {
+          "schema": "gibson.cost.v1",
+          "ts": "2026-10-01T00:00:01Z",
+          "runner": "codex",
+          "pr": 2,
+          "join_key": "same-key"
+        }
+      ]
+    }
+  ],
+  "joined-cost": [
+    {
+      "op": "add",
+      "path": "/inputs/costEvents/0",
+      "value": {
+        "schema": "gibson.cost.v1",
+        "ts": "2026-10-01T00:00:00Z",
+        "runner": "grok",
+        "pr": 1
+      }
+    }
+  ],
+  "non-default-base": [
+    {
+      "op": "remove",
+      "path": "/sources/10"
+    },
+    {
+      "op": "replace",
+      "path": "/sources/10/endpoint",
+      "value": "repos/example/example/branches/feature/protection/required_status_checks"
+    },
+    {
+      "op": "add",
+      "path": "/sources/11",
+      "value": {
+        "endpoint": "repos/example/example/rules/branches/feature",
+        "pages": 1,
+        "exhausted": true,
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pull/base/ref",
+      "value": "feature"
+    }
+  ],
+  "pagination-not-exhausted": [
+    {
+      "op": "replace",
+      "path": "/sources/2/exhausted",
+      "value": false
+    }
+  ],
+  "omitted-pulls-for-head": [
+    {
+      "op": "remove",
+      "path": "/sources/5"
+    },
+    {
+      "op": "remove",
+      "path": "/inputs/pullsForHead/0"
+    }
+  ],
+  "fabricated-single-source": [
+    {
+      "op": "replace",
+      "path": "/sources",
+      "value": [
+        {
+          "endpoint": "repos/example/example/pulls/1",
+          "pages": 1,
+          "exhausted": true,
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ]
+    }
+  ],
+  "duplicate-source": [
+    {
+      "op": "add",
+      "path": "/sources/14",
+      "value": {
+        "endpoint": "repos/example/example",
+        "pages": 1,
+        "exhausted": true,
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    }
+  ],
+  "unvendored-owner": [
+    {
+      "op": "replace",
+      "path": "/inputs/commits",
+      "value": [
+        {
+          "sha": "dddddddddddddddddddddddddddddddddddddddd",
+          "author": {
+            "login": "mrhinkle"
+          },
+          "committer": {
+            "login": "mrhinkle"
+          },
+          "commit": {
+            "message": "",
+            "verification": {
+              "verified": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/reviews/0/user/login",
+      "value": "aie-independent-review[bot]"
+    }
+  ],
+  "tier-unknown-missing": [
+    {
+      "op": "remove",
+      "path": "/inputs/pull/labels/0"
+    }
+  ],
+  "tier-unknown-multiple": [
+    {
+      "op": "add",
+      "path": "/inputs/pull/labels/0",
+      "value": {
+        "name": "tier-a"
+      }
+    }
+  ],
+  "tier-unknown-same-vendor": [
+    {
+      "op": "remove",
+      "path": "/inputs/pull/labels/0"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/reviews/0/user/login",
+      "value": "aie-agent-lanes-grok[bot]"
+    }
+  ],
+  "closed-unmerged": [
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merged",
+      "value": false
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merge_commit_sha",
+      "value": null
+    }
+  ],
+  "open-parked": [
+    {
+      "op": "replace",
+      "path": "/inputs/pull/state",
+      "value": "open"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merged",
+      "value": false
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merge_commit_sha",
+      "value": null
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pullsForHead/0/state",
+      "value": "open"
+    }
+  ],
+  "open-blocked-check": [
+    {
+      "op": "replace",
+      "path": "/inputs/pull/state",
+      "value": "open"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merged",
+      "value": false
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merge_commit_sha",
+      "value": null
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pullsForHead/0/state",
+      "value": "open"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/checkRuns/0/conclusion",
+      "value": "failure"
+    }
+  ],
+  "open-blocked-review": [
+    {
+      "op": "replace",
+      "path": "/inputs/pull/state",
+      "value": "open"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merged",
+      "value": false
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merge_commit_sha",
+      "value": null
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pullsForHead/0/state",
+      "value": "open"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/reviews/0/state",
+      "value": "CHANGES_REQUESTED"
+    }
+  ],
+  "tier-a-delivered": [
+    {
+      "op": "replace",
+      "path": "/inputs/pull/labels/0/name",
+      "value": "tier-a"
+    }
+  ],
+  "check-no-app-slug": [
+    {
+      "op": "replace",
+      "path": "/inputs/checkRuns/0/appSlug",
+      "value": null
+    }
+  ],
+  "comment-editors-unknown": [
+    {
+      "op": "replace",
+      "path": "/inputs/commentEditors/status",
+      "value": "unknown"
+    }
+  ],
+  "contradictory-state": [
+    {
+      "op": "replace",
+      "path": "/inputs/pull/state",
+      "value": "open"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/pullsForHead/0/state",
+      "value": "open"
+    }
+  ],
+  "duplicate-check-run": [
+    {
+      "op": "add",
+      "path": "/inputs/checkRuns/1",
+      "value": {
+        "name": "review-evidence",
+        "conclusion": "success",
+        "appSlug": "github-actions",
+        "appId": 1,
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "completedAt": "2026-10-01T00:05:00Z"
+      }
+    }
+  ],
+  "check-not-success": [
+    {
+      "op": "replace",
+      "path": "/inputs/checkRuns/0/conclusion",
+      "value": "neutral"
+    }
+  ]
+}

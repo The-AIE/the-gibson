@@ -24,14 +24,11 @@ source of truth.
 | Artifact | Path | Role |
 |---|---|---|
 | JSON Schema (documentation of shape) | `config/policy/schema/delivery-receipt-v1.schema.json` | Schema id `gibson.delivery.v1`, closed objects |
-| Collector / projector / verifier | `scripts/delivery-receipt.mjs` | `collect` (network), `project` and `verify` (pure) |
+| Projector / verifier | `scripts/delivery-receipt.mjs` | `project` and `verify` are pure. `collect` exits 2 in this build. The networked collector is the #160 follow-up. |
 | Focused sensors | `scripts/tests/delivery-receipt.test.sh` | Fixtures, red cases, mutation receipts |
 | This guide | `docs/delivery-receipt-v1.md` | What the receipt is, and the limits |
 
-`collect` is the only networked step. It shells `gh api`, allowlists fields, and
-writes a bundle (`gibson.delivery-bundle.v1`). `project` reads that bundle and
-prints a canonical receipt. `verify` fails closed when the receipt disagrees
-with its digest, with the bundle, or with the disposition rules.
+This build does not collect. `collect` prints `not available in this build; see #160 follow-up` and exits 2. `project` reads a frozen bundle (`gibson.delivery-bundle.v1`) and prints a canonical receipt. `verify` fails closed when the receipt disagrees with its digest, with the bundle, or with the disposition rules. The networked collector (`gh api`, pagination, and marker re-serialization at collection time) is the #160 follow-up.
 
 Review identity is not reimplemented. `project` calls `evaluate()`,
 `resolveAuthors()`, and `trailerVendors()` from `scripts/pr-review-evidence.mjs`
@@ -128,24 +125,14 @@ need is not delivered.
 
 ## Running it
 
-Pure Node. No new dependencies. Tests do not use the network. `collect` does.
+Pure Node. No new dependencies. Tests do not use the network. `collect` exits 2.
 
 ```bash
-node scripts/delivery-receipt.mjs collect --repo OWNER/REPO --pr N --out bundle.json
 node scripts/delivery-receipt.mjs project --bundle bundle.json
 node scripts/delivery-receipt.mjs verify --receipt receipt.json --bundle bundle.json
 ```
 
-Optional on `collect`: `--ledger PATH` (local `gibson.cost.v1` JSONL) and
-`--config PATH` (default `config/review-evidence.v1.json`). The ledger path is
-not stored. Commit messages keep only `Agent-Vendor:` lines. A comment
-marker is re-serialized from the fields `pr-review-evidence` reads
-(`head-sha`, `result`, and the attestation vendor fields). Any other marker
-text is dropped. `project` and `verify` refuse a bundle that still contains
-a host path or a marker that is not that re-serialization. `delivered`
-requires every collect source, including pulls-for-head and both
-required-check endpoints, exactly once and exhausted. `pullsForHeadStatus`
-is `known` only when that pulls-for-head source is present and exhausted.
+A comment marker in a bundle has to already be the re-serialization of the fields `pr-review-evidence` reads (`head-sha`, `result`, and the attestation vendor fields). Any other marker text is not accepted. `project` and `verify` refuse a bundle that still contains a host path or a marker that is not that re-serialization. `delivered` requires every source, including pulls-for-head and both required-check endpoints, exactly once and exhausted. `pullsForHeadStatus` is `known` only when that pulls-for-head source is present and exhausted. Cost joins a `gibson.cost.v1` row carried in the bundle. The follow-up collector is what reads GitHub and the ledger file.
 
 Exit codes: `0` pass, `1` verify or project fail, `2` usage or I/O.
 
