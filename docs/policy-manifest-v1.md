@@ -95,6 +95,10 @@ bash scripts/tests/policy-manifest.test.sh
 ./scripts/tests/run-all.sh --only policy-manifest
 ```
 
+## Stated limits
+
+The marker digest is a 12-hex staleness tag of the rendered block. The binding is the byte comparison of each block against a fresh render, so a digest collision cannot hide an edit. Full SHA-256 markers would exceed the AGENTS.md byte budget. `check-drift` covers only the three generated blocks. The rest of AGENTS.md is guarded by contract-authority, per contract item 8.
+
 ## Compatibility policy
 
 | Rule | Meaning |

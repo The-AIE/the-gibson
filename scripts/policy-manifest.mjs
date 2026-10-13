@@ -35,6 +35,9 @@
  *   <!-- pv:tiers d=<12 lowercase hex> -->
  *   <!-- pv:roles d=<12 lowercase hex> -->
  *   <!-- /pv -->
+ *
+ * check-drift rejects, before any parse, a leading UTF-8 BOM, any CR, a NUL,
+ * or invalid UTF-8 (fatal TextDecoder) in AGENTS.md and the manifest JSON.
  */
 
 import { createHash } from "node:crypto";
@@ -2856,6 +2859,53 @@ function wrapView(id, inner) {
 }
 
 /**
+ * Encoding gate for generated-view inputs. Runs before any parse.
+ * A Buffer is the raw file: leading UTF-8 BOM (EF BB BF), any CR, any NUL,
+ * or a sequence a fatal UTF-8 TextDecoder refuses. A string is what
+ * `readContainedFile(..., "utf8")` already produced: it keeps a leading
+ * U+FEFF, so the same three text defects are rejected here. Invalid UTF-8
+ * cannot survive that decode, so callers that hold bytes must pass a Buffer.
+ *
+ * @param {Buffer | string} input
+ * @param {string} [path]
+ * @returns {Finding[]}
+ */
+export function viewEncodingFindings(input, path) {
+  /** @type {Finding[]} */
+  const findings = [];
+  const label = typeof path === "string" && path ? path : "input";
+  const push = (why) => {
+    findings.push(err("E_VIEW_ENCODING", `${why} in ${label}`, label));
+  };
+  if (Buffer.isBuffer(input)) {
+    if (
+      input.length >= 3 &&
+      input[0] === 0xef &&
+      input[1] === 0xbb &&
+      input[2] === 0xbf
+    ) {
+      push("leading BOM");
+    }
+    if (input.includes(0x0d)) push("CR");
+    if (input.includes(0x00)) push("NUL byte");
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(input);
+    } catch {
+      push("invalid UTF-8");
+    }
+    return findings;
+  }
+  if (typeof input !== "string") {
+    push("not text");
+    return findings;
+  }
+  if (input.charCodeAt(0) === 0xfeff) push("leading BOM");
+  if (input.includes("\r")) push("CR");
+  if (input.includes("\0")) push("NUL byte");
+  return findings;
+}
+
+/**
  * @param {string} text
  */
 export function parsePolicyViewMarkers(text) {
@@ -2932,6 +2982,8 @@ export function parsePolicyViewMarkers(text) {
  * @returns {Finding[]}
  */
 export function checkPolicyViewDrift(agentsText, manifest) {
+  const enc = viewEncodingFindings(agentsText, "AGENTS.md");
+  if (enc.length) return sortFindings(enc);
   const rendered = renderPolicyViews(manifest);
   const parsed = parsePolicyViewMarkers(agentsText);
   /** @type {Finding[]} */
@@ -2964,6 +3016,8 @@ export function checkPolicyViewDrift(agentsText, manifest) {
  * @param {Record<string, unknown>} manifest
  */
 export function applyPolicyViews(text, manifest) {
+  const enc = viewEncodingFindings(text, "AGENTS.md");
+  if (enc.length) return { ok: false, findings: sortFindings(enc), text };
   const rendered = renderPolicyViews(manifest);
   const parsed = parsePolicyViewMarkers(text);
   if (parsed.findings.length) {
@@ -3058,7 +3112,8 @@ WHY
 RISKS
   Consistency is a report sensor. Digests pin the doctrine snapshot. Pure Node
   only — no subprocess, model, secrets, or new dependency. check-drift exits 1
-  on unreadable, missing, or malformed inputs.
+  on unreadable, missing, or malformed inputs, and on a leading BOM, a CR, a
+  NUL, or invalid UTF-8 in AGENTS.md or the manifest (E_VIEW_ENCODING).
 
 USAGE
   node scripts/policy-manifest.mjs validate [--manifest PATH] [--repo-root PATH]
@@ -3225,13 +3280,34 @@ function main(argv) {
       if (typeof opt.manifest !== "string" || !opt.manifest || isAbsolute(opt.manifest)) {
         throw new Error(`manifest path refused: ${opt.manifest}`);
       }
-      const manifest = loadManifestCandidate(repoRoot, opt.manifest);
+      const manifestBytes = /** @type {Buffer} */ (
+        readContainedFile(repoRoot, opt.manifest, null)
+      );
+      const agentsBytes = /** @type {Buffer} */ (
+        readContainedFile(repoRoot, "AGENTS.md", null)
+      );
+      const encFindings = sortFindings([
+        ...viewEncodingFindings(manifestBytes, opt.manifest),
+        ...viewEncodingFindings(agentsBytes, "AGENTS.md"),
+      ]);
+      if (encFindings.length) {
+        for (const f of encFindings) {
+          console.error(`${opt.cmd}: ${f.code} ${f.message}`);
+        }
+        process.exit(1);
+      }
+      let manifest;
+      try {
+        manifest = JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(manifestBytes)
+        );
+      } catch (e) {
+        throw new Error(`invalid JSON ${opt.manifest}: ${e.message}`);
+      }
       if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
         throw new Error("manifest is not an object");
       }
-      const agents = /** @type {string} */ (
-        readContainedFile(repoRoot, "AGENTS.md", "utf8")
-      );
+      const agents = new TextDecoder("utf-8", { fatal: true }).decode(agentsBytes);
       if (opt.cmd === "check-drift") {
         const findings = checkPolicyViewDrift(
           agents,
