@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * policy-manifest.mjs — report-only policy-manifest v1 validator (#188)
+ * policy-manifest.mjs — policy-manifest v1 validator and view renderer (#164)
  *
  * WHAT IT DOES
- *   Validates a frozen policy-manifest candidate offline, emits a byte-stable
- *   JSON report plus concise human text, and optionally checks selected
- *   doctrine identifiers/tables for drift. Report-only: never activates policy,
- *   never rewrites doctrine, never claims merge authority.
+ *   Validates the canonical policy manifest offline, emits a byte-stable JSON
+ *   report plus concise human text, and checks selected doctrine identifiers
+ *   for drift. `render --write` rewrites only the three marked AGENTS.md
+ *   blocks. The report stays report-only and never claims merge authority.
  *
  * WHY
  *   Parent #164 needs a behavior-preserving representation of approved
@@ -25,8 +25,19 @@
  *   node scripts/policy-manifest.mjs validate [--manifest PATH] [--repo-root PATH]
  *   node scripts/policy-manifest.mjs report [--manifest PATH] [--format json|text|both]
  *   node scripts/policy-manifest.mjs check-consistency [--manifest PATH]
+ *   node scripts/policy-manifest.mjs render [--write] [--manifest PATH] [--repo-root PATH]
+ *   node scripts/policy-manifest.mjs check-drift [--manifest PATH] [--repo-root PATH]
  *   node scripts/policy-manifest.mjs digest --path RELATIVE_PATH [--repo-root PATH]
  *   node scripts/policy-manifest.mjs --help
+ *
+ * VIEW MARKERS (byte-stable, 12 hex chars of sha256 of the inner block)
+ *   <!-- pv:gates d=<12 lowercase hex> -->
+ *   <!-- pv:tiers d=<12 lowercase hex> -->
+ *   <!-- pv:roles d=<12 lowercase hex> -->
+ *   <!-- /pv -->
+ *
+ * check-drift rejects, before any parse, a leading UTF-8 BOM, any CR, a NUL,
+ * or invalid UTF-8 (fatal TextDecoder) in AGENTS.md and the manifest JSON.
  */
 
 import { createHash } from "node:crypto";
@@ -34,10 +45,12 @@ import {
   closeSync,
   constants as fsConstants,
   fstatSync,
+  lstatSync,
   openSync,
   readFileSync,
   realpathSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,6 +62,7 @@ import {
   parseForbiddenPairs,
   provenanceRoleFindings,
 } from "./lib/contract-semantics.mjs";
+import { CANONICAL_TIER_C_TREATMENT } from "./lib/authority-config-canonical.mjs";
 
 /** Portable open flags: read-only + nonblocking so FIFOs/devices never hang. */
 const OPEN_READ_NONBLOCK =
@@ -137,12 +151,21 @@ const ALLOWED_SOURCE_KEYS = new Set([
 ]);
 const ALLOWED_GATE_KEYS = new Set([
   "id",
+  "kind",
+  "stop",
+  "requires",
+  "decision",
   "category",
   "summary",
   "severity",
   "relatedTierIds",
 ]);
-const ALLOWED_TIER_KEYS = new Set(["id", "definition", "evidenceMinimums"]);
+const ALLOWED_TIER_KEYS = new Set([
+  "id",
+  "definition",
+  "treatment",
+  "evidenceMinimums",
+]);
 const ALLOWED_EVIDENCE_KEYS = new Set([
   "reviewDepth",
   "adversarialReview",
@@ -152,7 +175,7 @@ const ALLOWED_EVIDENCE_KEYS = new Set([
   "serializedWhenStateful",
   "crossVendorPreferred",
 ]);
-const ALLOWED_ROLE_KEYS = new Set(["id", "summary"]);
+const ALLOWED_ROLE_KEYS = new Set(["id", "summary", "out", "forbidden"]);
 const ALLOWED_PAIR_KEYS = new Set(["a", "b", "scope", "symmetric", "rationale"]);
 const ALLOWED_RI_KEYS = new Set([
   "id",
@@ -175,6 +198,8 @@ const ALLOWED_NOTICES_KEYS = new Set([
   "authority",
   "activationOwner",
   "generatedViews",
+  "ratchet",
+  "deliveryControl",
 ]);
 
 const CORE_ID_PREFIX = "gibson.";
@@ -186,10 +211,38 @@ const CONTAINED_REL_PATH =
   /^(?!.*(?:^|\/)\.git(?:\/|$))(?:[a-zA-Z0-9][a-zA-Z0-9._-]*|\.[a-zA-Z0-9._-]+)(?:\/(?:[a-zA-Z0-9][a-zA-Z0-9._-]*|\.[a-zA-Z0-9._-]+))*$/;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const GATE_ID_RE = /^G([1-9]|1[0-6])$/;
-const DEFAULT_MANIFEST_REL =
+const DEFAULT_MANIFEST_REL = "config/policy/gibson-core-v1.json";
+/** Retired report-only path. Refused by name; other relative paths still load. */
+export const RETIRED_CANDIDATE_REL =
   "config/policy/candidates/gibson-core-v1.candidate.json";
 const DEFAULT_SCHEMA_REL =
   "config/policy/schema/policy-manifest-v1.schema.json";
+
+/** Exact AGENTS.md risk-tier treatment cells. Tier C is the D-015 pin. */
+const TIER_TREATMENTS = {
+  A: "Solo independent review; standard gates",
+  B: "Full-lens review; UX eval if visible",
+  C: CANONICAL_TIER_C_TREATMENT,
+};
+const RATCHET_NOTICE =
+  "The ratchet may tighten autonomously; it may only loosen with the owner's sign-off.";
+const DELIVERY_CONTROL_NOTICE =
+  "audit first (read-only), then dry-run, then explicit human apply";
+const FLOOR_REQUIRES = ["E3-exact-head", "required-checks"];
+const VIEW_IDS = ["gates", "tiers", "roles"];
+const VIEW_OPEN_RE = /^<!-- pv:(gates|tiers|roles) d=([0-9a-f]{12}) -->$/;
+const VIEW_CLOSE = "<!-- /pv -->";
+/**
+ * contract-authority headroom fixtures append up to 90 bytes and must stay
+ * ≤ 18944. 18944 − 90 = 18854. Do not raise this to fit a longer file.
+ */
+export const AGENTS_BYTE_CEILING = 18854;
+
+export function isRetiredCandidateRel(rel) {
+  if (typeof rel !== "string") return false;
+  const norm = rel.replace(/\\/g, "/").replace(/^\.\//, "");
+  return norm === RETIRED_CANDIDATE_REL;
+}
 
 function countIds(ids) {
   const m = new Map();
@@ -1429,23 +1482,23 @@ export function validateCandidate(candidate, options = {}) {
   if (typeof c.manifestVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(c.manifestVersion)) {
     push(err("E_MANIFEST_VERSION", "manifestVersion must be semver", "manifestVersion"));
   }
-  if (c.status !== "candidate" && c.status !== "draft" && c.status !== "superseded") {
-    push(err("E_STATUS", "status must be candidate|draft|superseded", "status"));
+  if (c.status !== "canonical") {
+    push(err("E_STATUS", "status must be canonical", "status"));
   }
-  if (c.authority !== "report-only") {
+  if (c.authority !== "generated-views") {
     push(
       err(
         "E_AUTHORITY",
-        "authority must be the constant 'report-only' for this slice; candidate must not claim activated authority",
+        "authority must be the constant 'generated-views'; this file is not merge authority",
         "authority"
       )
     );
   }
-  if (c.activated !== false) {
+  if (c.activated !== true) {
     push(
       err(
         "E_ACTIVATED",
-        "activated must be false; activation is owned by #164 and is out of scope for this report-only candidate",
+        "activated must be true for the canonical generated-views manifest",
         "activated"
       )
     );
@@ -1684,6 +1737,66 @@ export function validateCandidate(candidate, options = {}) {
         );
       }
     }
+    // D-015: G12 is a review floor, not a human merge stop. Every other
+    // gate remains a human stop. requires order is semantic (schema allows
+    // any pair drawn from the two tokens).
+    for (const id of REQUIRED_GATE_IDS) {
+      const g = byId.get(id);
+      if (!g) continue;
+      if (id === "G12") {
+        if (g.kind !== "review-floor" || g.stop !== false) {
+          push(
+            err(
+              "E_GATE_FLOOR",
+              "G12 must be kind review-floor and stop false (D-015)",
+              "humanGates"
+            )
+          );
+        }
+        const req = g.requires;
+        const reqOk =
+          Array.isArray(req) &&
+          req.length === FLOOR_REQUIRES.length &&
+          req.every((v, i) => v === FLOOR_REQUIRES[i]);
+        if (!reqOk) {
+          push(
+            err(
+              "E_GATE_REQUIRES",
+              "G12 requires must be [E3-exact-head, required-checks] in that order",
+              "humanGates"
+            )
+          );
+        }
+        if (g.decision !== "D-015") {
+          push(err("E_GATE_FLOOR", "G12 decision must be D-015", "humanGates"));
+        }
+        if (typeof g.summary === "string" && /\bowner\b/i.test(g.summary)) {
+          push(
+            err(
+              "E_GATE_OWNER",
+              "G12 summary must not require owner merge approval",
+              "humanGates"
+            )
+          );
+        }
+      } else if (g.kind !== "human-stop" || g.stop !== true) {
+        push(
+          err(
+            "E_GATE_STOP",
+            `${id} must be kind human-stop and stop true`,
+            "humanGates"
+          )
+        );
+      } else if (g.requires !== undefined || g.decision !== undefined) {
+        push(
+          err(
+            "E_GATE_STOP",
+            `${id} must not carry review-floor requires or decision`,
+            "humanGates"
+          )
+        );
+      }
+    }
   }
 
   // --- risk tiers ---------------------------------------------------------
@@ -1712,6 +1825,20 @@ export function validateCandidate(candidate, options = {}) {
       }
       if (typeof tier.definition !== "string" || !tier.definition) {
         push(err("E_TIER_DEF", "tier definition required", `${p}.definition`));
+      }
+      if (typeof tier.treatment !== "string" || !tier.treatment) {
+        push(err("E_TIER_TREATMENT", "tier treatment required", `${p}.treatment`));
+      } else if (
+        TIER_TREATMENTS[/** @type {string} */ (tier.id)] &&
+        tier.treatment !== TIER_TREATMENTS[/** @type {string} */ (tier.id)]
+      ) {
+        push(
+          err(
+            "E_TIER_TREATMENT",
+            `tier ${tier.id} treatment must match the canonical view text`,
+            `${p}.treatment`
+          )
+        );
       }
       const em = tier.evidenceMinimums;
       if (!em || typeof em !== "object" || Array.isArray(em)) {
@@ -1749,10 +1876,11 @@ export function validateCandidate(candidate, options = {}) {
         push(err("E_TIER_MISSING", `required tier ${need} is missing`, "riskTiers"));
       }
     }
-    // Evidence minimum monotonicity (current approved semantics, docs/06):
+    // Evidence minimum monotonicity (D-015):
     // A: solo, no adversarial, no human merge
     // B: full-lens, no adversarial, no human merge
-    // C: fan-out, adversarial, human merge + G12
+    // C: fan-out, adversarial, humanMergeGate false, G12 review floor,
+    //    serialize when stateful
     const a = tierById.get("A");
     const b = tierById.get("B");
     const cTier = tierById.get("C");
@@ -1782,11 +1910,20 @@ export function validateCandidate(candidate, options = {}) {
     }
     if (cTier?.evidenceMinimums) {
       const e = /** @type {Record<string, unknown>} */ (cTier.evidenceMinimums);
-      if (e.reviewDepth !== "fan-out" || e.adversarialReview !== true || e.humanMergeGate !== true) {
+      if (e.reviewDepth !== "fan-out" || e.adversarialReview !== true || e.humanMergeGate !== false) {
         push(
           err(
             "E_TIER_EVIDENCE_CONTRADICTION",
-            "Tier C evidence must be fan-out, adversarialReview=true, humanMergeGate=true",
+            "Tier C evidence must be fan-out, adversarialReview=true, humanMergeGate=false (D-015 review floor, not a human merge)",
+            "riskTiers"
+          )
+        );
+      }
+      if (e.serializedWhenStateful !== true) {
+        push(
+          err(
+            "E_TIER_SERIALIZATION",
+            "Tier C must serialize when stateful",
             "riskTiers"
           )
         );
@@ -1796,7 +1933,7 @@ export function validateCandidate(candidate, options = {}) {
         push(
           err(
             "E_TIER_GATE_MAPPING",
-            "Tier C humanGateIds must include G12",
+            "Tier C humanGateIds must include G12 (D-015 review floor, not a human merge)",
             "riskTiers"
           )
         );
@@ -1827,6 +1964,12 @@ export function validateCandidate(candidate, options = {}) {
       }
       if (typeof role.summary !== "string" || !role.summary) {
         push(err("E_ROLE_SUMMARY", "role summary required", `${p}.summary`));
+      }
+      if (typeof role.out !== "string" || !role.out) {
+        push(err("E_ROLE_OUT", "role out required", `${p}.out`));
+      }
+      if (typeof role.forbidden !== "string" || !role.forbidden) {
+        push(err("E_ROLE_FORBIDDEN", "role forbidden required", `${p}.forbidden`));
       }
     });
     for (const need of REQUIRED_ROLE_IDS) {
@@ -2103,7 +2246,7 @@ export function validateCandidate(candidate, options = {}) {
             push(
               err(
                 "E_TIER_GATE_CONTRADICTION",
-                `${gid} cannot map to Tier A (docs/14 + docs/06: Tier C merge/billing gates)`,
+                `${gid} cannot map to Tier A (G6 is the billing human merge; G12 is the D-015 review floor)`,
                 p
               )
             );
@@ -2214,17 +2357,35 @@ export function validateCandidate(candidate, options = {}) {
   } else {
     const n = /** @type {Record<string, unknown>} */ (notices);
     rejectUnknownKeys(n, ALLOWED_NOTICES_KEYS, "notices", push);
-    if (typeof n.authority !== "string" || !/report-only/i.test(n.authority)) {
+    if (typeof n.authority !== "string" || !/not merge authority/i.test(n.authority)) {
       push(
         err(
           "E_NOTICES_AUTHORITY",
-          "notices.authority must state that this candidate is report-only",
+          "notices.authority must state that this manifest is not merge authority",
           "notices.authority"
         )
       );
     }
     if (typeof n.activationOwner !== "string" || !n.activationOwner) {
       push(err("E_NOTICES_OWNER", "notices.activationOwner required", "notices.activationOwner"));
+    }
+    if (n.ratchet !== RATCHET_NOTICE) {
+      push(
+        err(
+          "E_RATCHET",
+          "notices.ratchet must be the exact self-modification sentence",
+          "notices.ratchet"
+        )
+      );
+    }
+    if (n.deliveryControl !== DELIVERY_CONTROL_NOTICE) {
+      push(
+        err(
+          "E_DELIVERY_CONTROL",
+          "notices.deliveryControl must pin audit, dry-run, then explicit human apply",
+          "notices.deliveryControl"
+        )
+      );
     }
     // Never allow a notice that claims activation.
     if (typeof n.authority === "string" && /activated policy authority/i.test(n.authority) &&
@@ -2553,7 +2714,7 @@ export function buildReport(candidate, findings, meta) {
     activated: false,
     authority: "report-only",
     notice:
-      "This report validates a report-only policy-manifest candidate. It does NOT activate policy authority, change gates, or authorize merge.",
+      "This report checks the canonical policy manifest. It does NOT activate policy authority, change gates, or authorize merge.",
     candidate: {
       schemaId: candidate.schemaId ?? null,
       schemaVersion: candidate.schemaVersion ?? null,
@@ -2621,9 +2782,314 @@ export function formatHumanReport(report) {
     }
   }
   lines.push(
-    "NOTE: report-only candidate — not an activated policy authority; activation remains #164."
+    "NOTE: generated-views manifest — not an activated policy authority; not merge or release authority."
   );
   return lines.join("\n") + "\n";
+}
+
+// ---------------------------------------------------------------------------
+// Generated views — three marked AGENTS.md blocks
+// ---------------------------------------------------------------------------
+
+const GATE_GROUPS = [
+  ["destructive", "### Destructive / irreversible"],
+  ["money", "### Money"],
+  ["outward-facing", "### Outward-facing"],
+  ["scope-judgment", "### Scope & judgment"],
+  ["access-security", "### Access & security"],
+];
+
+function viewDigest(inner) {
+  return createHash("sha256").update(inner).digest("hex").slice(0, 12);
+}
+
+function renderGateBlock(manifest) {
+  const gates = Array.isArray(manifest.humanGates) ? manifest.humanGates : [];
+  const parts = [];
+  for (const [cat, heading] of GATE_GROUPS) {
+    const rows = gates
+      .filter((g) => g && g.category === cat)
+      .slice()
+      .sort((a, b) => Number(String(a.id).slice(1)) - Number(String(b.id).slice(1)));
+    const bullets = rows.map((g) => {
+      const mark = g.severity ? " ⛔" : "";
+      return `- **${g.id}**${mark} — ${g.summary}`;
+    });
+    parts.push(`${heading}\n\n${bullets.join("\n")}`);
+  }
+  return `${parts.join("\n\n")}\n`;
+}
+
+function renderTierBlock(manifest) {
+  const tiers = Array.isArray(manifest.riskTiers) ? manifest.riskTiers : [];
+  const byId = new Map(tiers.map((t) => [t.id, t]));
+  const lines = ["| Tier | Definition | Treatment |", "|---|---|---|"];
+  for (const id of REQUIRED_TIER_IDS) {
+    const t = byId.get(id);
+    lines.push(`| **${id}** | ${t ? t.definition : ""} | ${t ? t.treatment : ""} |`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function renderRoleBlock(manifest) {
+  const roles = Array.isArray(manifest.roles) ? manifest.roles : [];
+  const byId = new Map(roles.map((r) => [r.id, r]));
+  const lines = ["| Role | Out | Forbidden |", "|---|---|---|"];
+  for (const id of REQUIRED_ROLE_IDS) {
+    const r = byId.get(id);
+    lines.push(`| ${id} | ${r ? r.out : ""} | ${r ? r.forbidden : ""} |`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * @param {Record<string, unknown>} manifest
+ * @returns {{ gates: string, tiers: string, roles: string }}
+ */
+export function renderPolicyViews(manifest) {
+  return {
+    gates: renderGateBlock(manifest),
+    tiers: renderTierBlock(manifest),
+    roles: renderRoleBlock(manifest),
+  };
+}
+
+function wrapView(id, inner) {
+  return `<!-- pv:${id} d=${viewDigest(inner)} -->\n${inner}${VIEW_CLOSE}\n`;
+}
+
+/**
+ * Encoding gate for generated-view inputs. Runs before any parse.
+ * A Buffer is the raw file: leading UTF-8 BOM (EF BB BF), any CR, any NUL,
+ * or a sequence a fatal UTF-8 TextDecoder refuses. A string is what
+ * `readContainedFile(..., "utf8")` already produced: it keeps a leading
+ * U+FEFF, so the same three text defects are rejected here. Invalid UTF-8
+ * cannot survive that decode, so callers that hold bytes must pass a Buffer.
+ *
+ * @param {Buffer | string} input
+ * @param {string} [path]
+ * @returns {Finding[]}
+ */
+export function viewEncodingFindings(input, path) {
+  /** @type {Finding[]} */
+  const findings = [];
+  const label = typeof path === "string" && path ? path : "input";
+  const push = (why) => {
+    findings.push(err("E_VIEW_ENCODING", `${why} in ${label}`, label));
+  };
+  if (Buffer.isBuffer(input)) {
+    if (
+      input.length >= 3 &&
+      input[0] === 0xef &&
+      input[1] === 0xbb &&
+      input[2] === 0xbf
+    ) {
+      push("leading BOM");
+    }
+    if (input.includes(0x0d)) push("CR");
+    if (input.includes(0x00)) push("NUL byte");
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(input);
+    } catch {
+      push("invalid UTF-8");
+    }
+    return findings;
+  }
+  if (typeof input !== "string") {
+    push("not text");
+    return findings;
+  }
+  if (input.charCodeAt(0) === 0xfeff) push("leading BOM");
+  if (input.includes("\r")) push("CR");
+  if (input.includes("\0")) push("NUL byte");
+  return findings;
+}
+
+/**
+ * @param {string} text
+ */
+export function parsePolicyViewMarkers(text) {
+  /** @type {Finding[]} */
+  const findings = [];
+  const lines = text.split("\n");
+  /** @type {Map<string, { digest: string, inner: string, start: number, end: number }>} */
+  const views = new Map();
+  /** @type {null | { id: string, digest: string, start: number }} */
+  let open = null;
+  const hasPv = text.includes("<!-- pv:") || text.includes("<!-- /pv");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const openM = VIEW_OPEN_RE.exec(line);
+    if (openM) {
+      if (open) {
+        findings.push(
+          err(
+            "E_VIEW_UNPAIRED",
+            `open marker ${open.id} has no close before ${openM[1]}`,
+            "AGENTS.md"
+          )
+        );
+        open = null;
+      }
+      if (views.has(openM[1])) {
+        findings.push(
+          err("E_VIEW_DUPLICATE", `duplicate policy view ${openM[1]}`, "AGENTS.md")
+        );
+      }
+      open = { id: openM[1], digest: openM[2], start: i };
+      continue;
+    }
+    if (line.includes("<!-- pv:")) {
+      findings.push(
+        err("E_VIEW_MALFORMED", `malformed policy-view marker: ${line}`, "AGENTS.md")
+      );
+      continue;
+    }
+    if (line === VIEW_CLOSE) {
+      if (!open) {
+        findings.push(
+          err("E_VIEW_UNPAIRED", "close marker without an open marker", "AGENTS.md")
+        );
+        continue;
+      }
+      const innerLines = lines.slice(open.start + 1, i);
+      const inner = innerLines.length ? `${innerLines.join("\n")}\n` : "";
+      views.set(open.id, { digest: open.digest, inner, start: open.start, end: i });
+      open = null;
+      continue;
+    }
+    if (line.includes("<!-- /pv")) {
+      findings.push(
+        err("E_VIEW_MALFORMED", `malformed policy-view close: ${line}`, "AGENTS.md")
+      );
+    }
+  }
+  if (open) {
+    findings.push(
+      err("E_VIEW_UNPAIRED", `open marker ${open.id} has no close`, "AGENTS.md")
+    );
+  }
+  return { views, findings, hasPv };
+}
+
+/**
+ * Compare the three marked blocks to a fresh render.
+ * A hand edit fails even when its digest was refreshed. A matching block
+ * with the wrong digest fails as stale. Read-only.
+ *
+ * @param {string} agentsText
+ * @param {Record<string, unknown>} manifest
+ * @returns {Finding[]}
+ */
+export function checkPolicyViewDrift(agentsText, manifest) {
+  const enc = viewEncodingFindings(agentsText, "AGENTS.md");
+  if (enc.length) return sortFindings(enc);
+  const rendered = renderPolicyViews(manifest);
+  const parsed = parsePolicyViewMarkers(agentsText);
+  /** @type {Finding[]} */
+  const findings = parsed.findings.slice();
+  for (const id of VIEW_IDS) {
+    const view = parsed.views.get(id);
+    if (!view) {
+      findings.push(err("E_VIEW_MISSING", `missing policy view ${id}`, "AGENTS.md"));
+      continue;
+    }
+    const expected = rendered[/** @type {"gates"|"tiers"|"roles"} */ (id)];
+    if (view.inner !== expected) {
+      findings.push(
+        err("E_VIEW_DRIFT", `policy view ${id} does not match render`, "AGENTS.md")
+      );
+    } else if (view.digest !== viewDigest(view.inner)) {
+      findings.push(
+        err("E_VIEW_STALE_DIGEST", `policy view ${id} digest is stale`, "AGENTS.md")
+      );
+    }
+  }
+  return sortFindings(findings);
+}
+
+/**
+ * Produce the next AGENTS.md text. Does not write. Refuses when markers are
+ * malformed or the result would not itself pass check-drift.
+ *
+ * @param {string} text
+ * @param {Record<string, unknown>} manifest
+ */
+export function applyPolicyViews(text, manifest) {
+  const enc = viewEncodingFindings(text, "AGENTS.md");
+  if (enc.length) return { ok: false, findings: sortFindings(enc), text };
+  const rendered = renderPolicyViews(manifest);
+  const parsed = parsePolicyViewMarkers(text);
+  if (parsed.findings.length) {
+    return { ok: false, findings: sortFindings(parsed.findings), text };
+  }
+  let next = text;
+  if (!parsed.hasPv) {
+    for (const id of VIEW_IDS) {
+      const block = rendered[/** @type {"gates"|"tiers"|"roles"} */ (id)];
+      const count = next.split(block).length - 1;
+      if (count !== 1) {
+        return {
+          ok: false,
+          findings: [
+            err(
+              "E_VIEW_MISSING",
+              `render block ${id} occurs ${count} times`,
+              "AGENTS.md"
+            ),
+          ],
+          text,
+        };
+      }
+      next = next.replace(block, wrapView(id, block));
+    }
+  } else {
+    for (const id of VIEW_IDS) {
+      if (!parsed.views.has(id)) {
+        return {
+          ok: false,
+          findings: [err("E_VIEW_MISSING", `missing policy view ${id}`, "AGENTS.md")],
+          text,
+        };
+      }
+    }
+    const lines = text.split("\n");
+    const spans = [...parsed.views.entries()].sort((a, b) => b[1].start - a[1].start);
+    for (const [id, span] of spans) {
+      const block = rendered[/** @type {"gates"|"tiers"|"roles"} */ (id)];
+      const wrappedLines = wrapView(id, block).split("\n").slice(0, -1);
+      lines.splice(span.start, span.end - span.start + 1, ...wrappedLines);
+    }
+    next = lines.join("\n");
+  }
+  const drift = checkPolicyViewDrift(next, manifest);
+  if (drift.length) return { ok: false, findings: drift, text };
+  if (Buffer.byteLength(next) > AGENTS_BYTE_CEILING) {
+    return {
+      ok: false,
+      findings: [
+        err(
+          "E_VIEW_BUDGET",
+          `AGENTS.md would be ${Buffer.byteLength(next)} bytes; ceiling is ${AGENTS_BYTE_CEILING}`,
+          "AGENTS.md"
+        ),
+      ],
+      text,
+    };
+  }
+  return { ok: true, findings: [], text: next };
+}
+
+function writeAgentsView(repoRoot, next) {
+  const located = resolveLexicalUnderRoot(repoRoot, "AGENTS.md");
+  const lst = lstatSync(located.absPath);
+  if (lst.isSymbolicLink() || !lst.isFile()) {
+    throw new Error("refusing to write non-regular AGENTS.md");
+  }
+  const current = readContainedFile(repoRoot, "AGENTS.md", "utf8");
+  if (current === next) return false;
+  writeFileSync(located.absPath, next);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2631,20 +3097,23 @@ export function formatHumanReport(report) {
 // ---------------------------------------------------------------------------
 
 function help() {
-  console.log(`policy-manifest.mjs — report-only policy-manifest v1 validator (#188)
+  console.log(`policy-manifest.mjs — policy-manifest v1 validator and view renderer (#164)
 
 WHAT IT DOES
-  Validate a frozen policy-manifest candidate offline; emit a byte-stable JSON
-  report and concise human text; optionally check doctrine identifier drift.
-  Never activates policy, never rewrites doctrine, never opens network.
+  Validate the canonical policy manifest offline; emit a byte-stable JSON
+  report and concise human text; render three AGENTS.md blocks; check those
+  blocks for drift. The report stays report-only and never authorizes merge.
+  render --write rewrites only the three marked blocks. No shell subprocess.
 
 WHY
-  Encode current approved semantics (G1-G16, tiers, roles, forbidden pairs,
-  review independence, stages) with source provenance before #164 activation.
+  Encode approved semantics (G1-G16, tiers, roles, forbidden pairs, review
+  independence, stages) and keep the three AGENTS.md views byte-stable.
 
 RISKS
   Consistency is a report sensor. Digests pin the doctrine snapshot. Pure Node
-  only — no subprocess, model, secrets, or new dependency.
+  only — no subprocess, model, secrets, or new dependency. check-drift exits 1
+  on unreadable, missing, or malformed inputs, and on a leading BOM, a CR, a
+  NUL, or invalid UTF-8 in AGENTS.md or the manifest (E_VIEW_ENCODING).
 
 USAGE
   node scripts/policy-manifest.mjs validate [--manifest PATH] [--repo-root PATH]
@@ -2652,6 +3121,10 @@ USAGE
   node scripts/policy-manifest.mjs report [--manifest PATH] [--repo-root PATH]
       [--format json|text|both] [--with-consistency]
   node scripts/policy-manifest.mjs check-consistency [--manifest PATH]
+      [--repo-root PATH]
+  node scripts/policy-manifest.mjs render [--write] [--manifest PATH]
+      [--repo-root PATH]
+  node scripts/policy-manifest.mjs check-drift [--manifest PATH]
       [--repo-root PATH]
   node scripts/policy-manifest.mjs digest --path REL [--repo-root PATH]
   node scripts/policy-manifest.mjs --help
@@ -2682,14 +3155,16 @@ CONTAINMENT
   — never from the tool checkout alone; no schema cache across roots.
 
 EXIT
-  0  validation / consistency pass
-  1  validation or consistency errors
-  2  usage / IO error
+  0  validation / consistency / check-drift pass
+  1  validation, consistency, or view errors (check-drift and render also use 1
+     for unreadable, missing, or malformed inputs)
+  2  usage / IO error for validate, report, check-consistency, and digest
 
 EXAMPLES
   node scripts/policy-manifest.mjs validate
   node scripts/policy-manifest.mjs report --format json
-  node scripts/policy-manifest.mjs check-consistency
+  node scripts/policy-manifest.mjs check-drift
+  node scripts/policy-manifest.mjs render --write
 `);
 }
 
@@ -2701,6 +3176,7 @@ function parseArgs(argv) {
     format: "both",
     withConsistency: false,
     noDigestCheck: false,
+    write: false,
     path: null,
   };
   const positionals = [];
@@ -2718,6 +3194,8 @@ function parseArgs(argv) {
       out.withConsistency = true;
     } else if (a === "--no-digest-check") {
       out.noDigestCheck = true;
+    } else if (a === "--write") {
+      out.write = true;
     } else if (a === "--path") {
       out.path = argv[++i];
     } else if (a.startsWith("-")) {
@@ -2758,11 +3236,16 @@ function main(argv) {
 
   // Freeze one immutable canonical root for this process invocation — used for
   // every manifest / schema / doctrine / digest operation (no per-read rekey).
+  const driftCmd = opt.cmd === "check-drift" || opt.cmd === "render";
   let repoRoot;
   try {
     const requested = opt.repoRoot ? resolve(opt.repoRoot) : defaultRepoRoot();
     repoRoot = resolveCanonicalRepoRoot(requested);
   } catch (e) {
+    if (driftCmd) {
+      console.error(`${opt.cmd}: ${e.message}`);
+      process.exit(1);
+    }
     console.error(`policy-manifest: ${e.message}`);
     process.exit(2);
   }
@@ -2780,6 +3263,86 @@ function main(argv) {
     } catch (e) {
       console.error(`policy-manifest: ${e.message}`);
       process.exit(2);
+    }
+  }
+
+  // Retired candidate path is not authority, even when the file is absent.
+  if (isRetiredCandidateRel(opt.manifest)) {
+    const label = driftCmd ? opt.cmd : "policy-manifest";
+    console.error(
+      `${label}: E_CANDIDATE_PATH retired candidate is not authority (${opt.manifest})`
+    );
+    process.exit(1);
+  }
+
+  if (driftCmd) {
+    try {
+      if (typeof opt.manifest !== "string" || !opt.manifest || isAbsolute(opt.manifest)) {
+        throw new Error(`manifest path refused: ${opt.manifest}`);
+      }
+      const manifestBytes = /** @type {Buffer} */ (
+        readContainedFile(repoRoot, opt.manifest, null)
+      );
+      const agentsBytes = /** @type {Buffer} */ (
+        readContainedFile(repoRoot, "AGENTS.md", null)
+      );
+      const encFindings = sortFindings([
+        ...viewEncodingFindings(manifestBytes, opt.manifest),
+        ...viewEncodingFindings(agentsBytes, "AGENTS.md"),
+      ]);
+      if (encFindings.length) {
+        for (const f of encFindings) {
+          console.error(`${opt.cmd}: ${f.code} ${f.message}`);
+        }
+        process.exit(1);
+      }
+      let manifest;
+      try {
+        manifest = JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(manifestBytes)
+        );
+      } catch (e) {
+        throw new Error(`invalid JSON ${opt.manifest}: ${e.message}`);
+      }
+      if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+        throw new Error("manifest is not an object");
+      }
+      const agents = new TextDecoder("utf-8", { fatal: true }).decode(agentsBytes);
+      if (opt.cmd === "check-drift") {
+        const findings = checkPolicyViewDrift(
+          agents,
+          /** @type {Record<string, unknown>} */ (manifest)
+        );
+        if (findings.length) {
+          for (const f of findings) {
+            console.error(`check-drift: ${f.code} ${f.message}`);
+          }
+          process.exit(1);
+        }
+        process.stdout.write("check-drift: ok\n");
+        process.exit(0);
+      }
+      const applied = applyPolicyViews(
+        agents,
+        /** @type {Record<string, unknown>} */ (manifest)
+      );
+      if (!applied.ok) {
+        for (const f of applied.findings) {
+          console.error(`render: ${f.code} ${f.message}`);
+        }
+        process.exit(1);
+      }
+      if (opt.write) {
+        const changed = writeAgentsView(repoRoot, applied.text);
+        process.stdout.write(changed ? "render: wrote\n" : "render: unchanged\n");
+      } else {
+        process.stdout.write(applied.text);
+      }
+      process.exit(0);
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      console.error(`${opt.cmd}: ${msg}`);
+      process.exit(1);
     }
   }
 

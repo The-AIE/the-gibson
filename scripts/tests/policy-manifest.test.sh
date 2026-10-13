@@ -9,7 +9,7 @@ set -uo pipefail
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 TOOL="$SCRIPT_DIR/../policy-manifest.mjs"
-CANDIDATE="$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json"
+CANDIDATE="$REPO_ROOT/config/policy/gibson-core-v1.json"
 SCHEMA="$REPO_ROOT/config/policy/schema/policy-manifest-v1.schema.json"
 
 PASS=0
@@ -126,9 +126,9 @@ echo "=== fixtures present ==="
 schema_id=$(json_get "$CANDIDATE" "schemaId")
 check "candidate schemaId" "$schema_id" "gibson.policy.manifest.schema.v1"
 activated=$(json_get "$CANDIDATE" "activated")
-check "candidate activated=false" "$activated" "false"
+check "manifest activated=true" "$activated" "true"
 authority=$(json_get "$CANDIDATE" "authority")
-check "candidate authority=report-only" "$authority" "report-only"
+check "manifest authority=generated-views" "$authority" "generated-views"
 
 echo
 echo "=== help / usage ==="
@@ -157,7 +157,7 @@ echo "=== consistency compares AGENTS.md even when docs still agree ==="
 AGENTS_DRIFT="$ROOT/agents-drift"
 mkdir -p "$AGENTS_DRIFT/docs" "$AGENTS_DRIFT/config/policy/schema" "$AGENTS_DRIFT/config/policy/candidates"
 cp "$SCHEMA" "$AGENTS_DRIFT/config/policy/schema/policy-manifest-v1.schema.json"
-cp "$CANDIDATE" "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$CANDIDATE" "$AGENTS_DRIFT/config/policy/gibson-core-v1.json"
 cp "$REPO_ROOT/AGENTS.md" "$AGENTS_DRIFT/AGENTS.md"
 "$NODE" -e '
 const fs = require("fs");
@@ -188,7 +188,7 @@ for (const s of c.provenance.sources) {
   s.digest=createHash("sha256").update(fs.readFileSync(root+"/"+s.path)).digest("hex");
 }
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
+' "$AGENTS_DRIFT/config/policy/gibson-core-v1.json" "$AGENTS_DRIFT"
 
 # Gate omission in AGENTS.md; docs/14 and candidate still have G7.
 "$NODE" -e '
@@ -206,8 +206,8 @@ for (const s of c.provenance.sources) {
   if (s.path==="AGENTS.md") s.digest=createHash("sha256").update(fs.readFileSync(root+"/AGENTS.md")).digest("hex");
 }
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
-out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
+' "$AGENTS_DRIFT/config/policy/gibson-core-v1.json" "$AGENTS_DRIFT"
+out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/gibson-core-v1.json" 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CONSISTENCY_DRIFT' >/dev/null && echo "$out" | grep 'G7' >/dev/null \
   && ok "consistency: AGENTS.md G7 omission drifts even when docs/14 agrees" \
   || bad "consistency AGENTS G7 omission vs agreeing docs (rc=$rc): $out"
@@ -228,8 +228,8 @@ for (const s of c.provenance.sources) {
   if (s.path==="AGENTS.md") s.digest=createHash("sha256").update(fs.readFileSync(root+"/AGENTS.md")).digest("hex");
 }
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
-out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
+' "$AGENTS_DRIFT/config/policy/gibson-core-v1.json" "$AGENTS_DRIFT"
+out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/gibson-core-v1.json" 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CONSISTENCY_DRIFT' >/dev/null && echo "$out" | grep -E 'historian|archivist' >/dev/null \
   && ok "consistency: AGENTS.md role rename drifts even when docs/03 agrees" \
   || bad "consistency AGENTS role rename vs agreeing docs (rc=$rc): $out"
@@ -250,8 +250,8 @@ for (const s of c.provenance.sources) {
   if (s.path==="AGENTS.md") s.digest=createHash("sha256").update(fs.readFileSync(root+"/AGENTS.md")).digest("hex");
 }
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
-out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
+' "$AGENTS_DRIFT/config/policy/gibson-core-v1.json" "$AGENTS_DRIFT"
+out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/gibson-core-v1.json" 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CONSISTENCY_DRIFT' >/dev/null && echo "$out" | grep 'ELEVEN' >/dev/null \
   && ok "consistency: AGENTS.md stage addition drifts even when docs/02 agrees" \
   || bad "consistency AGENTS stage addition vs agreeing docs (rc=$rc): $out"
@@ -272,8 +272,8 @@ for (const s of c.provenance.sources) {
   if (s.path==="AGENTS.md") s.digest=createHash("sha256").update(fs.readFileSync(root+"/AGENTS.md")).digest("hex");
 }
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
-out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
+' "$AGENTS_DRIFT/config/policy/gibson-core-v1.json" "$AGENTS_DRIFT"
+out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/gibson-core-v1.json" 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CONSISTENCY_DRIFT' >/dev/null && echo "$out" | grep 'planner' >/dev/null \
   && ok "consistency: AGENTS.md pair addition drifts even when docs/03 agrees" \
   || bad "consistency AGENTS pair addition vs agreeing docs (rc=$rc): $out"
@@ -294,8 +294,8 @@ for (const s of c.provenance.sources) {
   if (s.path==="AGENTS.md") s.digest=createHash("sha256").update(fs.readFileSync(root+"/AGENTS.md")).digest("hex");
 }
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
-' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
-out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
+' "$AGENTS_DRIFT/config/policy/gibson-core-v1.json" "$AGENTS_DRIFT"
+out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/gibson-core-v1.json" 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CONSISTENCY_DRIFT' >/dev/null && echo "$out" | grep -E 'tier D|tier C' >/dev/null \
   && ok "consistency: AGENTS.md tier rename drifts even when docs/06 agrees" \
   || bad "consistency AGENTS tier drift vs agreeing docs (rc=$rc): $out"
@@ -632,8 +632,8 @@ mut_validate "m-schema-const-shadow.json" 'c.forkExtensions.forbiddenCoreShadow 
 [[ "$rc" -ne 0 ]] && ok "schema const forbiddenCoreShadow fails closed" || bad "schema const forbiddenCoreShadow passed"
 has "schema const forbiddenCoreShadow code" "$out" "E_SCHEMA_CONST"
 
-# 21c) const: activated must be false
-mut_validate "m-schema-const-act.json" 'c.activated = true;' --no-digest-check
+# 21c) const: activated must be true
+mut_validate "m-schema-const-act.json" 'c.activated = false;' --no-digest-check
 [[ "$rc" -ne 0 ]] && ok "schema const activated fails closed" || bad "schema const activated passed"
 has "schema const activated code" "$out" "E_SCHEMA_CONST"
 
@@ -972,8 +972,8 @@ mkdir -p "$SCHEMA_ESCAPE_MINI/config/policy/schema" "$SCHEMA_ESCAPE_MINI/config/
 # Foreign schema bytes outside root
 printf '%s\n' '{"type":"object"}' > "$OUTSIDE_SCHEMA"
 ln -s "$OUTSIDE_SCHEMA" "$SCHEMA_ESCAPE_MINI/config/policy/schema/policy-manifest-v1.schema.json"
-cp "$CANDIDATE" "$SCHEMA_ESCAPE_MINI/config/policy/candidates/gibson-core-v1.candidate.json"
-out=$(run_tool validate --manifest "config/policy/candidates/gibson-core-v1.candidate.json" --repo-root "$SCHEMA_ESCAPE_MINI" --no-digest-check 2>&1); rc=$?
+cp "$CANDIDATE" "$SCHEMA_ESCAPE_MINI/config/policy/gibson-core-v1.json"
+out=$(run_tool validate --manifest "config/policy/gibson-core-v1.json" --repo-root "$SCHEMA_ESCAPE_MINI" --no-digest-check 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "schema symlink escape refused" || bad "schema symlink escape accepted"
 if echo "$out" | grep -Ei 'realpath escapes|symlink|schema|path:' >/dev/null; then
   ok "schema symlink escape diagnosed"
@@ -1058,7 +1058,7 @@ printf '# gates\n**G1**\n' > "$MINI/docs/14-human-gates.md"
 # Symlink that looks repo-relative but realpaths outside
 ln -s "$OUTSIDE_FOR_LINK/leaked.txt" "$MINI/docs/escape-link.md"
 # Candidate with a provenance path pointing at the symlink (relative write under MINI)
-mutate_json "$CANDIDATE" "$MINI/config/policy/candidates/gibson-core-v1.candidate.json" '
+mutate_json "$CANDIDATE" "$MINI/config/policy/gibson-core-v1.json" '
   c.provenance.sources = [{
     id: "src.escape",
     path: "docs/escape-link.md",
@@ -1067,7 +1067,7 @@ mutate_json "$CANDIDATE" "$MINI/config/policy/candidates/gibson-core-v1.candidat
     role: "explanatory-history"
   }];
 '
-out=$(run_tool validate --manifest "config/policy/candidates/gibson-core-v1.candidate.json" --repo-root "$MINI" 2>&1); rc=$?
+out=$(run_tool validate --manifest "config/policy/gibson-core-v1.json" --repo-root "$MINI" 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "symlink escape fails closed" || bad "symlink escape passed (rc=$rc)"
 if echo "$out" | grep -E 'E_PROVENANCE_PATH_ESCAPE|realpath escapes|symlink' >/dev/null; then
   ok "symlink escape diagnosed"
@@ -1433,7 +1433,7 @@ try {
   writeFileSync(join(root, "docs/other.txt"), "OTHER_INSIDE\n");
   writeFileSync(join(outside, "leaked.txt"), "OUTSIDE_SECRET_BYTES\n");
   cpSync(schemaSrc, join(root, "config/policy/schema/policy-manifest-v1.schema.json"));
-  cpSync(candidateSrc, join(root, "config/policy/candidates/gibson-core-v1.candidate.json"));
+  cpSync(candidateSrc, join(root, "config/policy/gibson-core-v1.json"));
   // AGENTS.md is the doctrine source for checkDoctrineConsistency.
   writeFileSync(join(root, "AGENTS.md"), "# gates\n- **G1** — one.\n");
   writeFileSync(join(root, "docs/14-human-gates.md"), "# gates\n**G1**\n");
@@ -1461,7 +1461,7 @@ try {
   try {
     const man = loadManifestCandidate(
       root,
-      "config/policy/candidates/gibson-core-v1.candidate.json"
+      "config/policy/gibson-core-v1.json"
     );
     if (man && typeof man === "object" && man.schemaId) {
       ok("control loadManifestCandidate (higher-level)");
@@ -1475,7 +1475,7 @@ try {
   try {
     const cand = loadManifestCandidate(
       root,
-      "config/policy/candidates/gibson-core-v1.candidate.json"
+      "config/policy/gibson-core-v1.json"
     );
     const findings = checkDoctrineConsistency(cand, root);
     if (Array.isArray(findings)) {
@@ -1659,7 +1659,7 @@ try {
   }
 
   // Higher-level manifest load path with swap
-  const manRel = "config/policy/candidates/gibson-core-v1.candidate.json";
+  const manRel = "config/policy/gibson-core-v1.json";
   function manifestSwapHook({ absPath, relPath }) {
     if (relPath === manRel || /gibson-core-v1\.candidate\.json$/.test(absPath)) {
       try { unlinkSync(absPath); } catch { /* ignore */ }
@@ -1748,7 +1748,7 @@ try {
       writeFileSync(join(liveRoot, "docs/06-quality-gates.md"), "## Risk tiers\n**A**\n**B**\n**C**\n");
       writeFileSync(join(liveRoot, "docs/02-sdlc-pipeline.md"), "## Stage 0 — Plan\n");
       cpSync(schemaSrc, join(liveRoot, "config/policy/schema/policy-manifest-v1.schema.json"));
-      cpSync(candidateSrc, join(liveRoot, "config/policy/candidates/gibson-core-v1.candidate.json"));
+      cpSync(candidateSrc, join(liveRoot, "config/policy/gibson-core-v1.json"));
 
       const frozen = resolveCanonicalRepoRoot(liveRoot);
       // Build a hostile replacement directory with different inode at same path.
@@ -1761,13 +1761,13 @@ try {
       writeFileSync(join(liveReplacement, "docs/06-quality-gates.md"), "## Risk tiers\n**A**\n");
       writeFileSync(join(liveReplacement, "docs/02-sdlc-pipeline.md"), "## Stage 0 — Plan\n");
       cpSync(schemaSrc, join(liveReplacement, "config/policy/schema/policy-manifest-v1.schema.json"));
-      cpSync(candidateSrc, join(liveReplacement, "config/policy/candidates/gibson-core-v1.candidate.json"));
+      cpSync(candidateSrc, join(liveReplacement, "config/policy/gibson-core-v1.json"));
 
       // Load candidate first without replacement so the multi-file op under
       // test is checkDoctrineConsistency itself (not the prior manifest load).
       const cand = loadManifestCandidate(
         frozen,
-        "config/policy/candidates/gibson-core-v1.candidate.json"
+        "config/policy/gibson-core-v1.json"
       );
 
       let opensSeen = 0;
@@ -3368,6 +3368,356 @@ if [[ -e /bin/hostile-stub-policy-manifest-probe ]]; then
 else
   ok "empty ROOT simulation did not write under /bin"
 fi
+
+echo
+echo "=== #164 D-015 mutations on temp copies ==="
+red_then_green() {
+  local name="$1" rel="$2" body="$3" code="$4"
+  mut_validate "$rel" "$body" --no-digest-check
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -F -- "$code" >/dev/null; then
+    ok "$name RED $code"
+  else
+    bad "$name RED (rc=$rc): $out"
+  fi
+  out=$(run_tool validate --repo-root "$REPO_ROOT" 2>&1); rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "$name restored GREEN"
+  else
+    bad "$name restored (rc=$rc): $out"
+  fi
+}
+red_then_green "activated false" "m164-activated.json" 'c.activated = false;' "E_SCHEMA_CONST"
+red_then_green "status candidate" "m164-status.json" 'c.status = "candidate";' "E_STATUS"
+red_then_green "ri.tier-c independent-approve" "m164-ri.json" '
+  const ri = c.reviewIndependence.find(x => x.id === "ri.tier-c");
+  ri.minimumRelationship = "independent-approve";
+' "E_RI_TIER_C"
+red_then_green "G12 requires duplicate required-checks" "m164-req-a.json" '
+  c.humanGates.find(g => g.id === "G12").requires = ["required-checks", "required-checks"];
+' "E_GATE_REQUIRES"
+red_then_green "G12 requires duplicate E3" "m164-req-b.json" '
+  c.humanGates.find(g => g.id === "G12").requires = ["E3-exact-head", "E3-exact-head"];
+' "E_GATE_REQUIRES"
+red_then_green "Tier C adversarialReview false" "m164-adv.json" '
+  c.riskTiers.find(t => t.id === "C").evidenceMinimums.adversarialReview = false;
+' "E_TIER_EVIDENCE_CONTRADICTION"
+red_then_green "Tier C serializedWhenStateful false" "m164-ser.json" '
+  c.riskTiers.find(t => t.id === "C").evidenceMinimums.serializedWhenStateful = false;
+' "E_TIER_SERIALIZATION"
+red_then_green "Tier C serializedWhenStateful deleted" "m164-ser-del.json" '
+  delete c.riskTiers.find(t => t.id === "C").evidenceMinimums.serializedWhenStateful;
+' "E_TIER_SERIALIZATION"
+red_then_green "deliveryControl deleted" "m164-dc.json" 'delete c.notices.deliveryControl;' "E_SCHEMA_REQUIRED"
+red_then_green "ratchet loosened" "m164-ratchet.json" 'c.notices.ratchet = "loosen freely";' "E_RATCHET"
+red_then_green "G12 owner merge stop" "m164-g12.json" '
+  const g = c.humanGates.find(x => x.id === "G12");
+  g.kind = "human-stop";
+  g.stop = true;
+  g.summary = "Owner merge approval required";
+' "E_SCHEMA_CONST"
+red_then_green "G6 dropped from tier mapping" "m164-g6map.json" '
+  c.tierGateMappings[0].gateIds = ["G12"];
+' "E_TIER_GATE_MAPPING"
+red_then_green "G6 gate deleted" "m164-g6.json" '
+  c.humanGates = c.humanGates.filter(g => g.id !== "G6");
+' "E_GATE_MISSING"
+
+out=$(run_tool validate --manifest "config/policy/candidates/gibson-core-v1.candidate.json" --repo-root "$REPO_ROOT" 2>&1); rc=$?
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'E_CANDIDATE_PATH' >/dev/null; then
+  ok "retired candidate path RED E_CANDIDATE_PATH"
+else
+  bad "retired candidate path (rc=$rc): $out"
+fi
+out=$(run_tool validate --repo-root "$REPO_ROOT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "retired path restored GREEN" || bad "retired path restore (rc=$rc): $out"
+
+DRIFT="$ROOT/drift164"
+mkdir -p "$DRIFT/config/policy" "$ROOT/outside164"
+cp "$CANDIDATE" "$DRIFT/config/policy/gibson-core-v1.json"
+cp "$REPO_ROOT/AGENTS.md" "$DRIFT/AGENTS.md"
+printf 'outside\n' > "$ROOT/outside164/secret.txt"
+printf '{}\n' > "$ROOT/outside164/manifest.json"
+
+drift_red() {
+  local name="$1" code="$2"
+  out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+  if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F -- "$code" >/dev/null && echo "$out" | grep -F 'check-drift:' >/dev/null; then
+    ok "$name RED $code"
+  else
+    bad "$name RED (rc=$rc): $out"
+  fi
+  cp "$REPO_ROOT/AGENTS.md" "$DRIFT/AGENTS.md"
+  cp "$CANDIDATE" "$DRIFT/config/policy/gibson-core-v1.json"
+  out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+  [[ "$rc" -eq 0 ]] && ok "$name restored GREEN" || bad "$name restored (rc=$rc): $out"
+}
+
+# Hand edit inside the tier table. Digest is left stale on purpose; drift wins
+# because the inner bytes no longer match render.
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+const from="Solo independent review; standard gates";
+const to="Solo rubber stamp; no gates";
+if (!t.includes(from)) process.exit(2);
+fs.writeFileSync(p, t.replace(from, to));
+' "$DRIFT/AGENTS.md"
+drift_red "hand-edited tier cell" "E_VIEW_DRIFT"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(/<!-- pv:gates d=[0-9a-f]{12} -->/, "<!-- pv:gates d=000000000000 -->");
+fs.writeFileSync(p, t);
+' "$DRIFT/AGENTS.md"
+drift_red "stale gates digest" "E_VIEW_STALE_DIGEST"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+const i=t.indexOf("<!-- /pv -->");
+if (i < 0) process.exit(2);
+fs.writeFileSync(p, t.slice(0, i) + t.slice(i + "<!-- /pv -->\n".length));
+' "$DRIFT/AGENTS.md"
+drift_red "missing end marker" "E_VIEW_UNPAIRED"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+const m=t.match(/<!-- pv:gates d=[0-9a-f]{12} -->[\s\S]*?<!-- \/pv -->\n/);
+if (!m) process.exit(2);
+fs.writeFileSync(p, t.replace(m[0], m[0] + m[0]));
+' "$DRIFT/AGENTS.md"
+drift_red "duplicate gates block" "E_VIEW_DUPLICATE"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+fs.writeFileSync(p, "<!-- /pv -->\n" + fs.readFileSync(p, "utf8"));
+' "$DRIFT/AGENTS.md"
+drift_red "unpaired close marker" "E_VIEW_UNPAIRED"
+
+fail_closed() {
+  local name="$1"
+  out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+  if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'check-drift:' >/dev/null; then
+    ok "$name exit 1"
+  else
+    bad "$name (rc=$rc): $out"
+  fi
+}
+
+rm -f "$DRIFT/AGENTS.md"
+fail_closed "missing AGENTS.md"
+cp "$REPO_ROOT/AGENTS.md" "$DRIFT/AGENTS.md"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "missing AGENTS restored GREEN" || bad "missing AGENTS restore (rc=$rc): $out"
+
+rm -f "$DRIFT/config/policy/gibson-core-v1.json"
+fail_closed "missing manifest"
+cp "$CANDIDATE" "$DRIFT/config/policy/gibson-core-v1.json"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "missing manifest restored GREEN" || bad "missing manifest restore (rc=$rc): $out"
+
+rm -f "$DRIFT/AGENTS.md"
+mkdir "$DRIFT/AGENTS.md"
+fail_closed "AGENTS.md is a directory"
+rmdir "$DRIFT/AGENTS.md"
+cp "$REPO_ROOT/AGENTS.md" "$DRIFT/AGENTS.md"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "directory AGENTS restored GREEN" || bad "directory AGENTS restore (rc=$rc): $out"
+
+rm -f "$DRIFT/config/policy/gibson-core-v1.json"
+mkdir "$DRIFT/config/policy/gibson-core-v1.json"
+fail_closed "manifest is a directory"
+rmdir "$DRIFT/config/policy/gibson-core-v1.json"
+cp "$CANDIDATE" "$DRIFT/config/policy/gibson-core-v1.json"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "directory manifest restored GREEN" || bad "directory manifest restore (rc=$rc): $out"
+
+rm -f "$DRIFT/AGENTS.md"
+ln -s "$ROOT/outside164/secret.txt" "$DRIFT/AGENTS.md"
+fail_closed "AGENTS.md symlink escapes"
+rm -f "$DRIFT/AGENTS.md"
+cp "$REPO_ROOT/AGENTS.md" "$DRIFT/AGENTS.md"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "symlink AGENTS restored GREEN" || bad "symlink AGENTS restore (rc=$rc): $out"
+
+rm -f "$DRIFT/config/policy/gibson-core-v1.json"
+ln -s "$ROOT/outside164/manifest.json" "$DRIFT/config/policy/gibson-core-v1.json"
+fail_closed "manifest symlink escapes"
+rm -f "$DRIFT/config/policy/gibson-core-v1.json"
+cp "$CANDIDATE" "$DRIFT/config/policy/gibson-core-v1.json"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "symlink manifest restored GREEN" || bad "symlink manifest restore (rc=$rc): $out"
+
+printf '{\n' > "$DRIFT/config/policy/gibson-core-v1.json"
+fail_closed "malformed manifest JSON"
+cp "$CANDIDATE" "$DRIFT/config/policy/gibson-core-v1.json"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "malformed manifest restored GREEN" || bad "malformed restore (rc=$rc): $out"
+
+chmod 000 "$DRIFT/AGENTS.md"
+fail_closed "unreadable AGENTS.md"
+chmod 644 "$DRIFT/AGENTS.md"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "unreadable AGENTS restored GREEN" || bad "unreadable AGENTS restore (rc=$rc): $out"
+
+chmod 000 "$DRIFT/config/policy/gibson-core-v1.json"
+fail_closed "unreadable manifest"
+chmod 644 "$DRIFT/config/policy/gibson-core-v1.json"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "unreadable manifest restored GREEN" || bad "unreadable manifest restore (rc=$rc): $out"
+
+echo
+echo "=== encoding: BOM, CR, invalid UTF-8, NUL ==="
+out=$(run_tool check-drift --repo-root "$REPO_ROOT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "current files check-drift GREEN" || bad "current files check-drift (rc=$rc): $out"
+
+# name, which file (agents|manifest), how (bom|crlf|lone-cr|bad-utf8|nul)
+encode_file() {
+  "$NODE" -e '
+    const fs = require("fs");
+    const p = process.argv[1];
+    const how = process.argv[2];
+    const b = fs.readFileSync(p);
+    let out;
+    if (how === "bom") {
+      out = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), b]);
+    } else if (how === "crlf") {
+      const s = b.toString("utf8");
+      if (!s.includes("\n") || s.includes("\r")) process.exit(2);
+      out = Buffer.from(s.replace(/\n/g, "\r\n"), "utf8");
+    } else if (how === "lone-cr") {
+      let at = -1;
+      for (let i = 0; i < b.length - 1; i++) {
+        if (b[i] !== 0x0d && b[i] !== 0x0a && b[i + 1] !== 0x0a && b[i + 1] !== 0x0d) {
+          at = i + 1;
+          break;
+        }
+      }
+      if (at < 0) process.exit(2);
+      out = Buffer.concat([b.subarray(0, at), Buffer.from([0x0d]), b.subarray(at)]);
+    } else if (how === "bad-utf8") {
+      out = Buffer.concat([b, Buffer.from([0xff])]);
+    } else if (how === "nul") {
+      out = Buffer.concat([b, Buffer.from([0x00])]);
+    } else {
+      process.exit(2);
+    }
+    fs.writeFileSync(p, out);
+  ' "$1" "$2"
+}
+
+encoding_red() {
+  local name="$1" file="$2" how="$3"
+  encode_file "$file" "$how" || { bad "$name fixture"; return; }
+  out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+  if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'E_VIEW_ENCODING' >/dev/null && echo "$out" | grep -F 'check-drift:' >/dev/null; then
+    ok "$name RED E_VIEW_ENCODING"
+  else
+    bad "$name RED (rc=$rc): $out"
+  fi
+  cp "$REPO_ROOT/AGENTS.md" "$DRIFT/AGENTS.md"
+  cp "$CANDIDATE" "$DRIFT/config/policy/gibson-core-v1.json"
+  out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+  [[ "$rc" -eq 0 ]] && ok "$name restored GREEN" || bad "$name restored (rc=$rc): $out"
+}
+
+encoding_red "AGENTS.md leading BOM" "$DRIFT/AGENTS.md" bom
+encoding_red "AGENTS.md CRLF" "$DRIFT/AGENTS.md" crlf
+encoding_red "AGENTS.md lone CR" "$DRIFT/AGENTS.md" lone-cr
+encoding_red "AGENTS.md invalid UTF-8" "$DRIFT/AGENTS.md" bad-utf8
+encoding_red "AGENTS.md NUL" "$DRIFT/AGENTS.md" nul
+encoding_red "manifest leading BOM" "$DRIFT/config/policy/gibson-core-v1.json" bom
+encoding_red "manifest CRLF" "$DRIFT/config/policy/gibson-core-v1.json" crlf
+encoding_red "manifest lone CR" "$DRIFT/config/policy/gibson-core-v1.json" lone-cr
+encoding_red "manifest invalid UTF-8" "$DRIFT/config/policy/gibson-core-v1.json" bad-utf8
+encoding_red "manifest NUL" "$DRIFT/config/policy/gibson-core-v1.json" nul
+
+echo
+echo "=== mutation: removing viewEncodingFindings lets a BOM pass ==="
+ENC_MUT="$ROOT/policy-manifest-no-encoding.mjs"
+cp "$TOOL" "$ENC_MUT"
+if ! "$NODE" -e '
+  const fs = require("fs");
+  const p = process.argv[1];
+  let s = fs.readFileSync(p, "utf8");
+  const name = "export function viewEncodingFindings";
+  const start = s.indexOf(name);
+  if (start < 0) throw new Error("missing viewEncodingFindings");
+  const brace = s.indexOf("{", start);
+  let depth = 0, end = -1;
+  for (let i = brace; i < s.length; i++) {
+    if (s[i] === "{") depth++;
+    else if (s[i] === "}") {
+      depth--;
+      if (depth === 0) { end = i + 1; break; }
+    }
+  }
+  if (end < 0) throw new Error("cannot end viewEncodingFindings");
+  const body = "export function viewEncodingFindings() {\n  return [];\n}";
+  s = s.slice(0, start) + body + s.slice(end);
+  if (!s.includes(body)) throw new Error("encoding check was not removed");
+  if (s.indexOf("push(\"leading BOM\")") >= 0 || s.indexOf("0xfeff") >= 0) {
+    throw new Error("BOM check still present");
+  }
+  fs.writeFileSync(p, s);
+' "$ENC_MUT"; then
+  bad "encoding mutation surgery failed"
+fi
+if ! "$NODE" --check "$ENC_MUT" 2>/dev/null; then
+  bad "encoding mutation produced invalid syntax"
+fi
+if encode_file "$DRIFT/AGENTS.md" bom; then
+  MUT_RC=0
+  MUT_OUT=$("$NODE" "$ENC_MUT" check-drift --repo-root "$DRIFT" 2>&1) || MUT_RC=$?
+  if [[ "$MUT_RC" -eq 0 ]] && ! echo "$MUT_OUT" | grep -F 'E_VIEW_ENCODING' >/dev/null; then
+    ok "encoding mutation: BOM RED fails to fire"
+  else
+    bad "encoding mutation still fired BOM (rc=$MUT_RC): $MUT_OUT"
+  fi
+else
+  bad "BOM mutation fixture"
+fi
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'E_VIEW_ENCODING' >/dev/null; then
+  ok "unmutated tool still RED E_VIEW_ENCODING on the same BOM"
+else
+  bad "unmutated tool missed BOM (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/AGENTS.md" "$DRIFT/AGENTS.md"
+out=$(run_tool check-drift --repo-root "$DRIFT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "BOM mutation restored GREEN" || bad "BOM mutation restore (rc=$rc): $out"
+
+RENDER="$ROOT/render164"
+mkdir -p "$RENDER/config/policy"
+cp "$CANDIDATE" "$RENDER/config/policy/gibson-core-v1.json"
+cp "$REPO_ROOT/AGENTS.md" "$RENDER/AGENTS.md"
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(/^<!-- pv:(gates|tiers|roles) d=[0-9a-f]{12} -->\n/gm, "");
+t=t.replace(/^<!-- \/pv -->\n/gm, "");
+fs.writeFileSync(p, t);
+' "$RENDER/AGENTS.md"
+out=$(run_tool render --write --repo-root "$RENDER" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "render --write wraps unmarked blocks" || bad "render wrap (rc=$rc): $out"
+h1=$(cksum "$RENDER/AGENTS.md")
+out=$(run_tool render --write --repo-root "$RENDER" 2>&1); rc=$?
+h2=$(cksum "$RENDER/AGENTS.md")
+if [[ "$rc" -eq 0 && "$h1" == "$h2" ]] && echo "$out" | grep -F 'render: unchanged' >/dev/null; then
+  ok "render --write twice is unchanged"
+else
+  bad "render twice (rc=$rc h1=$h1 h2=$h2): $out"
+fi
+out=$(run_tool check-drift --repo-root "$RENDER" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "rendered copy check-drift GREEN" || bad "rendered copy drift (rc=$rc): $out"
 
 echo
 echo "=== docs guide present ==="

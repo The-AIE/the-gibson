@@ -1,19 +1,19 @@
 ---
-title: "Policy manifest v1 (report-only candidate)"
+title: "Policy manifest v1 (generated views)"
 parent: The Doctrine
 nav_order: 27
 ---
 
-# Policy manifest v1 — report-only candidate and offline validator
+# Policy manifest v1 — canonical manifest, generated views, and offline validator
 
 
 > **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
 
-> 🙂 **In plain English:** This is a frozen checklist of today's approved rules
+> 🙂 **In plain English:** This is the checklist of today's approved rules
 > (when to stop, who reviews what, which jobs cannot grade themselves) written
-> so a computer can read it. It does **not** change how the crew runs. It is a
-> preparation step so later work can keep the docs and the machines from
-> drifting apart.
+> so a computer can read it. Three marked blocks in `AGENTS.md` are generated
+> from it. It is **not** merge authority. A drift check fails if those blocks
+> are edited by hand.
 
 ## What this is
 
@@ -23,15 +23,15 @@ Issue **#188** ships the first reversible slice of parent architecture issue
 | Artifact | Path | Role |
 |---|---|---|
 | JSON Schema (documentation of shape) | `config/policy/schema/policy-manifest-v1.schema.json` | Stable schema id + version contract |
-| Candidate manifest | `config/policy/candidates/gibson-core-v1.candidate.json` | Behavior-preserving encoding of approved semantics |
+| Canonical manifest | `config/policy/gibson-core-v1.json` | Source of the three generated AGENTS.md blocks |
 | Pure offline validator | `scripts/policy-manifest.mjs` | Fail-closed validation + byte-stable report |
 | Focused sensors | `scripts/tests/policy-manifest.test.sh` | Fixtures + mutation receipts |
 | This guide | `docs/policy-manifest-v1.md` | Compatibility, forks, upgrade/rollback |
 
-The candidate carries:
+The manifest carries:
 
 - stable **schema id / schema version**, **manifest id / version**
-- **status** `candidate`, **authority** `report-only`, **activated** `false`
+- **status** `canonical`, **authority** `generated-views`, **activated** `true`
 - **generatorVersion** and **validatorVersion**
 - **source path + sha256 digest** provenance: exactly one `AGENTS.md` source with role `human-readable-contract`; every `docs/**` pin is `explanatory-history` (never `canonical-doctrine` or `compatibility-doctrine`)
 - a documented **compatibility** policy (semver major break; namespaced forks)
@@ -47,17 +47,15 @@ owned by `AGENTS.md`:
 
 ## What this is not
 
-- **Not** an activated policy authority. Reports always say so.
-- **Not** merge, gate, or CI hard-fail authority. `#208` made `AGENTS.md` the
-  sole always-mandatory human-readable contract; this candidate remains a
-  **checked mirror** (`report-only`, `activated=false`) of enumerations that
-  `AGENTS.md` owns. `scripts/contract-authority.mjs` fails if the mirror drifts
-  from `AGENTS.md`; it must not treat the candidate as binding authority.
-  Activation is still `#164`.
-- **Not** generated doctrine blocks (those remain **#164**).
+- **Not** merge, gate, or release authority. `#208` made `AGENTS.md` the
+  sole always-mandatory human-readable contract. This file is the source of
+  three generated blocks and is not merge authority. `check-drift` fails if a
+  block, digest, or marker is wrong. Reports still say they do not activate
+  policy authority.
 - **Not** a consumer for the context compiler (**#166** consumes a *later*
-  resolved bundle, not this candidate by implication).
-- **Not** closure of parent **#164**.
+  resolved bundle, not this manifest by implication).
+- Parent **#164** owns this generated-view slice. Runtime merge authority
+  stays out of scope.
 
 ## Running the validator
 
@@ -75,9 +73,19 @@ node scripts/policy-manifest.mjs check-consistency
 
 # Digest helper for refreshing provenance after an intentional doctrine pin
 node scripts/policy-manifest.mjs digest --path docs/14-human-gates.md
+
+# Rewrite the three marked blocks, then prove a second run is a no-op
+node scripts/policy-manifest.mjs render --write
+node scripts/policy-manifest.mjs check-drift
 ```
 
-Exit codes: `0` pass, `1` validation/consistency errors, `2` usage/IO.
+View markers are `<!-- pv:gates d=<12 hex> -->`, `<!-- pv:tiers d=<12 hex> -->`,
+`<!-- pv:roles d=<12 hex> -->`, closed by `<!-- /pv -->`. The digest is the
+first 12 hex characters of sha256 over the inner block bytes.
+
+Exit codes: `0` pass, `1` validation, consistency, or view errors (`check-drift`
+and `render` also use `1` for unreadable inputs), `2` usage/IO for the other
+commands.
 
 Focused suite:
 
@@ -86,6 +94,10 @@ bash scripts/tests/policy-manifest.test.sh
 # or via the full sensor gate
 ./scripts/tests/run-all.sh --only policy-manifest
 ```
+
+## Stated limits
+
+The marker digest is a 12-hex staleness tag of the rendered block. The binding is the byte comparison of each block against a fresh render, so a digest collision cannot hide an edit. Full SHA-256 markers would exceed the AGENTS.md byte budget. `check-drift` covers only the three generated blocks. The rest of AGENTS.md is guarded by contract-authority, per contract item 8.
 
 ## Compatibility policy
 
@@ -112,19 +124,19 @@ When two layers disagree on an enforceable identifier:
 
 - the more specific layer wins **only if** the conflict is an intentional,
   non-ambiguous override allowed by later activation rules;
-- for this report-only candidate, **any** ambiguous override shape (duplicate
+- for this generated-views manifest, **any** ambiguous override shape (duplicate
   precedence entries, non-`refuse` disposition, core-namespace shadow) is a
   validation **error**.
 
 ### Generated-view boundaries
 
-Generated views (AGENTS summaries, doctrine tables, adapter host files) are
-**outputs**, not authorities:
+Generated views (the human-gates list, the risk-tier table, and the roles
+table) are **outputs**, not merge authority:
 
-- a generated block must identify manifest + generator version (when #164 adds
-  generation);
-- adapters (Claude/Codex/Goose/pi host files) cannot become policy sources;
-- this v1 slice does **not** write generated blocks.
+- each block is wrapped by a `<!-- pv:… -->` marker whose digest is sha256 of
+  the inner bytes;
+- `render --write` rewrites only those three blocks and is byte-stable;
+- adapters (Claude/Codex/Goose/pi host files) cannot become policy sources.
 
 ### Upgrade
 
@@ -136,12 +148,10 @@ Generated views (AGENTS summaries, doctrine tables, adapter host files) are
 
 ### Rollback
 
-Because **activated=false** and nothing in CI/runtime consumes this candidate as
-authority:
+The manifest is not merge authority. Rollback restores the generated views:
 
-1. Revert the candidate file (and validator if needed) on the branch.
-2. Runtime gates, human-gate list, and CI hard-fail behavior are unchanged by
-   that revert.
+1. Revert the manifest, the three marked blocks, and the validator together.
+2. Nothing in this slice reads the file as merge or release authority.
 
 ## Fail-closed validation surface
 
@@ -216,7 +226,9 @@ The pure validator refuses (non-exhaustive):
 - no approve-then-reopen path API: hashing and loads require root-relative
   containment and verified bytes from the opened fd
 - ambiguous overrides (duplicate precedence, non-refuse disposition)
-- `activated: true` or non-`report-only` authority on this slice
+- `activated: false`, a non-`canonical` status, or authority other than `generated-views`
+- G12 as a human merge stop, a Tier C `humanMergeGate` of true, or a loosened ratchet / delivery-control notice
+- a generated block that does not match `render`, a stale digest, or a missing, duplicate, or unpaired marker (`check-drift`, exit 1)
 
 ## Consistency check (report-only)
 
@@ -276,15 +288,15 @@ The focused suite proves the gate fails when a fixture:
   ESC/ANSI, CR, other C0/C1 controls, invalid bytes, empty lines, early
   sentinel, trailing junk, duplicates, and truncation all fail closed
 
-## Activation work that remains in #164
+## What #164 did and what it left
 
-Parent **#164** still owns:
-
-- generated, clearly delimited doctrine views in AGENTS and tables
-- CI hard-fail on stale generated views / unknown IDs (beyond this report suite)
-- runtime consumers and any merge-authority wiring
-- any semantic change to G1–G16, tiers, or hard-fail controls (those are Tier C
-  with an owner decision card — representation-only work must not smuggle them)
+This slice of **#164** promotes the manifest to `config/policy/gibson-core-v1.json`
+(`status` canonical, `authority` generated-views, `activated` true), renders
+three AGENTS.md blocks, and hard-fails `check-drift` inside the existing
+`sensors` job. G12 is the D-015 review floor (`stop: false`). It does **not**
+wire merge or release authority, and it does not change G6 or the other human
+stops. Runtime consumers remain later work. Any semantic change to G1–G16,
+tiers, or hard-fail controls is still Tier C with an owner decision.
 
 ## Tier and owner boundary
 

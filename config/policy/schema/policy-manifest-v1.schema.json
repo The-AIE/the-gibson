@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "gibson.policy.manifest.schema.v1",
-  "title": "Gibson Policy Manifest v1 (report-only candidate)",
-  "description": "Versioned, machine-readable representation of approved Gibson control-plane policy identifiers and relationships. This schema documents the v1 candidate shape. A pure offline Node validator enforces the rules; this file is not activated as merge authority. Activation remains owned by parent issue #164.",
+  "title": "Gibson Policy Manifest v1 (generated views)",
+  "description": "Versioned, machine-readable representation of approved Gibson control-plane policy identifiers and relationships. This schema documents the canonical generated-views manifest. A pure offline Node validator enforces the rules. The manifest is the source of three AGENTS.md blocks and is not merge authority. Parent issue #164.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -48,18 +48,18 @@
     },
     "status": {
       "type": "string",
-      "enum": ["candidate", "draft", "superseded"],
-      "description": "Lifecycle status. 'candidate' means report-only encoding of approved semantics."
+      "enum": ["canonical", "candidate", "draft", "superseded"],
+      "description": "Lifecycle status. The canonical file must be 'canonical'. 'candidate' stays in the enum so a leftover candidate fails the semantic status check rather than only the enum."
     },
     "authority": {
       "type": "string",
-      "const": "report-only",
-      "description": "Hard constant for v1. Never claims activated policy authority."
+      "const": "generated-views",
+      "description": "Hard constant. Source of three generated views. Not merge authority."
     },
     "activated": {
       "type": "boolean",
-      "const": false,
-      "description": "Must be false for this report-only slice. Activation is out of scope (#164)."
+      "const": true,
+      "description": "Must be true for the canonical generated-views manifest. Not merge authority."
     },
     "generatorVersion": {
       "type": "string",
@@ -205,11 +205,31 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "category", "summary", "severity"],
+        "required": ["id", "kind", "stop", "category", "summary", "severity"],
         "properties": {
           "id": {
             "type": "string",
             "pattern": "^G([1-9]|1[0-6])$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["human-stop", "review-floor"]
+          },
+          "stop": {
+            "type": "boolean"
+          },
+          "requires": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "string",
+              "enum": ["E3-exact-head", "required-checks"]
+            }
+          },
+          "decision": {
+            "type": "string",
+            "const": "D-015"
           },
           "category": {
             "type": "string",
@@ -235,6 +255,24 @@
               "enum": ["A", "B", "C"]
             }
           }
+        },
+        "if": {
+          "properties": { "id": { "const": "G12" } },
+          "required": ["id"]
+        },
+        "then": {
+          "properties": {
+            "kind": { "const": "review-floor" },
+            "stop": { "const": false }
+          },
+          "required": ["kind", "stop", "requires", "decision"]
+        },
+        "else": {
+          "properties": {
+            "kind": { "const": "human-stop" },
+            "stop": { "const": true }
+          },
+          "required": ["kind", "stop"]
         }
       }
     },
@@ -245,13 +283,17 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "definition", "evidenceMinimums"],
+        "required": ["id", "definition", "treatment", "evidenceMinimums"],
         "properties": {
           "id": {
             "type": "string",
             "enum": ["A", "B", "C"]
           },
           "definition": {
+            "type": "string",
+            "minLength": 1
+          },
+          "treatment": {
             "type": "string",
             "minLength": 1
           },
@@ -302,7 +344,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "summary"],
+        "required": ["id", "summary", "out", "forbidden"],
         "properties": {
           "id": {
             "type": "string",
@@ -319,6 +361,14 @@
             ]
           },
           "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "out": {
+            "type": "string",
+            "minLength": 1
+          },
+          "forbidden": {
             "type": "string",
             "minLength": 1
           }
@@ -521,7 +571,7 @@
     "notices": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["authority", "activationOwner"],
+      "required": ["authority", "activationOwner", "ratchet", "deliveryControl"],
       "properties": {
         "authority": {
           "type": "string"
@@ -531,6 +581,14 @@
         },
         "generatedViews": {
           "type": "string"
+        },
+        "ratchet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deliveryControl": {
+          "type": "string",
+          "minLength": 1
         }
       }
     }
