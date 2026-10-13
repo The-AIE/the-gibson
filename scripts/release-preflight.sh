@@ -39,7 +39,9 @@ WHAT IT DOES
     3. Required checks. Distinguishes a product red (a step failed) from GitHub
        Actions infrastructure (startup_failure / no steps / no runner), which
        re-runs identically and is usually concurrent across open PRs.
-    4. Tier. tier-c never gets an admin path; that is a human gate.
+    4. Tier. tier-c never gets an admin path. The G12 floor (D-015) is E3
+       (cross-vendor, exact-head) plus every required check green at that head;
+       otherwise BLOCKED. Admin/force merge stays forbidden.
 
   Read-only. It never merges, never comments, never edits.
 
@@ -51,8 +53,10 @@ WHY
 
 RISKS
   - Read-only: worst case is a wrong verdict, which the checklist it prints lets
-    you audit. It does not authorize anything by itself; a human still merges
-    Tier C, and ADMIN-CANDIDATE is a pre-launch operator decision, not a green light.
+    you audit. It does not authorize anything by itself. Tier C merges only on
+    the G12 floor (D-015: E3 at the exact head plus required checks).
+    ADMIN-CANDIDATE is a pre-launch operator decision for Tier A/B, not a green
+    light, and never applies to Tier C.
 
 USAGE
   release-preflight.sh <pr> [--repo owner/name] [--partial] [--launched] [--json]
@@ -521,14 +525,80 @@ if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
   BLOCKERS+=("branch conflicts with the base — re-sync origin/main first (multi-lane fleet)")
 fi
 
-if [[ ${#ADMIN_REASONS[@]} -gt 0 ]]; then
-  if [[ "$TIER" == "tier-c" ]]; then
-    BLOCKERS+=("Tier C is a human merge gate (Law 7) — no admin path, whatever the CI is doing")
-    ADMIN_REASONS=()
-  elif [[ "$LAUNCHED" -eq 1 ]]; then
-    BLOCKERS+=("post-launch posture (--launched): no admin merge on any red — escalate to the owner")
+# D-015 G12 floor: a Tier C head is mergeable only when (a) an E3 cross-vendor
+# review verdict is bound to the exact head and (b) every required check is
+# green at that head. Evidence comes from scripts/pr-review-evidence.mjs (the
+# same evaluator behind the review-evidence status) — reuse, do not reimplement.
+# Unreadable evidence fails closed. Admin/force merge stays forbidden.
+if [[ "$TIER" == "tier-c" ]]; then
+  _floor_parts=()
+  _ev_state=""
+  _ev_reason=""
+  _preflight_home=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  _review_js="${_preflight_home}/pr-review-evidence.mjs"
+  # Node ESM main() compares import.meta.url (physical path) to argv[1]. A
+  # mutation copy under /tmp (symlink to /private/tmp on macOS) would otherwise
+  # load the file and exit 0 with empty stdout — fail-open as "unreadable"
+  # only because we treat empty JSON as a blocker; resolve so the evaluator
+  # actually runs.
+  if [[ -e "$_review_js" ]]; then
+    _review_js=$(CDPATH='' cd -- "$(dirname -- "$_review_js")" && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$_review_js")")
+  fi
+  _review_cfg="${_preflight_home}/../config/review-evidence.v1.json"
+  if [[ ! "$HEAD_OID" =~ ^[0-9a-f]{40}$ ]]; then
+    _floor_parts+=("evidence unreadable (head SHA missing or malformed)")
+  elif [[ ! -f "$_review_js" ]]; then
+    _floor_parts+=("evidence unreadable")
+  elif ! command -v node >/dev/null; then
+    _floor_parts+=("evidence unreadable")
+  else
+    _ev_args=(node "$_review_js" --repo "$REPO" --pr "$PR" --expected-head "$HEAD_OID")
+    if [[ -n "${GIBSON_REVIEW_EVIDENCE_CONFIG:-}" && -f "${GIBSON_REVIEW_EVIDENCE_CONFIG}" ]]; then
+      _ev_args+=(--config "$GIBSON_REVIEW_EVIDENCE_CONFIG")
+    elif [[ -f "$_review_cfg" ]]; then
+      _ev_args+=(--config "$_review_cfg")
+    fi
+    if [[ -n "${GIBSON_REVIEW_EVIDENCE_FIXTURE:-}" ]]; then
+      _ev_args+=(--fixture "$GIBSON_REVIEW_EVIDENCE_FIXTURE")
+    fi
+    _ev_out=$("${_ev_args[@]}" 2>/dev/null) || true
+    _ev_state=$(printf '%s' "$_ev_out" | jq -r '.state // empty' 2>/dev/null) || _ev_state=""
+    _ev_reason=$(printf '%s' "$_ev_out" | jq -r '.reason // empty' 2>/dev/null) || _ev_reason=""
+    if [[ -z "$_ev_state" || -z "$_ev_reason" ]]; then
+      _floor_parts+=("evidence unreadable")
+    elif [[ "$_ev_state" == "success" && "$_ev_reason" == "pass" ]]; then
+      :
+    elif [[ "$_ev_reason" == "same-vendor-reviewer" ]]; then
+      _floor_parts+=("same-vendor review")
+    elif [[ "$_ev_reason" == "stale-head-only" || "$_ev_reason" == "stale-base" || "$_ev_reason" == "no-receipt-at-head" || "$_ev_reason" == "evidence-deleted" ]]; then
+      _floor_parts+=("E3 not bound to this head ($_ev_reason)")
+    elif [[ "$_ev_reason" == "api-error" || "$_ev_reason" == "config-error" ]]; then
+      _floor_parts+=("evidence unreadable")
+    else
+      _floor_parts+=("E3 not bound to this head ($_ev_reason)")
+    fi
+  fi
+  if [[ "$PENDING" -gt 0 || "$FAILED_N" -gt 0 ]]; then
+    _floor_parts+=("required checks not green")
+  fi
+  if [[ ${#_floor_parts[@]} -gt 0 ]]; then
+    _floor_msg=""
+    for _p in "${_floor_parts[@]}"; do
+      if [[ -z "$_floor_msg" ]]; then
+        _floor_msg="$_p"
+      else
+        _floor_msg="$_floor_msg; $_p"
+      fi
+    done
+    BLOCKERS+=("Tier C floor (G12, D-015) not met: $_floor_msg")
+  fi
+  if [[ ${#ADMIN_REASONS[@]} -gt 0 ]]; then
+    BLOCKERS+=("Tier C has no admin path (D-015) — force/admin merge remains forbidden")
     ADMIN_REASONS=()
   fi
+elif [[ ${#ADMIN_REASONS[@]} -gt 0 && "$LAUNCHED" -eq 1 ]]; then
+  BLOCKERS+=("post-launch posture (--launched): no admin merge on any red — escalate to the owner")
+  ADMIN_REASONS=()
 fi
 
 # --- verdict --------------------------------------------------------------

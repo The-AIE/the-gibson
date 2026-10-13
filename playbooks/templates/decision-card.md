@@ -10,7 +10,7 @@ nav_exclude: true
 
 ```
 WHAT:        {{one_sentence_decision_in_plain_language}}
-WHY YOU:     {{why_this_is_an_owner_decision}} ({{gate_id e.g. G6/G7/G12}})
+WHY YOU:     {{why_this_is_an_owner_decision}} ({{gate_id e.g. G6/G7}})
 RISK:        {{low|medium|high}}. {{what_could_go_wrong}} Undo: {{how_to_undo}}.
 RECOMMEND:   {{Approve|Decline|Wait}}. {{one_sentence_why_fleet_recommends_this}}
 IF YOU WAIT: {{what_happens_if_silent — always safe; other work continues}}
@@ -22,9 +22,11 @@ REPLY:       "yes" / "no" / any question you have.
 Pending owner decisions may be recorded offline with
 `scripts/decision-ledger.sh` (schema `decision-ledger:v1`). Each event gets a
 **stable full-strength id** from the identity tuple (repo, gate G1–G16, source
-type, source id, exact 40-hex source SHA). The local ledger and id are **offline
-artifacts for draft/queue/render only** — they are not a delivery channel, not
-merge authorization, and not answer ingestion.
+type, source id, exact 40-hex source SHA). G12 is a historical gate id (D-015
+retired it as an owner/human card); existing G12 rows still parse, but do not
+create new ones. The local ledger and id are **offline artifacts for
+draft/queue/render only** — they are not a delivery channel, not merge
+authorization, and not answer ingestion.
 
 - **One decision per card.** Never batch multiple approvals on one card.
 - **PENDING only.** The ledger never records approval, denial, choice selection,
@@ -36,7 +38,7 @@ merge authorization, and not answer ingestion.
 
 ```bash
 # Record a PENDING decision locally (runtime ledger under gibson/ by default):
-scripts/decision-ledger.sh add --repo owner/name --gate G12 \
+scripts/decision-ledger.sh add --repo owner/name --gate G6 \
   --source-type pr --source-id 123 --source-sha <40-hex> \
   --what "..." --why-you "..." --risk-level medium \
   --risk-consequence "..." --risk-undo "..." \
@@ -61,13 +63,9 @@ IF YOU WAIT: Nothing breaks. Other work continues. I'll re-ask in 3 days.
 REPLY:       "yes" / "no" / any question you have.
 ```
 
-### Example (Tier C merge)
+### Example (historical G12 — do not create)
 
-```
-WHAT:        Ready to accept a change that touches how people sign in.
-WHY YOU:     Login and security changes always need your go-ahead. (G12)
-RISK:        Medium. A bug could lock people out until we roll back (~1 minute).
-RECOMMEND:   Approve. Tests and two reviewers signed off; preview looks correct.
-IF YOU WAIT: The change stays off the live site. Other tasks keep moving.
-REPLY:       "yes" / "no" / any question you have.
-```
+G12 is a historical gate id. D-015 retired it as an owner/human merge card:
+Tier C's floor is E3 at the exact head plus required checks, with no owner
+action. Existing G12 ledger rows still parse. A request to create a new G12
+card is an error naming D-015.

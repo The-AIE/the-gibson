@@ -30,7 +30,7 @@ WHAT IT DOES NOT DO
   GitHub/Hermes/email/iMessage/webhooks. Those remain owner-gated under #72.
 
 USAGE
-  decision-ledger.sh add --repo owner/name --gate G12 \
+  decision-ledger.sh add --repo owner/name --gate G6 \
     --source-type pr --source-id 123 --source-sha <40-hex> \
     --what "..." --why-you "..." --risk-level low|medium|high \
     --risk-consequence "..." --risk-undo "..." \
@@ -62,7 +62,9 @@ CARD FIELDS (one decision per event; all required on add)
 
 IDENTITY (immutable; form the stable id)
   --repo              repository slug owner/name
-  --gate              exact gate G1..G16 (docs/14)
+  --gate              exact gate G1..G16 (docs/14). G12 is historical (D-015):
+                      existing records still parse; creating a new G12 card is
+                      refused.
   --source-type       pr | issue | loop-state | journal | manual
   --source-id         source identity (PR number, issue number, path key, …)
   --source-sha        exact 40-hex commit/source SHA
@@ -1123,6 +1125,11 @@ validate_add_fields() {
   validate_scalar "gate" "$GATE"
   if ! printf '%s' "$GATE" | grep -E "$GATE_RE" >/dev/null; then
     die_valid "gate must be exact G1..G16 (uppercase G, no G0/G17)"
+  fi
+  # D-015: G12 remains a historical gate id so existing ledger rows still
+  # parse. New owner-decision cards must not be created for it.
+  if [[ "$GATE" == "G12" ]]; then
+    die_valid "refusing to create a G12 decision card: D-015 retired G12 as an owner/human gate (Tier C floor is E3 at the exact head plus required checks). Existing G12 records still parse."
   fi
 
   validate_scalar "source-type" "$SOURCE_TYPE"
