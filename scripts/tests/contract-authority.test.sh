@@ -1969,6 +1969,185 @@ else
 fi
 cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
 
+echo "# HTML tables and code-block examples are not a second risk-tier authority"
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+const html=[
+  "<table><tr><th>Tier</th><th>Definition</th><th>Treatment</th></tr>",
+  "<tr><td>C</td><td>Money, auth, consent/PII.</td><td>Optional review; G12 when convenient</td></tr>",
+  "</table>",
+].join("\n");
+fs.writeFileSync(p, t+"\n\n"+html+"\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_AUTHORITY_HTML_TABLE' >/dev/null; then
+  ok "mutation: canonical tier table plus weakened HTML tier table fails with E_AUTHORITY_HTML_TABLE"
+else
+  bad "mutation weakened HTML tier table (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "weakened HTML tier table" "E_AUTHORITY_HTML_TABLE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+fs.writeFileSync(p, t+"\n<table><tr><td>notes</td><td>only</td></tr></table>\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_AUTHORITY_HTML_TABLE' >/dev/null; then
+  ok "mutation: HTML table with non-tier content fails with E_AUTHORITY_HTML_TABLE"
+else
+  bad "mutation HTML table any content (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "HTML table any content" "E_AUTHORITY_HTML_TABLE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+fs.writeFileSync(p, t+"\n<TABLE class=\"risk\"><TR><TH colspan=\"3\">Z</TH></TR></TABLE>\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_AUTHORITY_HTML_TABLE' >/dev/null; then
+  ok "mutation: uppercase HTML table with attributes fails with E_AUTHORITY_HTML_TABLE"
+else
+  bad "mutation uppercase HTML table (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "uppercase HTML table" "E_AUTHORITY_HTML_TABLE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+fs.writeFileSync(p, t+"\n< table >\n< td rowspan=\"1\">x</td>\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_AUTHORITY_HTML_TABLE' >/dev/null; then
+  ok "mutation: whitespace HTML table tags fail with E_AUTHORITY_HTML_TABLE"
+else
+  bad "mutation whitespace HTML table (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "whitespace HTML table" "E_AUTHORITY_HTML_TABLE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.endsWith("\n")) t += "\n";
+const block=[
+  "```markdown example",
+  "| Tier | Definition | Treatment |",
+  "|---|---|---|",
+  "| **A** | x | y |",
+  "```",
+  "",
+].join("\n");
+const next=t+block;
+if (Buffer.byteLength(next) > 18944) throw new Error("fenced fixture exceeds headroom");
+fs.writeFileSync(p, next);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation: matching tier table inside a backtick fence is not a second table"
+else
+  bad "mutation backtick-fenced tier table (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.endsWith("\n")) t += "\n";
+const block=[
+  "~~~markdown example",
+  "| Tier | Definition | Treatment |",
+  "|---|---|---|",
+  "| **A** | x | y |",
+  "~~~",
+  "",
+].join("\n");
+const next=t+block;
+if (Buffer.byteLength(next) > 18944) throw new Error("tilde fixture exceeds headroom");
+fs.writeFileSync(p, next);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation: matching tier table inside a tilde fence is not a second table"
+else
+  bad "mutation tilde-fenced tier table (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.endsWith("\n")) t += "\n";
+const block=[
+  "",
+  "    | Tier | Definition | Treatment |",
+  "    |---|---|---|",
+  "    | **A** | x | y |",
+  "",
+].join("\n");
+const next=t+block;
+if (Buffer.byteLength(next) > 18944) throw new Error("indented fixture exceeds headroom");
+fs.writeFileSync(p, next);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation: matching tier table inside a four-space code block is not a second table"
+else
+  bad "mutation indented tier table (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8").replace(/\n+$/, "\n");
+const block=[
+  "    | Tier | Definition | Treatment |",
+  "    |---|---|---|",
+  "    | **A** | x | y |",
+  "",
+].join("\n");
+const next=t+block;
+if (Buffer.byteLength(next) > 18944) throw new Error("interrupt fixture exceeds headroom");
+fs.writeFileSync(p, next);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_TABLE_DUPLICATE' >/dev/null; then
+  ok "mutation: indented tier table that interrupts a paragraph still counts"
+else
+  bad "mutation paragraph-interrupt tier table (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.endsWith("\n")) t += "\n";
+const next=t+"```html\n<table><tr><td>x</td></tr></table>\n```\n";
+if (Buffer.byteLength(next) > 18944) throw new Error("fenced HTML fixture exceeds headroom");
+fs.writeFileSync(p, next);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation: HTML table inside a backtick fence stays green"
+else
+  bad "mutation fenced HTML table (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
 node -e '
 const fs=require("fs");
 const p=process.argv[1];
@@ -2542,7 +2721,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-const { diffTierTreatments, parseRiskTiers, extractMarkdownTable, countMarkdownTables } = await import(pathToFileURL(process.env.SEM).href);
+const { diffTierTreatments, parseRiskTiers, extractMarkdownTable, countMarkdownTables, structuredAgentsEnumerationFindings } = await import(pathToFileURL(process.env.SEM).href);
 const { CANONICAL_TIER_C_TREATMENT } = await import(pathToFileURL(process.env.CANON).href);
 const canonical = CANONICAL_TIER_C_TREATMENT;
 const red = ["E_TIER_WEAKENING"];
@@ -2671,6 +2850,62 @@ if (firstOnly.length !== 3) {
 } else {
   console.log("TIER_OK extract-first-count-both");
 }
+const tierHeads = ["Tier", "Definition", "Treatment"];
+const miniTable = "| Tier | Definition | Treatment |\n|---|---|---|\n| **A** | x | y |\n";
+function assertCount(name, text, n) {
+  const got = countMarkdownTables(text, tierHeads);
+  if (got !== n) failed.push(name + " count " + got + " want " + n);
+  else console.log("TIER_OK " + name);
+}
+const indentedMini = miniTable.split("\n").filter(Boolean).map((l) => "    " + l).join("\n") + "\n";
+const tabMini = miniTable.split("\n").filter(Boolean).map((l) => "\t" + l).join("\n") + "\n";
+const base = agentsSrc.endsWith("\n") ? agentsSrc : agentsSrc + "\n";
+assertCount("fenced-backtick-info", base + "```markdown example\n" + miniTable + "```\n", 1);
+assertCount("fenced-tilde-info", base + "~~~markdown example\n" + miniTable + "~~~\n", 1);
+assertCount("indented-four-space-code", base + "\n" + indentedMini, 1);
+assertCount("tab-indented-code", base + "\n" + tabMini, 1);
+assertCount("unclosed-fence-counts", base + "```\n" + miniTable, 2);
+assertCount("paragraph-interrupt-counts", base + indentedMini, 2);
+assertCount("loose-list-continuation-counts", base + "- item\n\n" + indentedMini, 2);
+const fencedWeak = "```md\n| Tier | Definition | Treatment |\n|---|---|---|\n| **C** | Money | " + weakened + " |\n```\n\n";
+const prepended = fencedWeak + agentsSrc;
+const prependCodes = diffTierTreatments(parseRiskTiers(prepended)).map((f) => f.code);
+if (prependCodes.length !== 0 || countMarkdownTables(prepended, tierHeads) !== 1) {
+  failed.push("prepended fenced weakened table was authoritative " + JSON.stringify(prependCodes));
+} else {
+  console.log("TIER_OK prepended-fenced-weakened-ignored");
+}
+function assertHtml(name, extra, n) {
+  const got = structuredAgentsEnumerationFindings(base + extra)
+    .filter((f) => f.code === "E_AUTHORITY_HTML_TABLE").length;
+  if (got !== n) failed.push(name + " html findings " + got + " want " + n);
+  else console.log("TIER_OK " + name);
+}
+assertHtml("live-no-html-table", "", 0);
+assertHtml("html-any-content", "<table><tr><td>notes</td><td>only</td></tr></table>\n", 1);
+assertHtml("html-upper-attrs", "<TABLE class=\"risk\"><TR><TH colspan=\"3\">Z</TH></TR></TABLE>\n", 1);
+assertHtml("html-whitespace", "< table >\n< td rowspan=\"1\">x</td>\n", 1);
+assertHtml("html-weakened-tier", "<table><tr><th>Tier</th><th>Definition</th><th>Treatment</th></tr><tr><td>C</td><td>Money</td><td>Optional review</td></tr></table>\n", 1);
+assertHtml("html-inside-backtick-fence", "```html\n<table><tr><td>x</td></tr></table>\n```\n", 0);
+assertHtml("html-inside-tilde-fence", "~~~html\n<table><tr><th>Tier</th></tr></table>\n~~~\n", 0);
+assertHtml("html-inside-indented-code", "\n    <table><tr><td>x</td></tr></table>\n", 0);
+assertHtml("html-comment-still-visible", "<!-- <table><tr><td>x</td></tr></table> -->\n", 1);
+assertHtml("not-a-table-tag", "<thread>nope</thread>\n<thead>nope</thead>\n<tdiv>nope</tdiv>\n", 0);
+const dirHtml = mkdtempSync(join(tmpdir(), "tier-html-"));
+const htmlCopy = join(dirHtml, "AGENTS.md");
+writeFileSync(htmlCopy, base + "<table><tr><td>notes</td></tr></table>\n");
+const htmlCopyHit = structuredAgentsEnumerationFindings(readFileSync(htmlCopy, "utf8"))
+  .some((f) => f.code === "E_AUTHORITY_HTML_TABLE");
+rmSync(dirHtml, { recursive: true, force: true });
+if (!htmlCopyHit) failed.push("temp-copy HTML table was not flagged");
+else console.log("TIER_OK temp-copy-html-any-content");
+const dirFence = mkdtempSync(join(tmpdir(), "tier-fence-"));
+const fenceCopy = join(dirFence, "AGENTS.md");
+writeFileSync(fenceCopy, base + "```md\n" + miniTable + "```\n");
+const fenceCount = countMarkdownTables(readFileSync(fenceCopy, "utf8"), tierHeads);
+rmSync(dirFence, { recursive: true, force: true });
+if (fenceCount !== 1) failed.push("temp-copy fenced table count " + fenceCount);
+else console.log("TIER_OK temp-copy-fenced-table-not-counted");
 const semSrc = readFileSync(process.env.SEM, "utf8");
 const pin = "treat !== CANONICAL_TIER_C_TREATMENT";
 if (!semSrc.includes(pin)) {
