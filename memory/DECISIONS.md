@@ -336,3 +336,79 @@ Revisit when: a Tier C change merged on E3 + checks causes an incident the owner
 signature would plausibly have stopped; or Grok is the only E3 reviewer path for
 Tier C for more than a week; or the amendment sequence above exposes a sensor
 that cannot be reconciled without weakening it.
+
+## D-016 · 2026-10-10 · The ratchet adapts: loosening runs through a measured de-escalation review, not an owner signature
+Decided (Mark, 2026-10-10: "I think mabye it should be adaptable", then, to the
+drafter's three proposals, "2. is good 3. Yes 1. go with your suggestion"): the AGENTS.md "Self-modification
+bounds" clause ("The ratchet may tighten autonomously; it may only loosen with the
+owner's sign-off") is to be replaced by the rule below. AGENTS.md stays the
+authority until an amendment to it merges; this record states the decision that
+amendment will implement, and it settles the question D-015 left open about how
+D-014 and that clause fit together.
+The rule:
+1. Tightening a control stays autonomous and immediate.
+2. Human gates and Tier definitions may be loosened without an owner signature by a
+   de-escalation pull request that carries all of: (a) the control and the
+   assumption it encoded; (b) measured evidence over the window below, never
+   opinion; (c) E3 cross-vendor review of the exact head plus the required checks;
+   (d) a rollback and a tripwire (below); (e) a cooling-off period before it takes
+   effect, during which the owner is notified through the fleet's owner alert
+   (`neuro-owner-alert.py` on the Mini) and may veto; the owner is never required to
+   act, and silence means the change proceeds.
+3. Hard-fail security layers may tighten freely and loosen only with the owner's
+   sign-off, as the clause says today.
+4. A floor adaptation cannot lower: the FLEET.md hard blocks on actions (secrets
+   and keys, billing and pricing, customer-facing legal pages, destructive
+   operations, commits and pushes nobody asked for); delivery control's explicit
+   human apply; E3 as the minimum for Tier C, failing closed when no E3 reviewer is
+   available (D-015); and this rule itself: a change to D-016's own mechanism needs
+   the owner's sign-off.
+Evidence window, by what is being loosened (exposure = a merged PR the control
+applied to; the window ends at the later of the two bounds):
+- Tier A/B controls: 14 days and 30 exposures.
+- Tier C controls (the AGENTS.md classes: money, auth, consent/PII, security
+  boundaries, schema, incident alerting, production data): 60 days and 30
+  exposures counted across the three repositories together.
+- Cooling-off before taking effect: 2 days for Tier A/B, 7 days for Tier C. These
+  two durations are the drafter's proposal, not previously asked of Mark.
+Why 30 exposures and a pooled count: with zero catches in N exposures the 95% upper
+bound on the catch rate is about 3/N, so 10 exposures cannot rule out a 30% catch
+rate and 30 can rule out more than about 10%. Tier C exposures are rare. Counted
+by merged PRs labelled `tier-c` on 2026-10-10: the-gibson 1 in 30 days and 6 in 90;
+chatterbuilt 8 and 14; conference-os 0 and 0 (whether it labels Tier C PRs at all
+was not checked); about 9 in 30 days and 20 in 90 pooled. A count by days alone
+would be noise at Tier C and a count by PRs alone would take months, so the rule
+uses both.
+Definitions: a catch is a blocking review finding that was fixed before merge, or a
+sensor failure that led to a code change; an incident is a post-merge defect in the
+control's area that caused a revert or hotfix. Tripwire: for 60 days after a
+loosening takes effect, an unreverted incident in that area restores the control
+by a tightening pull request, which needs no sign-off because tightening is
+autonomous.
+Not built, so nothing loosens yet: the report that computes exposures, catches and
+incidents per control (the finding format from #401 and the review-precision report
+in #404 are a basis for it, but #404 reports finding precision from reactions,
+resolutions and later file changes and does not compute this); the tripwire check;
+and the owner-alert wiring for a pending loosening. Until all three exist, no
+loosening may be proposed under this rule, and the existing clause (owner sign-off)
+stands in operation. This keeps the decision from becoming a way to loosen without
+evidence.
+Places that state the current clause and need amending with it (found by search on
+2026-10-10, each to move in the same pull request as any sensor that locks its
+wording, per the batching in #475): AGENTS.md "Self-modification bounds" (lines
+206-209); docs/09 (lines 143-145); docs/14 (line 20); docs/18 (line 83, to check
+whether it applies); playbooks/historian.md (lines 98-99); GUIDE.md (line 86); the
+fixture config/policy/fixtures/authority-contradictions/docs-14-closed-list.md
+(line 19); and the canonical wording locked in config/policy/mandatory-read-chain.v1.json
+(lines 130 and 248) and scripts/lib/authority-config-canonical.mjs.
+Rejected: keeping the owner signature for every loosening (it stalls, which is the
+failure D-013 and D-014 removed, and docs/01-principles.md principle 1 already says
+"the ratchet removes controls too, when they've become friction"); loosening with
+no evidence window (nothing would stop friction-driven erosion); a window counted
+in days only or PRs only (Tier C volume makes either wrong, see the counts above).
+Accepted risk: the evidence depends on structured findings and on `tier-*` label
+discipline, neither of which is verified across all three repositories, and the
+reporting tool does not exist; the readiness condition above is what contains that.
+Revisit when: the first loosening under this rule, or any incident in a loosened
+area; or if the three missing mechanisms are not built within 90 days, in which
+case this record should be reconsidered because it would then change nothing.
