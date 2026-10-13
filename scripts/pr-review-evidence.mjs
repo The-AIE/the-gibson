@@ -230,7 +230,16 @@ export function validateConfig(cfg) {
   return cfg;
 }
 
-function parseBlock(body, marker, fields) {
+// Field lists the evaluator actually reads. delivery-receipt re-serializes a
+// marker from these keys only, so a comment cannot smuggle other text into a
+// bundle by hiding it inside the HTML block.
+export const MARKER_FIELDS = {
+  "review-evidence:v1": ["head-sha", "result"],
+  "owner-review-attestation:v1": ["head-sha", "author-vendor"],
+  "owner-attested-review:v1": ["head-sha", "reviewer-vendor", "result"],
+};
+
+export function parseBlock(body, marker, fields) {
   if (typeof body !== "string") return null;
   const esc = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const lines = fields.map((f) => `${f}:\\s*([^\\r\\n]+?)\\s*\\r?\\n`).join("");
@@ -347,7 +356,7 @@ export function ownerAttestation(comments, ownerLogin, headSha, allowed) {
   // (Codex round 6, finding 1): it must not fall through to an older one.
   const hits = comments
     .filter((c) => norm(c?.user?.login) === norm(ownerLogin) && ["OWNER", "MEMBER"].includes(c?.author_association))
-    .map((c) => ({ c, b: parseBlock(c?.body, "owner-review-attestation:v1", ["head-sha", "author-vendor"]) }))
+    .map((c) => ({ c, b: parseBlock(c?.body, "owner-review-attestation:v1", MARKER_FIELDS["owner-review-attestation:v1"]) }))
     .filter((x) => editedByOther(x.c) || (x.b && x.b["head-sha"] === headSha))
     // Order by CREATION: an edit moves updated_at and must not promote an
     // older attestation over a newer one (Codex round 5, finding 5). Same
@@ -427,7 +436,7 @@ export function ownerAttestedReview(c, ownerLogin, headSha, allowedVendors, bloc
   if (editedByOther(c)) {
     return { identity: { login: OWNER_EXTERNAL_REVIEW_LOGIN, vendor: "unknown", roles: ["reviewer"] }, result: "none", at, id: Number(c?.id ?? 0), source: "comment" };
   }
-  const b = parseBlock(c?.body, "owner-attested-review:v1", ["head-sha", "reviewer-vendor", "result"]);
+  const b = parseBlock(c?.body, "owner-attested-review:v1", MARKER_FIELDS["owner-attested-review:v1"]);
   if (!b) return null;
   const vendor = b["reviewer-vendor"];
   if (!vendor || !allowedVendors.includes(vendor) || vendor === "unknown" || vendor === "owner") return null;
@@ -464,7 +473,7 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
     if (id && id.appSlug) {
       const app = c?.performed_via_github_app;
       if (app && norm(app.slug) === norm(id.appSlug) && (id.appId === null || Number(app.id) === id.appId)) {
-        const b = parseBlock(c?.body, "review-evidence:v1", ["head-sha", "result"]);
+        const b = parseBlock(c?.body, "review-evidence:v1", MARKER_FIELDS["review-evidence:v1"]);
         // Provenance is the CREATION; an edit moves updated_at, so order by created_at.
         const at = Date.parse(c?.created_at ?? "") || timestamp(c);
         // An edited machine receipt is a TOMBSTONE, not an absence (Codex round 6,
