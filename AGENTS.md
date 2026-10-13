@@ -106,7 +106,7 @@ units and leave the harness better.
    `scripts/contract-met.mjs` is the close-keyword sensor.
 7. **Tier C is sacred.** Anything touching money, auth, consent/PII, security
    boundaries, schema, incident alerting, or production data gets adversarial
-   review and a human merge gate (**G12**).
+   review and the **G12** floor (D-015).
 8. **Report truthfully, loudly, and in the right place.** Status goes to the
    queue (Mission Control) and the PR — failures verbatim, skipped steps named.
    A silent agent is a failed agent. Never mark done what you didn't verify.
@@ -171,7 +171,7 @@ set. Roles still apply.
 | reviewer | `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES` on the exact head; **six lenses** with **file:line** findings | merging; reviewing own generation; rubber-stamp LGTM |
 | ux-evaluator | graded eval of the **live preview** | grading from the diff or the builder's description |
 | security | **eight-layer** results; adversarial pass on Tier C | softening a hard-fail layer to report-only; **destructive production testing** (DAST vs preview/staging only) |
-| release | merge, verify deploy, smoke, cleanup; **delivery-control** audit → dry-run → human-apply when asked | merging Tier C/schema without G12; more than one schema merge in flight; force-push main; rotating secrets (G4); silent `--apply` without dry-run |
+| release | merge, verify deploy, smoke, cleanup; **delivery-control** audit → dry-run → human-apply when asked | merging Tier C/schema before the G12 floor is met; more than one schema merge in flight; force-push main; rotating secrets (G4); silent `--apply` without dry-run |
 | historian | append lessons/decisions; harness PRs | rewriting others' lessons; skipping a twice-failure |
 
 Handoffs are **files and GitHub objects, never chat memory**.
@@ -264,7 +264,7 @@ mirror them):
 
 - **G10** — Plan is ambiguous or contradictory on a decision that changes what gets built.
 - **G11** — Work grew beyond claimed scope (>2× estimate or undeclared Tier C surface).
-- **G12** — Tier C merge approval (money/auth/consent/PII/security/schema).
+- **G12** — Tier C review floor (D-015): E3 at the exact head + required checks.
 - **G13** — Two agents want conflicting approaches and coordination failed.
 
 ### Access & security
@@ -294,13 +294,13 @@ enough (the gates decide, not the feeling).
 |---|---|---|
 | **A** | Routine: UI copy, isolated components, docs, tests. | Solo independent review; standard gates |
 | **B** | Elevated: shared modules, API routes, data reads, >150 lines or >6 files. | Full-lens review; UX eval if visible |
-| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Fan-out + adversarial review + **G12** human merge gate; serialize when stateful. Min. E3 + owner merge (D-011). |
+| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. |
 
 Tier is assigned at decomposition and re-checked at review. Diffs may drift
 **into** Tier C; they never drift out without a reviewer saying so.
 
 Round caps: `config/review-round-caps.json`. Independence levels (E0-E4):
-`docs/06-quality-gates.md` (#161). Min.: C=E3+owner (D-011), A/B=E2 (D-012).
+`docs/06-quality-gates.md` (#161). Min.: C=E3+checks (D-015), A/B=E2 (D-012).
 
 ## Commit, PR, and merge
 
@@ -326,7 +326,7 @@ stale review on a new head.
 2. CI green (gate + tests + security hard-fail layers).
 3. Review verdict `VERDICT: APPROVE`; UX eval pass when user-visible.
 4. DCO/`Signed-off-by` survives the squash.
-5. Tier C / schema → **G12** human approval recorded.
+5. Tier C / schema → **G12** floor met (D-015).
 6. Schema PRs: serialized (one in flight), migration file present.
 
 Purely technical, non-opinion changes need no extra owner click: a passing green

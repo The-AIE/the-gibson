@@ -10,6 +10,14 @@ import {
   listEq,
 } from "./contract-semantics.mjs";
 
+/**
+ * Tier C risk-tier treatment. The only pass condition for that row
+ * (scripts/lib/contract-semantics.mjs diffTierTreatments). Any other
+ * bytes are E_TIER_WEAKENING. Keyword scans are hints, not this pin.
+ */
+export const CANONICAL_TIER_C_TREATMENT =
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful.";
+
 export const CANONICAL_SCHEMA_ID = "gibson.mandatory-read-chain.v1";
 export const CANONICAL_SCHEMA_VERSION = "1.2.0";
 export const CANONICAL_AUTHORITY =
@@ -459,7 +467,7 @@ export const CANONICAL_BINDING_FAMILIES = [
       "| **A** | Routine:",
       "| **B** | Elevated:",
       "| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data.",
-      "**G12**",
+      "**G12** floor (E3 at the exact head + required checks, D-015)",
       "serialize when stateful",
       "Diffs may drift **into** Tier C; they never drift out without a reviewer saying so",
     ],
@@ -473,7 +481,7 @@ export const CANONICAL_BINDING_FAMILIES = [
       "Signed-off-by",
       "exact committed head SHA",
       "`release` verifies, in order",
-      "Tier C / schema → **G12** human approval recorded",
+      "Tier C / schema → **G12** floor met (D-015).",
     ],
   },
   {
@@ -544,7 +552,13 @@ export const CANONICAL_READ_CHAIN = {
   allowedMandatoryFiles: CANONICAL_MANDATORY_FILES,
   fixedMandatoryFiles: CANONICAL_MANDATORY_FILES,
   conditionalDispatchPrompts: {
-    roles: [...EXPECTED_ROLES],
+    // Getter, not an eager copy. contract-semantics.mjs imports
+    // CANONICAL_TIER_C_TREATMENT from this module, and this module imports
+    // EXPECTED_ROLES from there. Reading EXPECTED_ROLES while this object
+    // is built hits the cycle before that binding exists.
+    get roles() {
+      return [...EXPECTED_ROLES];
+    },
     pathTemplate: CANONICAL_ROLE_PATH,
     localOverrideTemplate: CANONICAL_LOCAL_OVERRIDE,
     jobPrompts: CANONICAL_JOB_PROMPTS,

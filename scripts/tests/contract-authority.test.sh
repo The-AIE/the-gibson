@@ -1891,7 +1891,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
   "Optional review; G12 when convenient"
 );
 fs.writeFileSync(p,t);
@@ -1903,6 +1903,268 @@ else
   bad "mutation tier C treatment (rc=$rc): $out"
 fi
 prove_legacy_green_structured_red "tier C treatment" "E_TIER_WEAKENING" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+echo "# second risk-tier table cannot hide behind the first"
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+const start=t.indexOf("| Tier | Definition | Treatment |");
+const marker="serialize when stateful.";
+const end=t.indexOf(marker, start);
+if (start<0 || end<0) throw new Error("canonical tier table not found");
+const lineEnd=t.indexOf("\n", end);
+const block=t.slice(start, lineEnd===-1 ? t.length : lineEnd);
+fs.writeFileSync(p, t+"\n\n## Second risk-tier table\n\n"+block+"\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_TABLE_DUPLICATE' >/dev/null; then
+  ok "mutation: second identical Tier | Definition | Treatment table fails with E_TIER_TABLE_DUPLICATE"
+else
+  bad "mutation second identical tier table (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "second identical tier table" "E_TIER_TABLE_DUPLICATE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+const second=[
+  "|  TIER  |  DEFINITION  |  TREATMENT  |",
+  "|---|---|---|",
+  "| **A** | Routine: UI copy, isolated components, docs, tests. | Solo independent review; standard gates |",
+  "| **B** | Elevated: shared modules, API routes, data reads, >150 lines or >6 files. | Full-lens review; UX eval if visible |",
+  "| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Optional review; G12 when convenient |",
+].join("\n");
+fs.writeFileSync(p, t+"\n\n## Decoy risk tiers\n\n"+second+"\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_TABLE_DUPLICATE' >/dev/null; then
+  ok "mutation: second weakened Tier C table fails with E_TIER_TABLE_DUPLICATE"
+else
+  bad "mutation second weakened tier table (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "second weakened tier table" "E_TIER_TABLE_DUPLICATE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const lines=fs.readFileSync(p,"utf8").split("\n");
+const start=lines.findIndex((l)=>l==="| Tier | Definition | Treatment |");
+if (start<0) throw new Error("tier header missing");
+const kept=lines.filter((_,i)=>i<start || i>start+4);
+if (kept.some((l)=>l.includes("| Tier |") || l.includes("| **C** |"))) {
+  throw new Error("tier table was not removed");
+}
+fs.writeFileSync(p, kept.join("\n"));
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_OMISSION' >/dev/null && ! echo "$out" | grep 'E_TIER_TABLE_DUPLICATE' >/dev/null; then
+  ok "mutation: zero risk-tier tables still fail with E_TIER_OMISSION"
+else
+  bad "mutation zero tier tables (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+echo "# HTML tables and code-block examples are not a second risk-tier authority"
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+const html=[
+  "<table><tr><th>Tier</th><th>Definition</th><th>Treatment</th></tr>",
+  "<tr><td>C</td><td>Money, auth, consent/PII.</td><td>Optional review; G12 when convenient</td></tr>",
+  "</table>",
+].join("\n");
+fs.writeFileSync(p, t+"\n\n"+html+"\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_AUTHORITY_HTML_TABLE' >/dev/null; then
+  ok "mutation: canonical tier table plus weakened HTML tier table fails with E_AUTHORITY_HTML_TABLE"
+else
+  bad "mutation weakened HTML tier table (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "weakened HTML tier table" "E_AUTHORITY_HTML_TABLE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+fs.writeFileSync(p, t+"\n<table><tr><td>notes</td><td>only</td></tr></table>\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_AUTHORITY_HTML_TABLE' >/dev/null; then
+  ok "mutation: HTML table with non-tier content fails with E_AUTHORITY_HTML_TABLE"
+else
+  bad "mutation HTML table any content (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "HTML table any content" "E_AUTHORITY_HTML_TABLE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+fs.writeFileSync(p, t+"\n<TABLE class=\"risk\"><TR><TH colspan=\"3\">Z</TH></TR></TABLE>\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_AUTHORITY_HTML_TABLE' >/dev/null; then
+  ok "mutation: uppercase HTML table with attributes fails with E_AUTHORITY_HTML_TABLE"
+else
+  bad "mutation uppercase HTML table (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "uppercase HTML table" "E_AUTHORITY_HTML_TABLE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const t=fs.readFileSync(p,"utf8");
+fs.writeFileSync(p, t+"\n< table >\n< td rowspan=\"1\">x</td>\n");
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_AUTHORITY_HTML_TABLE' >/dev/null; then
+  ok "mutation: whitespace HTML table tags fail with E_AUTHORITY_HTML_TABLE"
+else
+  bad "mutation whitespace HTML table (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "whitespace HTML table" "E_AUTHORITY_HTML_TABLE" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.endsWith("\n")) t += "\n";
+const block=[
+  "```markdown example",
+  "| Tier | Definition | Treatment |",
+  "|---|---|---|",
+  "| **A** | x | y |",
+  "```",
+  "",
+].join("\n");
+const next=t+block;
+if (Buffer.byteLength(next) > 18944) throw new Error("fenced fixture exceeds headroom");
+fs.writeFileSync(p, next);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation: matching tier table inside a backtick fence is not a second table"
+else
+  bad "mutation backtick-fenced tier table (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.endsWith("\n")) t += "\n";
+const block=[
+  "~~~markdown example",
+  "| Tier | Definition | Treatment |",
+  "|---|---|---|",
+  "| **A** | x | y |",
+  "~~~",
+  "",
+].join("\n");
+const next=t+block;
+if (Buffer.byteLength(next) > 18944) throw new Error("tilde fixture exceeds headroom");
+fs.writeFileSync(p, next);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation: matching tier table inside a tilde fence is not a second table"
+else
+  bad "mutation tilde-fenced tier table (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.endsWith("\n")) t += "\n";
+const block=[
+  "",
+  "    | Tier | Definition | Treatment |",
+  "    |---|---|---|",
+  "    | **A** | x | y |",
+  "",
+].join("\n");
+const next=t+block;
+if (Buffer.byteLength(next) > 18944) throw new Error("indented fixture exceeds headroom");
+fs.writeFileSync(p, next);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation: matching tier table inside a four-space code block is not a second table"
+else
+  bad "mutation indented tier table (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8").replace(/\n+$/, "\n");
+const block=[
+  "    | Tier | Definition | Treatment |",
+  "    |---|---|---|",
+  "    | **A** | x | y |",
+  "",
+].join("\n");
+const next=t+block;
+if (Buffer.byteLength(next) > 18944) throw new Error("interrupt fixture exceeds headroom");
+fs.writeFileSync(p, next);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_TABLE_DUPLICATE' >/dev/null; then
+  ok "mutation: indented tier table that interrupts a paragraph still counts"
+else
+  bad "mutation paragraph-interrupt tier table (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.endsWith("\n")) t += "\n";
+const next=t+"```html\n<table><tr><td>x</td></tr></table>\n```\n";
+if (Buffer.byteLength(next) > 18944) throw new Error("fenced HTML fixture exceeds headroom");
+fs.writeFileSync(p, next);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation: HTML table inside a backtick fence stays green"
+else
+  bad "mutation fenced HTML table (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+const needle="| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. |";
+const extra="| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Optional review; G12 when convenient |";
+if (!t.includes(needle)) throw new Error("canonical C row missing");
+t=t.replace(needle, needle+"\n"+extra);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_DUPLICATE' >/dev/null && echo "$out" | grep 'E_TIER_WEAKENING' >/dev/null; then
+  ok "mutation: canonical C then weakened C in one table fails with E_TIER_DUPLICATE"
+else
+  bad "mutation duplicate C row (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "duplicate tier id in one table" "E_TIER_DUPLICATE" "tiers"
 cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
 
 # Benign control: "not just the smell" must not trip polarity.
@@ -2453,23 +2715,53 @@ fi
 echo "# Tier C treatment polarity table"
 TIER_TABLE=$(
   SEM="$REPO_ROOT/scripts/lib/contract-semantics.mjs" \
+  CANON="$REPO_ROOT/scripts/lib/authority-config-canonical.mjs" \
   node --input-type=module -e '
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-const { diffTierTreatments } = await import(pathToFileURL(process.env.SEM).href);
-const canonical = "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful";
-const rows = [
-  { name: "canonical-treatment", treatment: canonical, expect: [] },
-  { name: "human-merge-is-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is not required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-not-operationally-required", treatment: "Fan-out + adversarial review + **G12** human merge is not operationally required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-not-technically-required", treatment: "Fan-out + adversarial review + **G12** human merge is not technically required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-not-always-required", treatment: "Fan-out + adversarial review + **G12** human merge is not always required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-not-in-any-way-required", treatment: "Fan-out + adversarial review + **G12** human merge is not in any way required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-is-technically-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-cannot-be-required", treatment: "Fan-out + adversarial review + **G12** human merge cannot be required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-does-not-have-to-happen", treatment: "Fan-out + adversarial review + **G12** human merge does not have to happen; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
-  { name: "human-merge-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful", expect: [] },
-  { name: "missing-fan-out", treatment: "Optional review; G12 when convenient", expect: ["E_TIER_WEAKENING"] },
+const { diffTierTreatments, parseRiskTiers, extractMarkdownTable, countMarkdownTables, structuredAgentsEnumerationFindings } = await import(pathToFileURL(process.env.SEM).href);
+const { CANONICAL_TIER_C_TREATMENT } = await import(pathToFileURL(process.env.CANON).href);
+const canonical = CANONICAL_TIER_C_TREATMENT;
+const red = ["E_TIER_WEAKENING"];
+const evasions = [
+  ["owner-sign-off-required", "owner sign-off required"],
+  ["human-approval-required", "human approval required"],
+  ["human-attestation-required", "human attestation required"],
+  ["owner-review-required", "owner review required"],
+  ["fan-out-where-available", "fan-out and adversarial review where available"],
+  ["required-checks-as-appropriate", "required checks as appropriate"],
+  ["e3-only-if-available", "E3 only if available"],
+  ["fan-out-discretionary", "fan-out and adversarial review are discretionary"],
+  ["e3-where-possible", "E3 at the exact head where possible"],
 ];
+const rows = [
+  { name: "canonical-wording", treatment: canonical, expect: [] },
+  { name: "one-char-case-flip", treatment: "f" + canonical.slice(1), expect: red },
+  { name: "one-char-delete-last", treatment: canonical.slice(0, -1), expect: red },
+  { name: "one-char-insert", treatment: canonical.slice(0, 8) + "X" + canonical.slice(8), expect: red },
+  { name: "wording-still-names-human-merge-gate", treatment: "Fan-out + adversarial review + **G12** human merge gate (E3 at the exact head + required checks, D-015); serialize when stateful", expect: red },
+  { name: "wording-still-names-owner-merge", treatment: canonical + " Min. owner merge.", expect: red },
+  { name: "wording-missing-e3", treatment: "Fan-out + adversarial review + **G12** floor (at the exact head + required checks, D-015); serialize when stateful", expect: red },
+  { name: "wording-missing-required-checks", treatment: "Fan-out + adversarial review + **G12** floor (E3 at the exact head, D-015); serialize when stateful", expect: red },
+  { name: "wording-missing-exact-head", treatment: "Fan-out + adversarial review + **G12** floor (E3 + required checks, D-015); serialize when stateful", expect: red },
+  { name: "wording-required-checks-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks cannot be skipped, D-015); serialize when stateful", expect: red },
+  { name: "wording-e3-is-not-required", treatment: "Fan-out + adversarial review + **G12** floor (E3 is not required at the exact head + required checks, D-015); serialize when stateful", expect: red },
+  { name: "human-merge-is-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is not required; serialize when stateful", expect: red },
+  { name: "human-merge-is-not-operationally-required", treatment: "Fan-out + adversarial review + **G12** human merge is not operationally required; serialize when stateful", expect: red },
+  { name: "human-merge-is-not-technically-required", treatment: "Fan-out + adversarial review + **G12** human merge is not technically required; serialize when stateful", expect: red },
+  { name: "human-merge-is-not-always-required", treatment: "Fan-out + adversarial review + **G12** human merge is not always required; serialize when stateful", expect: red },
+  { name: "human-merge-is-not-in-any-way-required", treatment: "Fan-out + adversarial review + **G12** human merge is not in any way required; serialize when stateful", expect: red },
+  { name: "human-merge-is-technically-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful", expect: red },
+  { name: "human-merge-cannot-be-required", treatment: "Fan-out + adversarial review + **G12** human merge cannot be required; serialize when stateful", expect: red },
+  { name: "human-merge-does-not-have-to-happen", treatment: "Fan-out + adversarial review + **G12** human merge does not have to happen; serialize when stateful", expect: red },
+  { name: "human-merge-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful", expect: red },
+  { name: "missing-fan-out", treatment: "Optional review; G12 when convenient", expect: red },
+];
+for (const [name, treatment] of evasions) {
+  rows.push({ name, treatment, expect: red });
+}
 const failed = [];
 for (const row of rows) {
   const got = diffTierTreatments([{ id: "C", definition: "Money", treatment: row.treatment }]).map((f) => f.code);
@@ -2477,6 +2769,166 @@ for (const row of rows) {
     failed.push(row.name + " got " + JSON.stringify(got) + " want " + JSON.stringify(row.expect));
   } else {
     console.log("TIER_OK " + row.name);
+  }
+}
+const weakened = "Optional review; G12 when convenient";
+const dupCases = [
+  {
+    name: "api-canonical-then-weakened-C",
+    tiers: [
+      { id: "C", definition: "Money", treatment: canonical },
+      { id: "C", definition: "Money", treatment: weakened },
+    ],
+    expect: ["E_TIER_DUPLICATE", "E_TIER_WEAKENING"],
+  },
+  {
+    name: "api-weakened-then-canonical-C",
+    tiers: [
+      { id: "C", definition: "Money", treatment: weakened },
+      { id: "C", definition: "Money", treatment: canonical },
+    ],
+    expect: ["E_TIER_DUPLICATE", "E_TIER_WEAKENING"],
+  },
+  {
+    name: "api-duplicate-canonical-C",
+    tiers: [
+      { id: "C", definition: "Money", treatment: canonical },
+      { id: "C", definition: "Money", treatment: canonical },
+    ],
+    expect: ["E_TIER_DUPLICATE"],
+  },
+];
+for (const row of dupCases) {
+  const got = diffTierTreatments(row.tiers).map((f) => f.code);
+  if (JSON.stringify(got) !== JSON.stringify(row.expect)) {
+    failed.push(row.name + " got " + JSON.stringify(got) + " want " + JSON.stringify(row.expect));
+  } else {
+    console.log("TIER_OK " + row.name);
+  }
+}
+const agentsPath = join(dirname(process.env.SEM), "..", "..", "AGENTS.md");
+const agentsSrc = readFileSync(agentsPath, "utf8");
+if (countMarkdownTables(agentsSrc, ["Tier", "Definition", "Treatment"]) !== 1) {
+  failed.push("live AGENTS.md tier-table count is not 1");
+} else if (diffTierTreatments(parseRiskTiers(agentsSrc)).length !== 0) {
+  failed.push("live AGENTS.md tier treatments are not green");
+} else {
+  console.log("TIER_OK live-agents-one-table-green");
+}
+const cRow = agentsSrc.split("\n").find((l) => l.startsWith("| **C** |"));
+if (!cRow) {
+  failed.push("temp-copy mutation missing canonical C row");
+} else {
+  const dir2 = mkdtempSync(join(tmpdir(), "tier-c-dup-row-"));
+  const copyPath = join(dir2, "AGENTS.md");
+  writeFileSync(copyPath, agentsSrc.replace(cRow, cRow + "\n| **C** | Money | " + weakened + " |"));
+  const parsed = parseRiskTiers(readFileSync(copyPath, "utf8"));
+  const got = diffTierTreatments(parsed).map((f) => f.code);
+  rmSync(dir2, { recursive: true, force: true });
+  const want = ["E_TIER_DUPLICATE", "E_TIER_WEAKENING"];
+  if (JSON.stringify(got) !== JSON.stringify(want)) {
+    failed.push("temp-copy duplicate C row got " + JSON.stringify(got) + " want " + JSON.stringify(want));
+  } else {
+    console.log("TIER_OK temp-copy-canonical-then-weakened-C");
+  }
+}
+const secondTable = [
+  "",
+  "## Decoy risk tiers",
+  "",
+  "|  tier | definition | treatment |",
+  "|---|---|---|",
+  "| **C** | Money | " + weakened + " |",
+  "",
+].join("\n");
+const doubled = agentsSrc + secondTable;
+const firstOnly = extractMarkdownTable(doubled, ["Tier", "Definition", "Treatment"]);
+if (firstOnly.length !== 3) {
+  failed.push("extractMarkdownTable return contract changed: " + firstOnly.length);
+} else if (countMarkdownTables(doubled, ["Tier", "Definition", "Treatment"]) !== 2) {
+  failed.push("second case-folded tier table was not counted");
+} else {
+  console.log("TIER_OK extract-first-count-both");
+}
+const tierHeads = ["Tier", "Definition", "Treatment"];
+const miniTable = "| Tier | Definition | Treatment |\n|---|---|---|\n| **A** | x | y |\n";
+function assertCount(name, text, n) {
+  const got = countMarkdownTables(text, tierHeads);
+  if (got !== n) failed.push(name + " count " + got + " want " + n);
+  else console.log("TIER_OK " + name);
+}
+const indentedMini = miniTable.split("\n").filter(Boolean).map((l) => "    " + l).join("\n") + "\n";
+const tabMini = miniTable.split("\n").filter(Boolean).map((l) => "\t" + l).join("\n") + "\n";
+const base = agentsSrc.endsWith("\n") ? agentsSrc : agentsSrc + "\n";
+assertCount("fenced-backtick-info", base + "```markdown example\n" + miniTable + "```\n", 1);
+assertCount("fenced-tilde-info", base + "~~~markdown example\n" + miniTable + "~~~\n", 1);
+assertCount("indented-four-space-code", base + "\n" + indentedMini, 1);
+assertCount("tab-indented-code", base + "\n" + tabMini, 1);
+assertCount("unclosed-fence-counts", base + "```\n" + miniTable, 2);
+assertCount("paragraph-interrupt-counts", base + indentedMini, 2);
+assertCount("loose-list-continuation-counts", base + "- item\n\n" + indentedMini, 2);
+const fencedWeak = "```md\n| Tier | Definition | Treatment |\n|---|---|---|\n| **C** | Money | " + weakened + " |\n```\n\n";
+const prepended = fencedWeak + agentsSrc;
+const prependCodes = diffTierTreatments(parseRiskTiers(prepended)).map((f) => f.code);
+if (prependCodes.length !== 0 || countMarkdownTables(prepended, tierHeads) !== 1) {
+  failed.push("prepended fenced weakened table was authoritative " + JSON.stringify(prependCodes));
+} else {
+  console.log("TIER_OK prepended-fenced-weakened-ignored");
+}
+function assertHtml(name, extra, n) {
+  const got = structuredAgentsEnumerationFindings(base + extra)
+    .filter((f) => f.code === "E_AUTHORITY_HTML_TABLE").length;
+  if (got !== n) failed.push(name + " html findings " + got + " want " + n);
+  else console.log("TIER_OK " + name);
+}
+assertHtml("live-no-html-table", "", 0);
+assertHtml("html-any-content", "<table><tr><td>notes</td><td>only</td></tr></table>\n", 1);
+assertHtml("html-upper-attrs", "<TABLE class=\"risk\"><TR><TH colspan=\"3\">Z</TH></TR></TABLE>\n", 1);
+assertHtml("html-whitespace", "< table >\n< td rowspan=\"1\">x</td>\n", 1);
+assertHtml("html-weakened-tier", "<table><tr><th>Tier</th><th>Definition</th><th>Treatment</th></tr><tr><td>C</td><td>Money</td><td>Optional review</td></tr></table>\n", 1);
+assertHtml("html-inside-backtick-fence", "```html\n<table><tr><td>x</td></tr></table>\n```\n", 0);
+assertHtml("html-inside-tilde-fence", "~~~html\n<table><tr><th>Tier</th></tr></table>\n~~~\n", 0);
+assertHtml("html-inside-indented-code", "\n    <table><tr><td>x</td></tr></table>\n", 0);
+assertHtml("html-comment-still-visible", "<!-- <table><tr><td>x</td></tr></table> -->\n", 1);
+assertHtml("not-a-table-tag", "<thread>nope</thread>\n<thead>nope</thead>\n<tdiv>nope</tdiv>\n", 0);
+const dirHtml = mkdtempSync(join(tmpdir(), "tier-html-"));
+const htmlCopy = join(dirHtml, "AGENTS.md");
+writeFileSync(htmlCopy, base + "<table><tr><td>notes</td></tr></table>\n");
+const htmlCopyHit = structuredAgentsEnumerationFindings(readFileSync(htmlCopy, "utf8"))
+  .some((f) => f.code === "E_AUTHORITY_HTML_TABLE");
+rmSync(dirHtml, { recursive: true, force: true });
+if (!htmlCopyHit) failed.push("temp-copy HTML table was not flagged");
+else console.log("TIER_OK temp-copy-html-any-content");
+const dirFence = mkdtempSync(join(tmpdir(), "tier-fence-"));
+const fenceCopy = join(dirFence, "AGENTS.md");
+writeFileSync(fenceCopy, base + "```md\n" + miniTable + "```\n");
+const fenceCount = countMarkdownTables(readFileSync(fenceCopy, "utf8"), tierHeads);
+rmSync(dirFence, { recursive: true, force: true });
+if (fenceCount !== 1) failed.push("temp-copy fenced table count " + fenceCount);
+else console.log("TIER_OK temp-copy-fenced-table-not-counted");
+const semSrc = readFileSync(process.env.SEM, "utf8");
+const pin = "treat !== CANONICAL_TIER_C_TREATMENT";
+if (!semSrc.includes(pin)) {
+  failed.push("noop-mutation comparison pin missing");
+} else {
+  const canonHref = pathToFileURL(process.env.CANON).href;
+  const mutated = semSrc
+    .replaceAll(pin, "false")
+    .replaceAll("from " + JSON.stringify("./authority-config-canonical.mjs"), "from " + JSON.stringify(canonHref));
+  const dir = mkdtempSync(join(tmpdir(), "tier-c-noop-"));
+  const outPath = join(dir, "contract-semantics.mjs");
+  writeFileSync(outPath, mutated);
+  const { diffTierTreatments: noopDiff } = await import(pathToFileURL(outPath).href);
+  const quiet = [];
+  for (const [name, treatment] of evasions) {
+    const got = noopDiff([{ id: "C", definition: "Money", treatment }]).map((f) => f.code);
+    if (got.length !== 0) quiet.push(name + " still fired " + JSON.stringify(got));
+  }
+  rmSync(dir, { recursive: true, force: true });
+  if (quiet.length) {
+    failed.push("noop-mutation still fired: " + quiet.join(", "));
+  } else {
+    console.log("TIER_OK noop-mutation-nine-red-fail-to-fire");
   }
 }
 if (failed.length) {
@@ -2983,14 +3435,14 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
 ' "$SANDBOX/AGENTS.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_WEAKENING' >/dev/null; then
-  ok "sensor: Tier C human merge is-not-required fails with E_TIER_WEAKENING"
+  ok "sensor: Tier C wording that still names human merge is-not-required fails with E_TIER_WEAKENING"
 else
   bad "sensor tier-C human-merge-is-not-required (rc=$rc): $out"
 fi
@@ -3002,14 +3454,14 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not operationally required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
 ' "$SANDBOX/AGENTS.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_TIER_WEAKENING' >/dev/null; then
-  ok "sensor: Tier C human merge is-not-operationally-required fails with E_TIER_WEAKENING"
+  ok "sensor: Tier C wording that still names human merge is-not-operationally-required fails with E_TIER_WEAKENING"
 else
   bad "sensor tier-C human-merge-is-not-operationally-required (rc=$rc): $out"
 fi
@@ -3153,7 +3605,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not technically required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
@@ -3161,7 +3613,7 @@ fs.writeFileSync(p,t);
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 tier_n=$(printf '%s\n' "$out" | grep -c 'E_TIER_WEAKENING' || true)
 if [[ "$rc" -ne 0 ]] && [[ "$tier_n" -eq 1 ]]; then
-  ok "sensor: Tier C human merge is-not-technically-required fails with E_TIER_WEAKENING"
+  ok "sensor: Tier C wording that still names human merge is-not-technically-required fails with E_TIER_WEAKENING"
 else
   bad "sensor tier-C human-merge-is-not-technically-required (rc=$rc n=$tier_n): $out"
 fi
@@ -3173,7 +3625,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not always required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
@@ -3181,7 +3633,7 @@ fs.writeFileSync(p,t);
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 tier_n=$(printf '%s\n' "$out" | grep -c 'E_TIER_WEAKENING' || true)
 if [[ "$rc" -ne 0 ]] && [[ "$tier_n" -eq 1 ]]; then
-  ok "sensor: Tier C human merge is-not-always-required fails with E_TIER_WEAKENING"
+  ok "sensor: Tier C wording that still names human merge is-not-always-required fails with E_TIER_WEAKENING"
 else
   bad "sensor tier-C human-merge-is-not-always-required (rc=$rc n=$tier_n): $out"
 fi
@@ -3250,7 +3702,7 @@ fs.writeFileSync(p, t.replace(s, r));
 
 APPLY_NEEDLE='then **explicit human apply**'
 LINE_NEEDLE='findings cite **file:line**'
-TIER_NEEDLE='Fan-out + adversarial review + **G12** human merge gate; serialize when stateful'
+TIER_NEEDLE='Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful'
 
 assert_sensor_exact_code \
   "optional slash unrelated cannot-be-skipped" \
@@ -3324,33 +3776,41 @@ assert_sensor_exact_code \
   "E_BINDING_NEGATION"
 
 assert_sensor_exact_code \
-  "Tier C human merge is-not-in-any-way-required" \
+  "Tier C wording still naming human merge is-not-in-any-way-required" \
   "$TIER_NEEDLE" \
   "Fan-out + adversarial review + **G12** human merge is not in any way required; serialize when stateful" \
   "E_TIER_WEAKENING" \
-  "tier C human-merge-is-not-in-any-way-required" "tiers"
+  "tier C wording human-merge-is-not-in-any-way-required" "tiers"
 assert_sensor_exact_code \
-  "Tier C human merge is-technically-not-required" \
+  "Tier C wording still naming human merge is-technically-not-required" \
   "$TIER_NEEDLE" \
   "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful" \
   "E_TIER_WEAKENING" \
-  "tier C human-merge-is-technically-not-required" "tiers"
+  "tier C wording human-merge-is-technically-not-required" "tiers"
 assert_sensor_exact_code \
-  "Tier C human merge cannot-be-required" \
+  "Tier C wording still naming human merge cannot-be-required" \
   "$TIER_NEEDLE" \
   "Fan-out + adversarial review + **G12** human merge cannot be required; serialize when stateful" \
   "E_TIER_WEAKENING" \
-  "tier C human-merge-cannot-be-required" "tiers"
+  "tier C wording human-merge-cannot-be-required" "tiers"
 assert_sensor_exact_code \
-  "Tier C human merge does-not-have-to-happen" \
+  "Tier C wording still naming human merge does-not-have-to-happen" \
   "$TIER_NEEDLE" \
   "Fan-out + adversarial review + **G12** human merge does not have to happen; serialize when stateful" \
   "E_TIER_WEAKENING" \
-  "tier C human-merge-does-not-have-to-happen" "tiers"
-assert_sensor_green \
-  "Tier C human merge cannot-be-skipped" \
+  "tier C wording human-merge-does-not-have-to-happen" "tiers"
+assert_sensor_exact_code \
+  "Tier C wording still naming human merge cannot-be-skipped" \
   "$TIER_NEEDLE" \
-  "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful"
+  "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful" \
+  "E_TIER_WEAKENING" \
+  "tier C wording human-merge-cannot-be-skipped" "tiers"
+assert_sensor_exact_code \
+  "Tier C wording required-checks cannot-be-skipped" \
+  "$TIER_NEEDLE" \
+  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. Required checks cannot be skipped" \
+  "E_TIER_WEAKENING" \
+  "tier C wording required-checks-cannot-be-skipped" "tiers"
 
 echo "# first-match contradiction masking"
 cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-historical-then-active-supersedes.md" \
@@ -6494,7 +6954,12 @@ const dir = mkdtempSync(join(tmpdir(), "gibson-241-teeth-"));
 
 async function loadMutant(mutatedSource, tag) {
   const file = join(dir, `mutant-${tag}.mjs`);
-  writeFileSync(file, mutatedSource);
+  const canonHref = pathToFileURL(process.env.CANON).href;
+  const rewritten = mutatedSource.replaceAll(
+    "from " + JSON.stringify("./authority-config-canonical.mjs"),
+    "from " + JSON.stringify(canonHref)
+  );
+  writeFileSync(file, rewritten);
   return import(pathToFileURL(file).href + `?t=${tag}-${Date.now()}`);
 }
 
@@ -7135,6 +7600,7 @@ process.exit(0);
 NODE
 TEETH_241=$(
   SEM="$REPO_ROOT/scripts/lib/contract-semantics.mjs" \
+  CANON="$REPO_ROOT/scripts/lib/authority-config-canonical.mjs" \
   HARNESS_REPO="$REPO_ROOT" \
   node "$TEETH_SCRIPT"
 )
