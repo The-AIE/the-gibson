@@ -313,14 +313,197 @@ export function extractMarkdownTable(text, headerCells) {
 }
 
 /**
- * Count every markdown table whose header matches `headerCells`.
- * Header cells are whitespace-collapsed and compared case-insensitively,
- * the same match `extractMarkdownTable` uses. This does not change that
- * function's first-table return. Callers that must fail closed on a
- * second table use the count.
+ * Column indent. A tab advances to the next multiple of 4, matching
+ * CommonMark, so a tab-indented chunk is an indented code block.
+ */
+function expandIndent(line) {
+  let col = 0;
+  let i = 0;
+  while (i < line.length) {
+    const ch = line[i];
+    if (ch === " ") col += 1;
+    else if (ch === "\t") col += 4 - (col % 4);
+    else break;
+    i += 1;
+  }
+  return { col, index: i };
+}
+
+function isBlankLine(line) {
+  return expandIndent(line).index === line.length;
+}
+
+function isThematicBreak(line) {
+  return /^ {0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(line);
+}
+
+function isAtxHeading(line) {
+  return /^ {0,3}#{1,6}(?:[ \t]+|$)/.test(line);
+}
+
+/**
+ * Fence opener indented at most three spaces. A backtick info string that
+ * itself contains a backtick is not an opener. Tilde info strings may
+ * contain anything on the rest of the line.
+ */
+function matchFenceOpen(line) {
+  if (line.startsWith("\t")) return null;
+  const m = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!m) return null;
+  const delim = m[2];
+  const info = m[3];
+  if (delim[0] === "`" && info.includes("`")) return null;
+  return { char: delim[0], length: delim.length, indent: m[1].length };
+}
+
+function fenceCloseRe(fence) {
+  const ch = fence.char === "`" ? "`" : "~";
+  return new RegExp(`^ {0,3}${ch}{${fence.length},}[ \t]*$`);
+}
+
+/**
+ * List item whose marker starts in the first four columns. Padding of
+ * 1–4 columns sets the content column; a wider gap keeps one padding
+ * column and treats the rest as content.
+ */
+function matchListItem(line) {
+  if (isThematicBreak(line)) return null;
+  const { col, index } = expandIndent(line);
+  if (col > 3) return null;
+  const rest = line.slice(index);
+  const m = /^([-+*]|\d{1,9}[.)])(.*)$/.exec(rest);
+  if (!m) return null;
+  const marker = m[1];
+  const after = m[2];
+  if (after.length > 0 && after[0] !== " " && after[0] !== "\t") return null;
+  const markerEnd = col + marker.length;
+  let i = 0;
+  let pad = 0;
+  let cursor = markerEnd;
+  while (i < after.length) {
+    const ch = after[i];
+    if (ch === " ") {
+      pad += 1;
+      cursor += 1;
+      i += 1;
+    } else if (ch === "\t") {
+      const add = 4 - (cursor % 4);
+      pad += add;
+      cursor += add;
+      i += 1;
+    } else break;
+  }
+  if (i !== after.length && pad < 1) return null;
+  const contentCol = i === after.length || pad > 4 ? markerEnd + 1 : cursor;
+  return { markerCol: col, contentCol };
+}
+
+/**
+ * Blank fenced and indented code so example tables are not authority.
+ * ``` / ~~~ fences (any info string) and CommonMark indented code blocks
+ * are inert. Indented code does not interrupt a paragraph, and a loose
+ * list continuation is not a code block. An unclosed fence is restored:
+ * one opener must not hide the rest of the file.
+ */
+function maskInertCodeBlocks(text) {
+  const lines = String(text ?? "").split(/\r?\n/);
+  const out = new Array(lines.length);
+  const lists = [];
+  let fence = null;
+  let inParagraph = false;
+
+  const popListsTo = (col) => {
+    while (lists.length && col < lists[lists.length - 1].contentCol) lists.pop();
+  };
+  const codeThreshold = () =>
+    lists.length ? lists[lists.length - 1].contentCol + 4 : 4;
+  const noteList = (item) => {
+    while (lists.length && item.markerCol < lists[lists.length - 1].markerCol) {
+      lists.pop();
+    }
+    if (lists.length && item.markerCol === lists[lists.length - 1].markerCol) {
+      lists[lists.length - 1].contentCol = item.contentCol;
+    } else {
+      lists.push({ markerCol: item.markerCol, contentCol: item.contentCol });
+    }
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fence) {
+      out[i] = "";
+      if (fence.closeRe.test(line)) fence = null;
+      inParagraph = false;
+      continue;
+    }
+    if (isBlankLine(line)) {
+      out[i] = line;
+      inParagraph = false;
+      continue;
+    }
+    const opened = matchFenceOpen(line);
+    if (opened) {
+      popListsTo(opened.indent);
+      fence = {
+        char: opened.char,
+        length: opened.length,
+        start: i,
+        closeRe: fenceCloseRe(opened),
+      };
+      out[i] = "";
+      inParagraph = false;
+      continue;
+    }
+    if (isAtxHeading(line)) {
+      lists.length = 0;
+      out[i] = line;
+      inParagraph = false;
+      continue;
+    }
+    const item = matchListItem(line);
+    if (item) {
+      noteList(item);
+      out[i] = line;
+      inParagraph = true;
+      continue;
+    }
+    const { col } = expandIndent(line);
+    if (!inParagraph) popListsTo(col);
+    if (!inParagraph && col >= codeThreshold()) {
+      out[i] = "";
+      continue;
+    }
+    out[i] = line;
+    inParagraph = true;
+  }
+  if (fence) {
+    for (let i = fence.start; i < lines.length; i++) out[i] = lines[i];
+  }
+  return out.join("\n");
+}
+
+/**
+ * HTML table tags are never an authority surface in AGENTS.md. Any
+ * table, tr, td, or th tag outside an inert code block is a finding,
+ * case-insensitively, with or without attributes and interior whitespace.
+ * Content does not matter. Tags inside fences or indented code do not count.
+ */
+const HTML_TABLE_TAG_RE = /<\s*\/?\s*(?:table|tr|td|th)(?=[\s>/]|$)/i;
+
+function hasAuthoritativeHtmlTable(text) {
+  return HTML_TABLE_TAG_RE.test(maskInertCodeBlocks(text));
+}
+
+/**
+ * Count every markdown table whose header matches `headerCells` on the
+ * authoritative surface. Header cells are whitespace-collapsed and compared
+ * case-insensitively, the same match `extractMarkdownTable` uses. Fenced
+ * and indented code blocks are not counted. This does not change
+ * extractMarkdownTable's first-table return. Callers that must fail closed
+ * on a second table use the count.
  */
 export function countMarkdownTables(text, headerCells) {
-  const lines = String(text).split(/\r?\n/);
+  const lines = maskInertCodeBlocks(text).split(/\r?\n/);
   const want = headerCells.map((h) => collapseWs(h).toLowerCase());
   let count = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -495,7 +678,10 @@ export function parseRoleEnumeration(agentsText) {
 }
 
 export function parseRiskTiers(agentsText) {
-  const rows = extractMarkdownTable(agentsText, ["Tier", "Definition", "Treatment"]);
+  const rows = extractMarkdownTable(
+    maskInertCodeBlocks(agentsText),
+    ["Tier", "Definition", "Treatment"]
+  );
   return rows.map((r) => ({
     id: String(r[0] || "")
       .replace(/\*/g, "")
@@ -1560,6 +1746,14 @@ export function structuredAgentsEnumerationFindings(agentsText, candidate) {
           "AGENTS.md role table disagrees with the expected role enumeration",
       });
     }
+  }
+
+  if (hasAuthoritativeHtmlTable(agentsText)) {
+    findings.push({
+      code: "E_AUTHORITY_HTML_TABLE",
+      message:
+        "AGENTS.md contains an HTML table tag outside a code block; HTML tables are not authority",
+    });
   }
 
   const tierHeader = ["Tier", "Definition", "Treatment"];
