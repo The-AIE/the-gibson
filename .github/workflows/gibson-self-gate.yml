@@ -266,6 +266,11 @@ jobs:
         if: steps.classify.outputs.mode == 'docs'
         run: bash scripts/tests/run-all.sh --no-quarantine --only contract-authority,policy-manifest,laws-sensors,convention-sensors,architecture-fitness
 
+      # #164: generated-view drift. Same sensors job, no new required context.
+      # Exit 1 on block drift, stale digest, bad markers, or unreadable inputs.
+      - name: Policy view drift
+        run: node scripts/policy-manifest.mjs check-drift
+
       # Advisory: the burn-down view. Shows what the quarantine is hiding
       # without failing the build, so the list stays visible instead of
       # becoming furniture.
