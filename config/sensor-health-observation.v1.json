@@ -21,10 +21,16 @@
       "windowDays": 1
     },
     {
-      "path": "dynamic/github-code-scanning/code-security-risk-assessment",
+      "path": "dynamic/github-code-scanning/codeql",
       "mode": "freshness",
       "events": ["dynamic"],
       "windowDays": 30
+    },
+    {
+      "path": "dynamic/github-code-scanning/code-security-risk-assessment",
+      "mode": "freshness",
+      "events": ["dynamic"],
+      "windowDays": 365
     },
     {
       "path": "dynamic/pages/pages-build-deployment",

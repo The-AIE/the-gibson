@@ -336,3 +336,17 @@ Revisit when: a Tier C change merged on E3 + checks causes an incident the owner
 signature would plausibly have stopped; or Grok is the only E3 reviewer path for
 Tier C for more than a week; or the amendment sequence above exposes a sensor
 that cannot be reconciled without weakening it.
+
+## D-017 · 2026-10-14 · Code scanning is on; Sensor health watches CodeQL, and the one-shot risk assessment counts for a year
+Decided (Mark, 2026-10-14, choosing option 1 on #471): GitHub code scanning default
+setup is enabled for this repository (CodeQL; actions, JavaScript/TypeScript, Python).
+`config/sensor-health-observation.v1.json` now observes
+`dynamic/github-code-scanning/codeql` (freshness, 30 days) as the ongoing control.
+The `code-security-risk-assessment` dynamic workflow is a one-shot GitHub assessment
+(one run, 2026-08-20) that GitHub does not allow disabling (HTTP 422), so it keeps a
+freshness policy with a 365-day window: one success per year counts, and the row going
+IDLE is the annual prompt to re-run the assessment. No sensor code changed; IDLE and
+UNKNOWN still fail the run.
+Revisit when: CodeQL default setup is turned off, GitHub makes the risk assessment
+recurring or removable, or the risk-assessment row goes IDLE (re-run it, do not widen
+the window).
