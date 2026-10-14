@@ -117,10 +117,12 @@ function res(status, body) {
     headers: { get() { return null; } },
   };
 }
+const RISK_PATH = "dynamic/github-code-scanning/code-security-risk-assessment";
 const WFS = [
   { id: 1, name: "Gibson self-gate", path: ".github/workflows/gibson-self-gate.yml", state: "active" },
   { id: 2, name: "Sensor health", path: ".github/workflows/sensor-health.yml", state: "active" },
-  { id: 3, name: "Code security", path: "dynamic/github-code-scanning/code-security-risk-assessment", state: "active" },
+  { id: 3, name: "CodeQL", path: "dynamic/github-code-scanning/codeql", state: "active" },
+  { id: 6, name: "Security Risk Assessment", path: "dynamic/github-code-scanning/code-security-risk-assessment", state: "active" },
   { id: 4, name: "pages", path: "dynamic/pages/pages-build-deployment", state: "active" },
   { id: 5, name: "PR review evidence", path: REVIEW_EVIDENCE_WORKFLOW_PATH, state: "active" },
 ];
@@ -188,7 +190,7 @@ function greenCoreHandlers(has_pages, workflows = WFS, { emptyPages = false } = 
       respond: () => res(200, { jobs: [job({ id: 77, name: "sensors" })] }),
     },
     {
-      match: (u) => /\/workflows\/[2-5]\/runs\?/.test(u),
+      match: (u) => /\/workflows\/[2-6]\/runs\?/.test(u),
       respond: (u) => {
         const id = Number(u.match(/workflows\/(\d+)/)[1]);
         if (emptyPages && id === 4) {
@@ -504,7 +506,7 @@ describe("matrix 10-13 audit integration", () => {
         respond: () => res(200, { jobs: [job({ id: 77, name: "sensors" })] }),
       },
       {
-        match: (u) => /\/workflows\/[2-5]\/runs\?/.test(u),
+        match: (u) => /\/workflows\/[2-6]\/runs\?/.test(u),
         respond: (u) => {
           const id = Number(u.match(/workflows\/(\d+)/)[1]);
           return res(200, {
@@ -755,7 +757,7 @@ describe("matrix 14 + mutations + fingerprint", () => {
     });
     assert.match(body, /Budget: requests=3 pages=2/);
     assert.match(body, /sensor-health-fingerprint/);
-    assert.equal(JSON.parse(readFileSync(join(ROOT, "config/sensor-health-observation.v1.json"), "utf8")).policies.length, 5);
+    assert.equal(JSON.parse(readFileSync(join(ROOT, "config/sensor-health-observation.v1.json"), "utf8")).policies.length, 6);
   });
 });
 describe("coordinator gap controls", () => {
@@ -829,7 +831,8 @@ describe("coordinator gap controls", () => {
     const result = await runSensorHealthAudit({
       token: "t",
       repository: "The-AIE/the-gibson",
-      registry: reg(),
+      // Five-workflow fixture: this test pins the run-page cap, not workflow-list paging.
+      registry: { ...reg(), policies: reg().policies.filter((p) => p.path !== RISK_PATH) },
       observationTime: OBS,
       runPageCap: 3,
       perPage: 2,
@@ -846,7 +849,7 @@ describe("coordinator gap controls", () => {
         if (/\/actions\/workflows\?/.test(u)) {
           const page = Number(new URL(u).searchParams.get("page") || 1);
           const pp = Number(new URL(u).searchParams.get("per_page") || 100);
-          return res(200, { workflows: WFS.slice((page - 1) * pp, page * pp) });
+          return res(200, { workflows: WFS.filter((w) => w.path !== RISK_PATH).slice((page - 1) * pp, page * pp) });
         }
         if (/\/workflows\/2\/runs\?/.test(u)) {
           return res(200, {
@@ -860,7 +863,7 @@ describe("coordinator gap controls", () => {
           return res(200, { workflow_runs: [run({ id: 100, updated_at: "2026-08-30T11:00:00Z" })] });
         }
         if (/\/jobs/.test(u)) return res(200, { jobs: [job({ id: 1, name: "sensors" })] });
-        if (/\/workflows\/[3-5]\/runs\?/.test(u)) {
+        if (/\/workflows\/[3-6]\/runs\?/.test(u)) {
           const id = Number(u.match(/workflows\/(\d+)/)[1]);
           return res(200, {
             workflow_runs: [
@@ -1475,12 +1478,20 @@ describe("issue 346 pr-review-evidence registry and inventory", () => {
     assert.equal(isCheckedInRepoOwnedFreshnessPolicy(reviewEvidence()), true);
     assert.equal(isCheckedInRepoOwnedFreshnessPolicy(sg), false);
     const sec = r.policies.find(
-      (p) => p.path === "dynamic/github-code-scanning/code-security-risk-assessment"
+      (p) => p.path === "dynamic/github-code-scanning/codeql"
     );
     assert.equal(sec.mode, "freshness");
     assert.deepEqual(sec.events, ["dynamic"]);
     assert.equal(sec.windowDays, 30);
     assert.equal(isCheckedInRepoOwnedFreshnessPolicy(sec), false);
+    // One-shot GitHub assessment (#471): a success within a year counts; CodeQL is the ongoing control.
+    const risk = r.policies.find(
+      (p) => p.path === "dynamic/github-code-scanning/code-security-risk-assessment"
+    );
+    assert.equal(risk.mode, "freshness");
+    assert.deepEqual(risk.events, ["dynamic"]);
+    assert.equal(risk.windowDays, 365);
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(risk), false);
     const pages = r.policies.find((p) => p.path === PAGES_WORKFLOW_PATH);
     assert.deepEqual(pages.enabledWhen, { repoField: "has_pages", equals: true });
     assert.equal(isCheckedInRepoOwnedFreshnessPolicy(pages), false);
@@ -1689,7 +1700,7 @@ describe("issue 346 pr-review-evidence registry and inventory", () => {
     assert.equal(result.report.rows.find((r) => r.path === ".github/workflows/sensor-health.yml")?.state, STATES.OK);
     assert.equal(
       result.report.rows.find(
-        (r) => r.path === "dynamic/github-code-scanning/code-security-risk-assessment"
+        (r) => r.path === "dynamic/github-code-scanning/codeql"
       )?.state,
       STATES.OK
     );
