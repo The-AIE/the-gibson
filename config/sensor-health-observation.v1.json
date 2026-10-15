@@ -21,7 +21,7 @@
       "windowDays": 1
     },
     {
-      "path": "dynamic/github-code-scanning/code-security-risk-assessment",
+      "path": "dynamic/github-code-scanning/codeql",
       "mode": "freshness",
       "events": ["dynamic"],
       "windowDays": 30

@@ -120,7 +120,7 @@ function res(status, body) {
 const WFS = [
   { id: 1, name: "Gibson self-gate", path: ".github/workflows/gibson-self-gate.yml", state: "active" },
   { id: 2, name: "Sensor health", path: ".github/workflows/sensor-health.yml", state: "active" },
-  { id: 3, name: "Code security", path: "dynamic/github-code-scanning/code-security-risk-assessment", state: "active" },
+  { id: 3, name: "CodeQL", path: "dynamic/github-code-scanning/codeql", state: "active" },
   { id: 4, name: "pages", path: "dynamic/pages/pages-build-deployment", state: "active" },
   { id: 5, name: "PR review evidence", path: REVIEW_EVIDENCE_WORKFLOW_PATH, state: "active" },
 ];
@@ -1475,7 +1475,7 @@ describe("issue 346 pr-review-evidence registry and inventory", () => {
     assert.equal(isCheckedInRepoOwnedFreshnessPolicy(reviewEvidence()), true);
     assert.equal(isCheckedInRepoOwnedFreshnessPolicy(sg), false);
     const sec = r.policies.find(
-      (p) => p.path === "dynamic/github-code-scanning/code-security-risk-assessment"
+      (p) => p.path === "dynamic/github-code-scanning/codeql"
     );
     assert.equal(sec.mode, "freshness");
     assert.deepEqual(sec.events, ["dynamic"]);
@@ -1689,7 +1689,7 @@ describe("issue 346 pr-review-evidence registry and inventory", () => {
     assert.equal(result.report.rows.find((r) => r.path === ".github/workflows/sensor-health.yml")?.state, STATES.OK);
     assert.equal(
       result.report.rows.find(
-        (r) => r.path === "dynamic/github-code-scanning/code-security-risk-assessment"
+        (r) => r.path === "dynamic/github-code-scanning/codeql"
       )?.state,
       STATES.OK
     );
@@ -1888,5 +1888,35 @@ describe("issue 346 pr-review-evidence registry and inventory", () => {
     assert.equal(malformedRow.state, STATES.UNKNOWN);
     assert.equal(malformedRow.reasonClass, REASON.MALFORMED_EVIDENCE);
     assert.equal(malformed.exitCode, 1);
+  });
+});
+describe("code-scanning observation (#471, #491)", () => {
+  const CODEQL = "dynamic/github-code-scanning/codeql";
+  it("watches the recurring CodeQL workflow, not the one-off risk assessment", () => {
+    const paths = reg().policies.map((p) => p.path);
+    assert.ok(paths.includes(CODEQL));
+    assert.ok(!paths.includes("dynamic/github-code-scanning/code-security-risk-assessment"));
+  });
+  it("a stalled CodeQL scan is still IDLE: the swap cannot mask it", () => {
+    const policy = reg().policies.find((p) => p.path === CODEQL);
+    const recent = classifySensor({
+      name: "CodeQL",
+      path: CODEQL,
+      policy,
+      runs: [run({ id: 4711, event: "dynamic", updated_at: "2026-08-29T10:00:00Z" })],
+      ctx: ctx(),
+      evidenceComplete: true,
+    });
+    assert.equal(recent.state, STATES.OK);
+    const stalled = classifySensor({
+      name: "CodeQL",
+      path: CODEQL,
+      policy,
+      runs: [run({ id: 4712, event: "dynamic", updated_at: "2026-07-01T10:00:00Z" })],
+      ctx: ctx(),
+      evidenceComplete: true,
+    });
+    assert.equal(stalled.state, STATES.IDLE);
+    assert.equal(stalled.reasonClass, REASON.IDLE_WINDOW);
   });
 });
