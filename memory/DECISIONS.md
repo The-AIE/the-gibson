@@ -336,3 +336,26 @@ Revisit when: a Tier C change merged on E3 + checks causes an incident the owner
 signature would plausibly have stopped; or Grok is the only E3 reviewer path for
 Tier C for more than a week; or the amendment sequence above exposes a sensor
 that cannot be reconciled without weakening it.
+
+## D-016 · 2026-10-14 · Sensor health observes the recurring CodeQL workflow, not the one-off risk assessment
+Decided (Mark, 2026-10-14, "Yes to both", asked whether to fix the unregistered CodeQL workflow directly):
+code-scanning default setup is on (#471 option 1; `code-scanning/default-setup`
+reports `configured`, updated 2026-10-13T13:21:08Z). The code-scanning
+observation in `config/sensor-health-observation.v1.json` moves from
+`dynamic/github-code-scanning/code-security-risk-assessment` to
+`dynamic/github-code-scanning/codeql`, with the same policy (freshness,
+`dynamic`, 30-day window). Closes #471 and #491.
+Why: enabling default setup created the recurring CodeQL workflow (first run
+2026-10-13, daily, success) but did not revive the risk-assessment workflow,
+which last ran 2026-08-20 and is not scheduled. The registry kept watching the
+dead one (IDLE, #471) while the live one was unregistered (UNKNOWN
+`unconfigured-workflow`, #491), so Sensor health stayed red with every real
+sensor OK. The control is configured; the observation was pointed at the wrong
+workflow.
+Rejected: keeping both rows (the risk-assessment row can never go OK, so the run
+stays permanently red); treating `dynamic` IDLE rows as passing (#471 option 3,
+which weakens every dynamic observation).
+Accepted risk: none beyond the swap. `scripts/sensor-health.test.mjs` proves a
+stalled CodeQL scan still classifies IDLE, and so still fails the run.
+Revisit when: GitHub reschedules the risk-assessment workflow, or code-scanning
+default setup is turned off.
