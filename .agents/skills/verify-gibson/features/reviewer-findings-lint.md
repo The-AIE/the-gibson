@@ -17,10 +17,10 @@
 Preconditions: doctor is ok. Plant two files under `$TMPDIR`.
 
 - **Plant.** `printf '### Findings\n- none\n\nVERDICT: APPROVE\n' > "$TMPDIR/rv-good.md"` and `printf '### Findings\n- a.ts:1 wrong\n  kind: blocker\n  class: logic\n\nVERDICT: REQUEST_CHANGES\n' > "$TMPDIR/rv-bad.md"`.
-- **Clean.** `capture.sh lint clean -- node scripts/review-findings-lint.mjs --file "$TMPDIR/rv-good.md"`. Exit `0`; `.out` contains `clean`.
-- **Missing trigger.** `capture.sh lint no-trigger -- node scripts/review-findings-lint.mjs --file "$TMPDIR/rv-bad.md"`. Exit `1`; `.out` contains `blocking finding without trigger`.
-- **Unknown flag.** `capture.sh lint bad-flag -- node scripts/review-findings-lint.mjs --nope`. Exit `2`; `.err` contains `unknown flag:`.
-- **Suite.** `capture.sh lint suite -- bash scripts/tests/review-findings-lint.test.sh`. Exit `0`; the last line ends `0 failed`.
+- **Clean.** `capture.sh reviewer-findings-lint clean -- node scripts/review-findings-lint.mjs --file "$TMPDIR/rv-good.md"`. Exit `0`; `.out` contains `clean`.
+- **Missing trigger.** `capture.sh reviewer-findings-lint no-trigger -- node scripts/review-findings-lint.mjs --file "$TMPDIR/rv-bad.md"`. Exit `1`; `.out` contains `blocking finding without trigger`.
+- **Unknown flag.** `capture.sh reviewer-findings-lint bad-flag -- node scripts/review-findings-lint.mjs --nope`. Exit `2`; `.err` contains `unknown flag:`.
+- **Suite.** `capture.sh reviewer-findings-lint suite -- bash scripts/tests/review-findings-lint.test.sh`. Exit `0`; the last line ends `0 failed`.
 
 ## Gotchas
 
