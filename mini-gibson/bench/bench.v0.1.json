@@ -1,0 +1,264 @@
+{
+  "schema_version": "gibson-bench-tasks/v0.1",
+  "sha256": "7ba00bd45da1fc68e65d763e9ec778084dc4314d1607d557b1f6f2c7c38c79ae",
+  "train_cutoff": "2026-10-08T20:26:48-04:00",
+  "tasks": [
+    {
+      "task_id": "gibson-pr-293",
+      "pr": 293,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "af1a521bd4711b0d882daeab707db145bf0d56cf",
+      "head_commit": "65968536aa0fc865bbf90823863e86157997621b",
+      "date": "2026-09-02T08:25:38-04:00",
+      "issue": "fix: fail closed mixed formal review verdicts (#290)",
+      "test_files": [
+        "scripts/tests/formal-review.test.sh",
+        "scripts/tests/second-opinion.test.sh"
+      ],
+      "source_files_changed": 2,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-315",
+      "pr": 315,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "b3507a959390965cb671386e381cb472b1bea4de",
+      "head_commit": "5c5c8ceddc93cb0ab78fd72c33eca3e5ff533c50",
+      "date": "2026-09-04T15:04:05-04:00",
+      "issue": "feat(#308): review-evidence status \u2014 Law 5 on the interactive path",
+      "test_files": [
+        "scripts/tests/pr-review-evidence.test.sh"
+      ],
+      "source_files_changed": 2,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-316",
+      "pr": 316,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "5c5c8ceddc93cb0ab78fd72c33eca3e5ff533c50",
+      "head_commit": "5babd3d85297b20cf92f19f7b072cc02f0d35979",
+      "date": "2026-09-04T15:04:41-04:00",
+      "issue": "feat(#306): lesson-ledger lint \u2014 referenced IDs exist, pending tracks open issues, test-pinned lessons are fixed",
+      "test_files": [
+        "scripts/tests/lesson-ledger-lint.test.sh"
+      ],
+      "source_files_changed": 1,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-347",
+      "pr": 347,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "5814dc95ed3a653e2e7e128a53168ef4f36dee9e",
+      "head_commit": "1b4b63483fb586cb13020de2c8fb4f0cfc0776d4",
+      "date": "2026-09-05T19:58:49-04:00",
+      "issue": "fix(#346): register review-evidence sensor health",
+      "test_files": [
+        "scripts/sensor-health.test.mjs",
+        "scripts/tests/sensor-health.test.sh"
+      ],
+      "source_files_changed": 2,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-367",
+      "pr": 367,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "1b4b63483fb586cb13020de2c8fb4f0cfc0776d4",
+      "head_commit": "462b096677f225364f66bec2478ccf3c4fcdcf00",
+      "date": "2026-09-06T10:23:58-04:00",
+      "issue": "WIP: claim #366 \u2014 review-evidence-external-vendor",
+      "test_files": [
+        "scripts/tests/pr-review-evidence.test.sh"
+      ],
+      "source_files_changed": 1,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-369",
+      "pr": 369,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "10522840116599f6abe73b39f19de697af736714",
+      "head_commit": "87d302b6ab31decde9f33f8c1730c2461395a023",
+      "date": "2026-09-06T12:17:12-04:00",
+      "issue": "feat(#309,#343): backlog-health classifier + sensor-health wiring",
+      "test_files": [
+        "scripts/tests/backlog-health-publish.test.sh",
+        "scripts/tests/backlog-health.test.sh"
+      ],
+      "source_files_changed": 2,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-386",
+      "pr": 386,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "108f4b5a97ef427ca3c7e8ad81e282ab8fcd8fb2",
+      "head_commit": "db360cfcb9ffc901784f1d7d64d7eab5f9c69d7b",
+      "date": "2026-09-13T15:03:25-04:00",
+      "issue": "fix(review-evidence): restrict Mini Codex attribution to approved recovery commits",
+      "test_files": [
+        "scripts/tests/pr-review-evidence.test.sh"
+      ],
+      "source_files_changed": 2,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-383",
+      "pr": 383,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "db360cfcb9ffc901784f1d7d64d7eab5f9c69d7b",
+      "head_commit": "11a6e0c814193b2fe84d5d90075f8d9a449969db",
+      "date": "2026-09-16T11:57:29-04:00",
+      "issue": "fix(#358): recover pr-size sensor gate",
+      "test_files": [
+        "scripts/tests/pr-size.test.sh"
+      ],
+      "source_files_changed": 2,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-438",
+      "pr": 438,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "ec62910cbbebd74e692f8f63236fd2725d6279fc",
+      "head_commit": "9c67edef008f80e65cec2c3abcf69da4d97c9125",
+      "date": "2026-10-08T09:10:58-04:00",
+      "issue": "feat(review-evidence): owner gate only on carve-outs; independent reviewer for the rest",
+      "test_files": [
+        "scripts/tests/pr-review-evidence.test.sh"
+      ],
+      "source_files_changed": 2,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-448",
+      "pr": 448,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "ae72f047e7a96e25373fd412223516ff5e40909e",
+      "head_commit": "6b6bc0204bb85c69d489ee888bfc448d1937c758",
+      "date": "2026-10-08T09:20:59-04:00",
+      "issue": "feat(#447): gibson-verify \u2014 receipts bound to a head SHA, verified vs claim-only",
+      "test_files": [
+        "scripts/tests/gibson-verify.test.sh",
+        "scripts/tests/laws-sensors.test.sh"
+      ],
+      "source_files_changed": 4,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-454",
+      "pr": 454,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "79752cae7d67b3a8b1b4f5b6c2e0b5571ff0a729",
+      "head_commit": "1bfcea20afc1e773770f74d7324031f201128c9c",
+      "date": "2026-10-08T19:01:21-04:00",
+      "issue": "fix(sensor-health): the self path is a liveness check, not a grade of its own last run",
+      "test_files": [
+        "scripts/sensor-health.test.mjs"
+      ],
+      "source_files_changed": 1,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-458",
+      "pr": 458,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "1bfcea20afc1e773770f74d7324031f201128c9c",
+      "head_commit": "41e2e22f17902caf40d5904b3adf62fcebea2b26",
+      "date": "2026-10-08T20:09:07-04:00",
+      "issue": "feat(review-evidence): the owner is out of the loop (D-014); fork heads evaluate (#455)",
+      "test_files": [
+        "scripts/tests/pr-review-evidence.test.sh"
+      ],
+      "source_files_changed": 1,
+      "split": "development"
+    },
+    {
+      "task_id": "gibson-pr-398",
+      "pr": 398,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "e55c305b41faacc21f2a7bedea3f74e83801a505",
+      "head_commit": "a769d1276227ce1687c73461ed3deb6fc651d944",
+      "date": "2026-10-08T20:26:48-04:00",
+      "issue": "fix(#390): decode C-quoted rename paths in parseNumstatText",
+      "test_files": [
+        "scripts/tests/pr-size.test.sh"
+      ],
+      "source_files_changed": 1,
+      "split": "temporal_gibson_holdout"
+    },
+    {
+      "task_id": "gibson-pr-460",
+      "pr": 460,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "b9bd11c73654aa39aa2f5677b589185ddcdf9fff",
+      "head_commit": "255931370b3fc42e3f4cf83dc75416f86a33138b",
+      "date": "2026-10-08T20:31:19-04:00",
+      "issue": "fix(review-evidence): a listed human author resolves on an unsigned commit (D-014; #413)",
+      "test_files": [
+        "scripts/tests/pr-review-evidence.test.sh"
+      ],
+      "source_files_changed": 1,
+      "split": "temporal_gibson_holdout"
+    },
+    {
+      "task_id": "gibson-pr-461",
+      "pr": 461,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "07d3749c1a2b3dac3339ef9c43812ea80afdf01e",
+      "head_commit": "53f0a4df8901b0561a3ab42ba99f0fc6a628b8a9",
+      "date": "2026-10-08T21:02:07-04:00",
+      "issue": "fix(#412): gate template works on private and org-owned repos (internal copy of #413)",
+      "test_files": [
+        "scripts/tests/ci-conventions.test.sh"
+      ],
+      "source_files_changed": 2,
+      "split": "temporal_gibson_holdout"
+    },
+    {
+      "task_id": "gibson-pr-466",
+      "pr": 466,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "4bb53619263857a0861c7ce7aeb6f2a8981600bd",
+      "head_commit": "0137079f8602d5d54c6a1fcfc163701b565f4bf3",
+      "date": "2026-10-08T23:38:25-04:00",
+      "issue": "feat(reviewer): finding contract with trigger and class vocabulary (#401)",
+      "test_files": [
+        "scripts/tests/review-findings-lint.test.sh"
+      ],
+      "source_files_changed": 4,
+      "split": "temporal_gibson_holdout"
+    },
+    {
+      "task_id": "gibson-pr-477",
+      "pr": 477,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "5e52f018e0f1bd79eb015d7eabcb85adb8389023",
+      "head_commit": "23f26e611c1de350fed3f0d7e229c302176cb18f",
+      "date": "2026-10-13T05:29:56-04:00",
+      "issue": "feat(#160): R1 report-only delivery receipt (gibson.delivery.v1)",
+      "test_files": [
+        "scripts/tests/delivery-receipt-cases.mjs",
+        "scripts/tests/delivery-receipt.test.sh"
+      ],
+      "source_files_changed": 5,
+      "split": "temporal_gibson_holdout"
+    },
+    {
+      "task_id": "gibson-pr-494",
+      "pr": 494,
+      "repo": "The-AIE/the-gibson",
+      "base_commit": "de25b2e5d4dc70fd9d45e4078555a367cbaea2e0",
+      "head_commit": "bc54a6cba73e37c711f2bd3e503d663cf170c2e3",
+      "date": "2026-10-14T19:46:09-04:00",
+      "issue": "fix(#471): Sensor health watches CodeQL; one-shot risk assessment counts for a year",
+      "test_files": [
+        "scripts/sensor-health.test.mjs"
+      ],
+      "source_files_changed": 1,
+      "split": "temporal_gibson_holdout"
+    }
+  ]
+}

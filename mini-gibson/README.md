@@ -28,3 +28,11 @@ The verifier intentionally fails when reproducibility-critical revisions remain 
 Do not train until Gibson Bench v0.1 and its splits are frozen, at least ten gold trajectories validate, and A/B baselines are captured.
 
 Historical LoRA is promoted only if it improves held-out evidence.
+
+## Story, bench and the Jev gate
+
+- [NARRATIVE.md](NARRATIVE.md): the problem, what we hope to see, what we learn if it fails.
+- `bench/mine_tasks.py` mines fail-to-pass tasks from merged PRs; `bench/freeze_bench.py` splits them by date and hashes the result. The manifest stays `DRAFT_DO_NOT_TUNE` until a human freezes it.
+- `bench/run_baseline.py` runs `raw` or `harness` over a split with a `llm`, `noop` or `oracle` agent. Run `noop` (must score 0%) and `oracle` (must score 100%) before trusting any model result.
+- `envs/gibson/jev_verifier.py` is the optional Jev semantic gate. It can only downgrade a result. Needs `pip install typesafe-sdk` and `TYPESAFE_API_KEY`.
+- Tests: `GIBSON_REPO=/path/to/the-gibson python3 -m pytest bench envs` (from `mini-gibson/`).
