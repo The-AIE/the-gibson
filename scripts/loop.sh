@@ -33,6 +33,20 @@ RISKS
     failure (no latch yet) still fails open to local checks. Non-GitHub/
     unparseable origins never query gh against unrelated same-slug repos.
   - Error budget (default 5 consecutive failures) stops the loop to avoid burn.
+  - Session budget (issue #409 / L-003) stops a loop that keeps passing. Defaults
+    are finite: 50 iterations, 480 minutes of wall clock, and USD 20 of measured
+    ledger cost. 0 on a dimension, or --unbounded, is an explicit opt-out and is
+    journaled. Stops happen only at iteration boundaries; a runner is never
+    killed for the session budget (per-iteration kills stay with
+    --runner-timeout). Wall time can overshoot the cap by the rest of the last
+    iteration. Flat-rate and pool runners that report no cost_usd are not
+    treated as $0: the receipt says "cost: not measured" and iterations plus
+    wall clock still bound the session. The allowance persists under
+    gibson/session-budget.json. Ordinary relaunch resumes it. Only
+    --reset-session-budget starts a fresh one. A budget stop writes one
+    gibson.session-budget.v1 receipt and latches so launchd KeepAlive does not
+    append another receipt or start another runner. The allowance is local
+    state writable by the same user; it is not a security boundary.
   - Stale budget (default: same as --error-budget) stops the loop when a runner
     exits 0 without substantive loop-state progress (L-008 / issue #63). Only the
     column-zero updated: clock is ignored; clock-only rewrites are no-progress.
@@ -84,7 +98,24 @@ OPTIONS
   --gibson PATH       Gibson clone (default: parent of this script)
   --once              single iteration then exit
   --print-prompt      render prompt only (no runner)
-  --max-iterations N  cap iterations (default: unlimited until halt)
+  --max-iterations N  session iteration cap (default: 50, or GIBSON_MAX_ITERATIONS).
+                      0 opts out of this dimension. The legacy stop message
+                      "max iterations N reached" is still printed when this
+                      cap is what stops the loop.
+  --max-wall-min N    session wall-clock cap in minutes (default: 480, or
+                      GIBSON_MAX_WALL_MIN). Checked only at an iteration
+                      boundary, never by killing the runner. 0 opts out.
+  --max-cost-usd N    session cost cap in whole USD (default: 20, or
+                      GIBSON_MAX_COST_USD). Stops only when the #74 ledger has
+                      cost_usd data for this session. 0 opts out. Runners
+                      with no cost_usd are "cost: not measured", not $0.
+  --unbounded         opt out of all three session budgets. Explicit, and
+                      journaled. Cannot be combined with the three flags
+                      above; pass 0 on a single dimension instead.
+  --reset-session-budget
+                      discard the persisted allowance and its stop latch, then
+                      start a fresh one on the next runner. Journaled. Refused
+                      together with --dry-run or --print-prompt.
   --error-budget N    consecutive failures before stop (default: 5)
   --runner-timeout N  per-iteration runner wall-clock cap in seconds
                       (default: 1800; env GIBSON_RUNNER_TIMEOUT). On expiry the
@@ -111,6 +142,17 @@ OPTIONS
 
 ENV
   GIBSON_HALT=1                 local kill switch (always honored)
+  GIBSON_MAX_ITERATIONS         default 50. 0 opts that dimension out.
+  GIBSON_MAX_WALL_MIN           default 480. 0 opts that dimension out.
+  GIBSON_MAX_COST_USD           default 20. 0 opts that dimension out.
+  GIBSON_LANE_ID                allowance identity (default: solo). loop-fleet
+                                sets the lane id. A relaunch with a different
+                                lane or repo slug refuses, so one allowance
+                                cannot be charged to another lane.
+  GIBSON_SESSION_ID             exported to the runner after the allowance is
+                                reserved. Metered runners copy it onto
+                                gibson.cost.v1 lines that carry cost_usd.
+  GIBSON_SESSION_ITERATION      1-based consumed start, exported with the id.
   GIBSON_REMOTE_HALT_INTERVAL   re-check remote label/sentinel every N iterations
                                 (default: 1 with --once, 3 for hot loops). A halt
                                 is still detected within N iterations. The loop
@@ -140,6 +182,17 @@ GIBSON=""
 ONCE=0
 PRINT=0
 MAX=-1
+MAX_RAW=""
+MAX_SET=0
+WALL_RAW=""
+WALL_SET=0
+COST_RAW=""
+COST_SET=0
+SB_UNBOUNDED=0
+SB_RESET=0
+SB_LIMIT_ITERATIONS=""
+SB_LIMIT_WALL_MIN=""
+SB_LIMIT_COST_USD=""
 BUDGET=5
 # Runner wall-clock cap (seconds). A hung runner is killed (whole tree) and the
 # iteration counts as a failure, feeding the error budget. Env-overridable.
@@ -164,7 +217,11 @@ while [[ $# -gt 0 ]]; do
     --gibson) GIBSON="$2"; shift 2 ;;
     --once) ONCE=1; shift ;;
     --print-prompt) PRINT=1; shift ;;
-    --max-iterations) MAX="$2"; shift 2 ;;
+    --max-iterations) MAX_RAW="$2"; MAX_SET=1; shift 2 ;;
+    --max-wall-min) WALL_RAW="$2"; WALL_SET=1; shift 2 ;;
+    --max-cost-usd) COST_RAW="$2"; COST_SET=1; shift 2 ;;
+    --unbounded) SB_UNBOUNDED=1; shift ;;
+    --reset-session-budget) SB_RESET=1; shift ;;
     --error-budget) BUDGET="$2"; shift 2 ;;
     --runner-timeout) RUNNER_TIMEOUT="$2"; shift 2 ;;
     --stale-budget) STALE_BUDGET="$2"; STALE_BUDGET_SET=1; shift 2 ;;
@@ -250,6 +307,20 @@ else
 fi
 if ! declare -F silent_noop_progressed >/dev/null 2>&1; then
   die "silent-noop.sh did not define silent_noop_progressed"
+fi
+# Session budget (#409). Same lookup order as wall-timeout.sh so a test copy
+# of this driver still loads the real helper from $GIBSON.
+if [[ -f "$GIBSON/scripts/lib/session-budget.sh" ]]; then
+  # shellcheck disable=SC1090,SC1091
+  source "$GIBSON/scripts/lib/session-budget.sh"
+elif [[ -f "$SCRIPT_DIR/lib/session-budget.sh" ]]; then
+  # shellcheck disable=SC1090,SC1091
+  source "$SCRIPT_DIR/lib/session-budget.sh"
+else
+  die "missing lib/session-budget.sh (looked in $GIBSON/scripts/lib and $SCRIPT_DIR/lib)"
+fi
+if ! declare -F sb_startup_gate >/dev/null 2>&1; then
+  die "session-budget.sh did not define sb_startup_gate"
 fi
 
 # Cost telemetry (#74 / L-003 / #141). Opt-in via GIBSON_COST_LEDGER path. Never
@@ -352,6 +423,51 @@ else
     die "invalid --stale-budget '${STALE_BUDGET}' (want a positive safe decimal integer, no leading zeros)"
   fi
   STALE_BUDGET=$((10#$STALE_BUDGET))
+fi
+
+# Session budget limits (#409). 0 is the explicit per-dimension opt-out.
+# Every other value must pass the same is_positive_safe_int rule as
+# --stale-budget (no leading zeros, no fractions, no overflow).
+sb_take_limit() {
+  local label="$1" flag_set="$2" flag_val="$3" env_name="$4" default="$5" raw
+  if [[ "$flag_set" -eq 1 ]]; then
+    raw="$flag_val"
+  elif [[ -n "${!env_name+x}" ]]; then
+    raw="${!env_name}"
+  else
+    raw="$default"
+  fi
+  if [[ "$raw" == "0" ]]; then
+    printf '0\n'
+    return 0
+  fi
+  if ! is_positive_safe_int "$raw"; then
+    echo "loop.sh: ERROR: invalid ${label} '${raw}' (want a positive safe decimal integer, no leading zeros, or 0 to opt out of this dimension)" >&2
+    return 1
+  fi
+  printf '%s\n' "$((10#$raw))"
+}
+
+if [[ "$SB_UNBOUNDED" -eq 1 ]]; then
+  if [[ "$MAX_SET" -eq 1 || "$WALL_SET" -eq 1 || "$COST_SET" -eq 1 ]]; then
+    die "--unbounded cannot be combined with --max-iterations, --max-wall-min, or --max-cost-usd; pass 0 for a single dimension instead"
+  fi
+  SB_LIMIT_ITERATIONS=0
+  SB_LIMIT_WALL_MIN=0
+  SB_LIMIT_COST_USD=0
+  MAX=-1
+else
+  SB_LIMIT_ITERATIONS=$(sb_take_limit "--max-iterations" "$MAX_SET" "$MAX_RAW" GIBSON_MAX_ITERATIONS 50) || exit 1
+  SB_LIMIT_WALL_MIN=$(sb_take_limit "--max-wall-min" "$WALL_SET" "$WALL_RAW" GIBSON_MAX_WALL_MIN 480) || exit 1
+  SB_LIMIT_COST_USD=$(sb_take_limit "--max-cost-usd" "$COST_SET" "$COST_RAW" GIBSON_MAX_COST_USD 20) || exit 1
+  if [[ "$SB_LIMIT_ITERATIONS" -eq 0 ]]; then
+    MAX=-1
+  else
+    MAX="$SB_LIMIT_ITERATIONS"
+  fi
+fi
+if [[ "$SB_RESET" -eq 1 && ( "$DRY" -eq 1 || "$PRINT" -eq 1 ) ]]; then
+  die "--reset-session-budget mutates the allowance; it cannot be combined with --dry-run or --print-prompt"
 fi
 
 STATE_DIR="$REPO/gibson"
@@ -2607,6 +2723,20 @@ if [[ "$SUPERVISOR" == "devin" && "$DRY" -eq 0 && "$PRINT" -eq 0 ]]; then
     info "supervisor unavailable at startup (non-fatal) — handoffs will retry"
 fi
 
+# Session budget startup (#409) runs after the kill switch and after
+# loop-state init, and before any runner. --dry-run / --print-prompt stay
+# inert: they do not create, resume, or reset an allowance.
+if [[ "$PRINT" -eq 0 && "$DRY" -eq 0 ]]; then
+  _sb_rc=0
+  sb_startup_gate || _sb_rc=$?
+  if [[ "$_sb_rc" -eq 2 ]]; then
+    exit 0
+  fi
+  if [[ "$_sb_rc" -ne 0 ]]; then
+    exit 1
+  fi
+fi
+
 while true; do
   stop_if_halted
 
@@ -2704,6 +2834,20 @@ while true; do
           die "error budget exhausted — state-corrupt recovery could not stabilize (docs/11, issue #75)"
         fi
       else
+        # Reserve the start only once a runner is about to be invoked.
+        # Exhaustion here is an iteration boundary: do not start the runner,
+        # and do not signal one. Review-cap and snapshot failures above do
+        # not consume a start.
+        _sb_rc=0
+        sb_reserve_start || _sb_rc=$?
+        if [[ "$_sb_rc" -eq 2 ]]; then
+          rm -f "$PROMPT_FILE"
+          exit 0
+        fi
+        if [[ "$_sb_rc" -ne 0 ]]; then
+          rm -f "$PROMPT_FILE"
+          exit 1
+        fi
         iteration_start=$(strict_utc_now)
         prepare_repo_boundary_guard
         set +e
@@ -2716,6 +2860,11 @@ while true; do
         set -e
         clear_repo_boundary_guard
         rm -f "$PROMPT_FILE"
+        # The runner has returned (including runner-timeout). Count the start
+        # completed. A kill of loop.sh before this line leaves the start
+        # consumed and not completed. Session budget does not itself signal
+        # the runner; per-iteration kills stay inside run_with_wall_timeout.
+        sb_mark_completed || exit 1
 
         # Cost wall time (#74): measure immediately after the runner; the
         # ledger append itself waits until post-run validation so issue/pr
@@ -2918,6 +3067,20 @@ while true; do
   heartbeat
   iter=$((iter + 1))
 
+  # Session budget boundary after the iteration has finished classifying,
+  # including a --once iteration. Halt, state-corrupt, error-budget, and
+  # stale-budget die above and never reach here, so those existing stops
+  # keep their own exit and diagnosis.
+  if [[ "$PRINT" -eq 0 && "$DRY" -eq 0 && -f "$(sb_allowance_path)" ]]; then
+    _sb_rc=0
+    sb_boundary_check || _sb_rc=$?
+    if [[ "$_sb_rc" -eq 2 ]]; then
+      exit 0
+    fi
+    if [[ "$_sb_rc" -ne 0 ]]; then
+      exit 1
+    fi
+  fi
   if [[ "$ONCE" -eq 1 ]]; then
     info " --once done"
     exit 0

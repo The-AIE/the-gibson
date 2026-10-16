@@ -60,6 +60,18 @@ if ! declare -F run_with_wall_timeout >/dev/null 2>&1; then
   echo "loop-fleet.sh: lib/wall-timeout.sh did not define run_with_wall_timeout" >&2
   exit 2
 fi
+# Session-budget receipt rollup (#409). Same directory as wall-timeout.sh.
+SESSION_BUDGET_LIB="${WALL_TIMEOUT_LIB%/wall-timeout.sh}/session-budget.sh"
+if [[ ! -f "$SESSION_BUDGET_LIB" ]]; then
+  echo "loop-fleet.sh: missing lib/session-budget.sh (looked in $SESSION_BUDGET_LIB)" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090,SC1091
+source "$SESSION_BUDGET_LIB"
+if ! declare -F sb_format_rollup >/dev/null 2>&1; then
+  echo "loop-fleet.sh: lib/session-budget.sh did not define sb_format_rollup" >&2
+  exit 2
+fi
 
 # --- globals (filled by profile load / env) ---------------------------------
 PROFILE_PATH=""
@@ -169,7 +181,8 @@ OPTIONS
   --profile PATH   absolute path to a fleet profile (or set FLEET_PROFILE)
   --start          preflight + create/reuse lane bases + launch (default)
   --halt           write gibson/HALT into every lane (graceful stop)
-  --status         show profile identity and per-lane pid/hat/health/runner
+  --status         show profile identity, per-lane pid/hat/health/runner,
+                   and one session-budget receipt line per lane
   --help           this help
 
 ENV (optional overrides after profile load)
@@ -2856,6 +2869,23 @@ do_status() {
       "${req:-—}" "${act:-—}" "${rhealth:-—}/${rreason:-—}" "${last:-—}"
     i=$((i + 1))
   done
+  # Per-lane session receipt (#409). Missing and unreadable stay distinct.
+  # A lane with no journal has not stopped on a session budget yet.
+  echo
+  i=0
+  while [[ $i -lt ${#LANE_IDS[@]} ]]; do
+    id="${LANE_IDS[$i]}"
+    journal="$(lane_dir "$id")/gibson/journal.md"
+    if [[ -L "$journal" ]]; then
+      printf 'session-budget lane=%s receipt=unreadable\n' "$id"
+    elif [[ -f "$journal" ]]; then
+      sb_format_rollup "$journal" "$id" \
+        || printf 'session-budget lane=%s receipt=unreadable\n' "$id"
+    else
+      printf 'session-budget lane=%s receipt=none\n' "$id"
+    fi
+    i=$((i + 1))
+  done
   if [[ $dead -eq 1 ]]; then
     echo
     echo "One or more lanes are down. '$DRIVER_SELF --profile $PROFILE_PATH --start' is idempotent —"
@@ -3160,6 +3190,7 @@ do_start() {
       env \
         REVIEWER_CMD="$REVIEWER_CMD" \
         RELEASE_CMD="$RELEASE_CMD" \
+        GIBSON_LANE_ID="$id" \
         GIBSON_COST_LEDGER="$sel_ledger" \
         GIBSON_COST_POOL="$sel_pool" \
         GIBSON_COST_JOIN_KEY="$sel_join" \
@@ -3179,6 +3210,7 @@ do_start() {
       nohup env \
         REVIEWER_CMD="$REVIEWER_CMD" \
         RELEASE_CMD="$RELEASE_CMD" \
+        GIBSON_LANE_ID="$id" \
         GIBSON_COST_LEDGER="$sel_ledger" \
         GIBSON_COST_POOL="$sel_pool" \
         GIBSON_COST_JOIN_KEY="$sel_join" \
