@@ -39,18 +39,25 @@ WHAT IT DOES
     3. Required checks. Distinguishes a product red (a step failed) from GitHub
        Actions infrastructure (startup_failure / no steps / no runner), which
        re-runs identically and is usually concurrent across open PRs. That
-       split is not the Tier C success gate: Tier C allow-lists an explicit
-       success and re-reads the check snapshot for the head SHA.
+       split is not the Tier C success gate.
     4. Tier. tier-c never gets an admin path. The G12 floor (D-015) is E3
        (cross-vendor, exact-head) plus every required context an explicit
-       success at that head — check-run conclusion SUCCESS, or status state
-       success. NEUTRAL, SKIPPED, STALE, ACTION_REQUIRED, a missing token,
+       success at that head. The required list is read live from the base
+       branch's classic protection and rulesets (union; app_id kept). An
+       unreadable or empty list fails closed — a Tier C repo with no required
+       checks is not mergeable by this floor. Each required context needs
+       exactly one matching check-run (name, and app id when the requirement
+       sets one) or commit status at this head whose token is success. A
+       context that did not run is missing, named in the blocker. An unrelated
+       success does not cover it. NEUTRAL, SKIPPED, STALE, ACTION_REQUIRED,
        and any unknown token are not met. The evaluator's returned headSha
        must equal this head, and the check snapshot is read for that SHA
-       after the evaluator returns. Otherwise BLOCKED. Admin/force merge
-       stays forbidden. Review-evidence fixtures are test-harness only
-       (--test-fixture). An inherited GIBSON_REVIEW_EVIDENCE_FIXTURE on any
-       other run is a blocker, never a silent ignore.
+       after the evaluator returns. The last step before READY re-reads the
+       PR head; if it moved, the verdict is BLOCKED ("head moved during
+       preflight"). Admin/force merge stays forbidden. Review-evidence
+       fixtures are test-harness only (--test-fixture). An inherited
+       GIBSON_REVIEW_EVIDENCE_FIXTURE on any other run is a blocker, never a
+       silent ignore.
 
   Read-only. It never merges, never comments, never edits.
 
@@ -171,7 +178,7 @@ elif [[ -n "$TEST_FIXTURE_DIR" && -z "${GIBSON_REVIEW_EVIDENCE_FIXTURE:-}" ]]; t
 fi
 
 PR_JSON=$(gh pr view "$PR" --repo "$REPO" \
-  --json number,title,body,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments,headRefOid 2>/dev/null) ||
+  --json number,title,body,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments,headRefOid,baseRefName 2>/dev/null) ||
   die "could not read $REPO#$PR"
 
 command -v jq >/dev/null || die "jq is required"
@@ -553,11 +560,16 @@ fi
 # (every check-run conclusion and every status state is the success token).
 # The two answers are independent: a success token on the wrong SHA is bound=0
 # green=1, so a head move cannot be laundered into "not green" or ignored.
+# all(met) is true for an empty array. That is not "every required context
+# ran": the live protection+ruleset list below is the authority, and an empty
+# snapshot stays green=1 so a missing context is its own named blocker.
 tier_c_read_checks() {
   local runs_json="" status_json="" parsed="" head=""
   head=$(printf '%s' "$HEAD_OID" | tr '[:upper:]' '[:lower:]')
   runs_json=$(gh api "repos/${REPO}/commits/${HEAD_OID}/check-runs?per_page=100" 2>/dev/null) || runs_json=""
   status_json=$(gh api "repos/${REPO}/commits/${HEAD_OID}/status" 2>/dev/null) || status_json=""
+  CHECK_RUNS_JSON=${runs_json:-null}
+  CHECK_STATUS_JSON=${status_json:-null}
   CHECK_BOUND=0
   CHECK_GREEN=0
   parsed=$(jq -nr --arg head "$head" --argjson runs "${runs_json:-null}" --argjson status "${status_json:-null}" '
@@ -589,6 +601,139 @@ tier_c_read_checks() {
     "0 1") CHECK_BOUND=0; CHECK_GREEN=1 ;;
     *) CHECK_BOUND=0; CHECK_GREEN=0 ;;
   esac
+}
+
+# Live required-context list for the PR base. Union of classic branch
+# protection (checks[].app_id, else contexts[]) and rulesets
+# (required_status_checks[].integration_id kept as app_id). Either side
+# unreadable, or a readable union that is empty, fails closed: a Tier C
+# repo with no required checks is not mergeable by this floor.
+# Sets REQUIRED_STATE to ok|empty|unreadable and REQUIRED_JSON to the union.
+tier_c_load_required() {
+  local base="" base_enc="" prot="" rules="" parsed="" state=""
+  REQUIRED_STATE=unreadable
+  REQUIRED_JSON='[]'
+  base=$(jqr '.baseRefName // ""')
+  if [[ ! "$base" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    return
+  fi
+  base_enc=${base//\//%2F}
+  prot=$(gh api "repos/${REPO}/branches/${base_enc}/protection/required_status_checks" 2>/dev/null) || prot=""
+  rules=$(gh api "repos/${REPO}/rules/branches/${base_enc}" 2>/dev/null) || rules=""
+  if [[ -z "$prot" || -z "$rules" ]]; then
+    return
+  fi
+  parsed=$(jq -nc --argjson prot "$prot" --argjson rules "$rules" '
+    def norm_app:
+      if . == null then null
+      elif type == "number" then .
+      elif type == "string" and test("^[0-9]+$") then tonumber
+      else "__bad__" end;
+    def as_req:
+      ((.app_id // null) | norm_app) as $app
+      | if (.context | type) != "string" or .context == "" or $app == "__bad__" then {bad: true}
+        else {context: .context, app_id: $app, bad: false} end;
+    def prot_list:
+      if ($prot | type) != "object" then null
+      elif (($prot | has("checks")) and (($prot.checks | type) != "array")) then null
+      elif (($prot | has("contexts")) and (($prot.contexts | type) != "array")) then null
+      elif ((($prot | has("checks")) | not) and (($prot | has("contexts")) | not)) then null
+      else
+        (
+          (if ($prot | has("checks")) then [$prot.checks[] | as_req] else [] end)
+          + (if ($prot | has("contexts")) then
+              [ $prot.contexts[]
+                | if type == "string" then {context: ., app_id: null} | as_req
+                  else {bad: true} end ]
+            else [] end)
+        )
+      end;
+    def rules_list:
+      if ($rules | type) != "array" then null
+      else
+        [ $rules[]
+          | if (.type | type) != "string" then {bad: true}
+            elif .type != "required_status_checks" then empty
+            elif (.parameters | type) != "object"
+              or ((.parameters | has("required_status_checks")) | not)
+              or (.parameters.required_status_checks | type) != "array"
+            then {bad: true}
+            else
+              .parameters.required_status_checks[]
+              | {
+                  context: .context,
+                  app_id: (if has("integration_id") then .integration_id
+                           elif has("app_id") then .app_id
+                           else null end)
+                }
+              | as_req
+            end
+        ]
+      end;
+    if prot_list == null or rules_list == null then {state: "unreadable", checks: []}
+    else
+      (prot_list + rules_list) as $all
+      | if any($all[]; .bad == true) then {state: "unreadable", checks: []}
+        else
+          [$all[] | select(.bad != true) | {context, app_id}]
+          | unique_by([.context, (.app_id | tostring)])
+          | if length == 0 then {state: "empty", checks: []}
+            else {state: "ok", checks: .} end
+        end
+    end
+  ' 2>/dev/null) || parsed=""
+  state=$(printf '%s' "$parsed" | jq -r '.state // empty' 2>/dev/null) || state=""
+  case "$state" in
+    ok)
+      REQUIRED_STATE=ok
+      REQUIRED_JSON=$(printf '%s' "$parsed" | jq -c '.checks' 2>/dev/null) || REQUIRED_STATE=unreadable
+      ;;
+    empty) REQUIRED_STATE=empty ;;
+    *) REQUIRED_STATE=unreadable ;;
+  esac
+}
+
+# For each required {context, app_id}, count matching check-runs and statuses
+# on the snapshot already read for HEAD_OID. app_id null matches a check-run
+# of that name (any app) or a status of that context. A set app_id matches
+# only a check-run whose app id equals it — a status cannot satisfy it, and
+# a same-named run from another app does not count. Exactly one match is
+# required; zero is missing, more than one is ambiguous. Success of that
+# match is CHECK_GREEN (def met), not this count.
+tier_c_match_required() {
+  local report=""
+  MATCH_REPORT='{"missing":[],"ambiguous":[]}'
+  report=$(jq -nc --argjson req "$REQUIRED_JSON" --argjson runs "${CHECK_RUNS_JSON:-null}" --argjson status "${CHECK_STATUS_JSON:-null}" '
+    def runs:
+      if ($runs | type) == "object" and ($runs.check_runs | type) == "array" then $runs.check_runs
+      else [] end;
+    def stats:
+      if ($status | type) == "object" and ($status.statuses | type) == "array" then $status.statuses
+      else [] end;
+    def shown:
+      if .app_id == null then .context
+      else "\(.context) (app_id \(.app_id))" end;
+    def nmatches:
+      . as $req
+      | ([ runs[] | select(
+            .name == $req.context
+            and ($req.app_id == null or ((.app.id // .app_id) == $req.app_id))
+          ) ] | length) as $rc
+      | ([ stats[] | select(
+            $req.app_id == null and .context == $req.context
+          ) ] | length) as $sc
+      | ($rc + $sc);
+    if ($req | type) != "array" then error("required list")
+    else
+      [ $req[] | . as $r | {shown: ($r | shown), n: ($r | nmatches)} ]
+      | {missing: [.[] | select(.n == 0) | .shown], ambiguous: [.[] | select(.n > 1) | .shown]}
+    end
+  ' 2>/dev/null) || report=""
+  if [[ -z "$report" ]]; then
+    REQUIRED_STATE=unreadable
+    return
+  fi
+  MATCH_REPORT=$report
 }
 
 # --- 3. required checks, product red vs GHA infra (L-033) ----------------
@@ -634,8 +779,11 @@ fi
 # D-015 G12 floor: a Tier C head is mergeable only when (a) an E3 cross-vendor
 # review verdict is bound to the exact head — the caller compares the
 # evaluator's returned headSha to HEAD_OID, it does not trust the request —
-# and (b) every required context is an explicit success on a snapshot read
-# for that same SHA after the evaluator returns. Evidence comes from
+# and (b) every context required by the base branch's protection and rulesets
+# has exactly one matching success on a snapshot read for that same SHA after
+# the evaluator returns. The required list is the live union (app_id kept).
+# Unreadable or empty fails closed. A context that did not run is named.
+# An unrelated success does not count. Evidence comes from
 # scripts/pr-review-evidence.mjs — reuse, do not reimplement. Unreadable
 # evidence, a missing or mismatched headSha, a check payload for another
 # SHA, or any non-success token fails closed. Admin/force merge stays forbidden.
@@ -702,6 +850,26 @@ if [[ "$TIER" == "tier-c" ]]; then
     if [[ "$CHECK_GREEN" -ne 1 ]]; then
       _floor_parts+=("required checks not green")
     fi
+    tier_c_load_required
+    if [[ "$REQUIRED_STATE" == "unreadable" ]]; then
+      _floor_parts+=("required check list unreadable")
+    elif [[ "$REQUIRED_STATE" == "empty" ]]; then
+      _floor_parts+=("required check list empty")
+    else
+      tier_c_match_required
+      if [[ "$REQUIRED_STATE" == "unreadable" ]]; then
+        _floor_parts+=("required check list unreadable")
+      else
+        while IFS= read -r ctx; do
+          [[ -z "$ctx" ]] && continue
+          _floor_parts+=("required context missing: $ctx")
+        done < <(printf '%s' "$MATCH_REPORT" | jq -r '.missing[]?')
+        while IFS= read -r ctx; do
+          [[ -z "$ctx" ]] && continue
+          _floor_parts+=("required context not exactly one: $ctx")
+        done < <(printf '%s' "$MATCH_REPORT" | jq -r '.ambiguous[]?')
+      fi
+    fi
   fi
   if [[ ${#_floor_parts[@]} -gt 0 ]]; then
     _floor_msg=""
@@ -733,6 +901,19 @@ elif [[ ${#ADMIN_REASONS[@]} -gt 0 ]]; then
 else
   VERDICT=READY
   CODE=0
+fi
+
+# Last step before READY. HEAD_OID was frozen at the first PR read; a push
+# after the evaluator returns must not inherit that evidence.
+if [[ "$VERDICT" == "READY" ]]; then
+  _head_now=$(gh pr view "$PR" --repo "$REPO" --json headRefOid 2>/dev/null) || _head_now=""
+  _head_now=$(printf '%s' "$_head_now" | jq -r 'if (.headRefOid | type) == "string" then (.headRefOid | ascii_downcase) else "" end' 2>/dev/null) || _head_now=""
+  _head_was=$(printf '%s' "$HEAD_OID" | tr '[:upper:]' '[:lower:]')
+  if [[ "$_head_now" != "$_head_was" ]]; then
+    BLOCKERS+=("head moved during preflight")
+    VERDICT=BLOCKED
+    CODE=1
+  fi
 fi
 
 if [[ "$JSON" -eq 1 ]]; then
