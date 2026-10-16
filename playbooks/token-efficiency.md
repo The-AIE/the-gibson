@@ -263,7 +263,9 @@ attempt at grade N
 | Error budget | `loop.sh --error-budget 5` | Consecutive failures before stop |
 | Stale / no-progress | `loop.sh --stale-budget N` (default = error budget) | Exit 0 with no substantive state progress (L-008) |
 | Escalate after | `loop.sh --escalate-after N` + `second-opinion.sh` | Cross-vendor read-only opinion **before** budget exhausts |
-| Max iterations | `loop.sh --max-iterations N` | Hard cap for unattended runs |
+| Max iterations | `loop.sh --max-iterations N` (default 50; `0` opts out) | Hard cap for unattended runs. Checked at iteration boundaries |
+| Session wall | `loop.sh --max-wall-min N` (default 480; `0` opts out) | Wall-clock cap. Does not kill the in-flight runner |
+| Session cost | `loop.sh --max-cost-usd N` (default 20; `0` opts out) | Stops on measured `cost_usd` only. No data is "not measured", not $0 |
 | Resolve rounds | docs/11: ~3 REQUEST_CHANGES cycles | Then park PR + handoff note |
 
 **Protection against paying for identical failures:** do not re-dispatch the same

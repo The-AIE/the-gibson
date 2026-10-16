@@ -183,6 +183,92 @@ compare against a stale baseline.
   the `updated:` clock is no-progress — exit-code budgets alone cannot see it.
   Sensor: `scripts/silent-noop.sh` (`silent_noop_progressed`), wired into
   `scripts/loop.sh`.
+- **Session budget (issue #409 / L-003):** a loop that never fails still stops.
+  Defaults are **50 iterations**, **480 minutes** of wall clock, and **USD 20**
+  of measured ledger cost (`--max-iterations`, `--max-wall-min`,
+  `--max-cost-usd`, or `GIBSON_MAX_ITERATIONS` / `GIBSON_MAX_WALL_MIN` /
+  `GIBSON_MAX_COST_USD`). A flag wins over the env var. `0` on one dimension,
+  or `--unbounded` for all three, is an explicit opt-out and is journaled.
+  If that line cannot be written, the launch is refused and that launch
+  removes the allowance it created. Removal happens after the engine lock
+  is released. A second launch can resume the file in that gap; see the
+  stated limits below.
+  Invalid values use the same positive-safe-integer rule as `--stale-budget`
+  (no leading zeros, no fractions); `0` is the only extra accepted value.
+  Checks run only at iteration boundaries. The session budget never kills a
+  runner. Per-iteration kills stay with `--runner-timeout`. Wall time can
+  therefore overshoot the cap by the remainder of the last iteration.
+  When several caps are exhausted at the same boundary, the diagnosis is
+  `budget: iterations`, then `budget: wall`, then `budget: cost`. Halt,
+  state-corrupt, error-budget, and stale-budget still exit through their own
+  paths first.
+  Cost is an exact sum of JSON-string `cost_usd` values on `gibson.cost.v1`
+  ledger lines whose `session_id` is this allowance. Tokens, ACUs, and
+  `flat_rate` are never converted into dollars. No matching `cost_usd` means
+  the receipt says `cost: not measured` (not $0), and that session does not
+  stop on the cost cap. Iterations and wall clock still bound it.
+  `scripts/cost-ledger.sh` writes no `cost_usd`, no `session_id`, and no
+  session-complete marker, so any matching `cost_usd` stays
+  `cost: partial <amount>` and the receipt says "not every iteration measured".
+  One `cost_usd` line does not establish complete session spend, and neither
+  does a line on every completed iteration. `cost_status: complete` is not
+  emitted. A partial sum that reaches the cap does stop.
+  The allowance is `gibson/session-budget.json` (session id, lane, repo, start
+  time, limits, consumed starts, completed iterations, and the loop pid while
+  a start is reserved). Ordinary relaunch
+  resumes it. Only `--reset-session-budget` creates a fresh one, and that is
+  journaled under the allowance lock before the allowance or the latch is
+  deleted. A crash after that line and before either delete leaves the old
+  allowance; the journal line is not proof the files are gone. If that line
+  cannot be written, or the latch is a symlink or not a regular file, the
+  allowance is left unchanged and the launch is refused.
+  Reset is refused while the recorded loop pid is still alive. An interrupted
+  start with no pid, or a pid that is not alive, is discarded by that flag.
+  Ordinary relaunch still keeps that start consumed. A dangling latch is not
+  treated as a missing latch, and it does not start a runner. An unreadable-ledger
+  latch records the lane and the repo. A different lane does not clear it.
+  An interrupted start stays consumed. A different lane id or repo
+  slug refuses the launch rather than charging this allowance to someone else.
+  A stop writes one `gibson.session-budget.v1` receipt and the latch
+  (`gibson/session-budget-latch`) as one transaction under the allowance lock.
+  The latch is renamed into place first. Its receipt id comes from the session
+  id, the allowance id (the persisted session id), and the reason. The receipt
+  is appended to the journal only when a final `receipt_end:` line for that
+  id is absent. A fragment that contains the receipt id is not that line. A
+  later launch that finds the latch without the end line publishes the stored
+  snapshot once and still stops. A latched stop for a different lane or repo
+  is refused and does not publish.
+  `iterations_completed` is the count at the stop. `in_flight: 1` means a
+  consumed start had not completed, so the count is not a final total. A
+  launchd KeepAlive relaunch that observes the latch does not start another
+  runner or append another receipt. Two launches that both enter during the
+  lock race in the stated limits below can still publish two receipts. The
+  latch does not unload the job. `loop-fleet.sh --status` prints
+  one rollup line per lane. A missing journal is `receipt=none`. A symlink or
+  other non-regular journal is `receipt=unreadable`.
+  PRs merged are counted only when a ledger line for this session carries
+  boolean `merged` and an integer `pr`. The #74 append path does not write
+  those fields, so a normal receipt says `prs_merged: not measured`.
+  `--dry-run` and `--print-prompt` do not create or reset an allowance.
+  The allowance file is writable by the same user and by the runner. It is
+  not a security boundary. The smallest wall cap is one minute.
+  A recycled pid can look alive until that other process exits, so reset
+  can refuse for a pid that is no longer this loop.
+  Stated limits from the 2026-10-16 pre-push read (The-AIE/the-gibson#499;
+  not closed here; an honest gap, not a stronger guard):
+  The allowance lock is a directory plus a pid file. Two launches that
+  overlap after `session-budget.lock` exists and before its pid file is
+  durable can both enter. Allowance updates can overwrite each other, and
+  two stop receipts can be published.
+  An opt-out (`--unbounded` or a zero dimension) whose journal line cannot
+  be written removes the allowance after the engine releases the lock. A
+  second launch that resumed that allowance in the gap loses the file.
+  The next boundary then has no allowance, and a later reserve can create
+  a fresh session, so earlier consumed starts are not on the new allowance.
+  `--reset-session-budget` appends the reset line, then deletes. If the
+  process is killed or the machine loses power before either delete, the
+  next ordinary launch resumes the old allowance even though the journal
+  says the reset completed.
 - **Kill switch:** checked at the top of every iteration (and before any
   supervisor handoff). Three layers, all read-only:
   1. **Local (always):** the `gibson/HALT` file, or `GIBSON_HALT=1` in the
