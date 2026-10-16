@@ -1,6 +1,6 @@
 ---
 name: gibson
-description: "Point The Gibson at any repo and run the full autonomous development loop — audit the repo, discover which AI runners/resources are available, set up GitHub guardrails, then drive continuous build/test/review/merge with cost-optimized routing (Grok for volume, Codex second, Claude for judgment, Devin as merge captain). The owner's recurring job is product direction in plain English; spend, credentials, and Tier-C merges always come back to them for explicit approval. Trigger on: 'gibson <repo>', 'run the gibson', 'point the gibson at', 'start autonomous development on', 'have the fleet build', or any ask to set up and run the agent-fleet SDLC loop against a repository."
+description: "Point The Gibson at any repo and run the full autonomous development loop — audit the repo, discover which AI runners/resources are available, set up GitHub guardrails, then drive continuous build/test/review/merge with cost-optimized routing (Grok for volume, Codex second, Claude for judgment, Devin as merge captain). The owner's recurring job is product direction in plain English; spend, credentials, and remaining human gates come back to them for explicit approval. Tier C merges on the G12 floor (E3 at the exact head + required checks, D-015). Trigger on: 'gibson <repo>', 'run the gibson', 'point the gibson at', 'start autonomous development on', 'have the fleet build', or any ask to set up and run the agent-fleet SDLC loop against a repository."
 ---
 
 # /gibson — the one-command fleet experience
@@ -36,7 +36,8 @@ target repo's canonical checkout — worktrees only (Law 3).
    routing table from step 2. Devin (cloud supervisor, `docs/22`) reviews
    finished branches and opens/owns PRs via the `handoff:` field in loop-state;
    it MERGES only in the explicit `--merge` handoff mode — which `loop.sh` does
-   not pass yet, so today a human clicks the merge (gibson-run has the detail).
+   not pass yet, so Devin is not the merger (gibson-run has the detail). That
+   gap is not an owner gate. Tier C still ends at the G12 floor.
 
 ## Cost routing (docs/15 — the standing order)
 
@@ -52,16 +53,18 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
 ## Rules that override everything
 
 - Law 5: no agent reviews or merges its own work. Cross-vendor whenever any
-  second vendor is alive; if truly none is, the ONLY permitted fallback is
-  docs/11's fresh-context adversarial pass (a different session, never the
-  authoring one) with Tier C still parking at the human gate — and the digest
-  must say that degraded mode was used. On the supervisor path this is
+  second vendor is alive. If truly none is, Tier A/B may use docs/11's
+  fresh-context adversarial pass (E2: a different session, never the authoring
+  one), and the digest must say that degraded mode was used. Tier C needs E3
+  (cross-vendor, exact head). In single-platform or no-second-vendor mode,
+  Tier C must BLOCK (fail closed) until an E3 reviewer exists. A same-vendor
+  fresh-context pass does not meet E3. On the supervisor path this is
   machine-enforced: `loop.sh` will not hand a branch to Devin without a completed
   distinct-vendor review of the exact SHA being handed off, and a missing, stale,
   or failed review blocks the handoff (the branch stays queued in loop-state).
 - Law 7: Tier C — money, auth, consent/PII, security boundaries, production
-  data — always ends at a human merge gate. Devin does not override the owner.
-- Owner interruptions: product direction and human gates (`AGENTS.md` G1–G16) only.
+  data — always ends at the **G12** floor (E3 at the exact head + required checks, D-015). Devin does not skip that floor.
+- Owner interruptions: product direction and owner human gates (`AGENTS.md` G1–G11, G13–G16) only. **G12** is the D-015 review floor.
   Batch everything else into the digest.
 - Kill switch: the `gibson/HALT` file is the permanent stop `loop.sh` checks
   every iteration, and `GIBSON_HALT=1` is checked unconditionally alongside it —

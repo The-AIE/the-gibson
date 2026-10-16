@@ -58,7 +58,7 @@ Design docs 01–15, operator guide, memory seeds, templates, specs. ✅
 - Adopt one production repo (candidate: chatterbuilt — small, Vercel, active)
 - Playwright ux-eval job vs. preview deployments; authz matrix + ZAP baseline
 - Solo loop overnight on Grok against its backlog, digest via Hermes
-- **Demo:** morning digest shows merged PRs Mark never touched + a queued Tier C gate.
+- **Demo:** morning digest shows merged PRs Mark never touched + Tier C blocked pending E3.
 
 ## Phase 4 — The ratchet runs itself
 - `retro.yml` weekly sweep + historian playbook; lessons → harness PRs measured

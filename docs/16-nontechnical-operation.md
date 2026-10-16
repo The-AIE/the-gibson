@@ -82,7 +82,7 @@ Autonomy is *higher* (fewer interruptions), and the irreversibility budget is
 *lower*:
 
 - Spending gate (G5) threshold: **$0** — every dollar is a card.
-- Tier C merges: always carded, never batched.
+- Tier C merges are not carded. They need the **G12** floor (E3 at the exact head + required checks, D-015). In single-platform or no-second-vendor mode, Tier C must BLOCK (fail closed) until an E3 reviewer exists. A human gate is not an option for Tier C.
 - Anything G1–G4 (destructive class): carded **and** requires the Engineer tier
   if one is configured; otherwise the fleet's answer is "no" by default.
 - Production launches ship behind a preview link first: "Look at this link on

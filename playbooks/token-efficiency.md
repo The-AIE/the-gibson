@@ -217,7 +217,7 @@ does not, leave cost unknown.
 | Builder (Tier B) | S | Subscription (skilled) or flat-rate if clearing the bar | Two same-criterion fails after enrich; framework subtlety |
 | Builder / review (Tier C) | S build / **F review** | Strongest available *different* vendor for review | F fails twice → park (not more models) |
 | Test-engineer | G–S | Flat-rate first | Flaky contract design needs S |
-| Reviewer | S (B) / F (C) | Other vendor than author | Author and only-available reviewer same vendor → block or human gate |
+| Reviewer | S (B) / F (C) | Other vendor than author | Author and only-available reviewer same vendor → Tier C blocks pending E3 (a human gate is not an option). Other tiers: block or human gate. |
 | UX evaluator | S | Any that can drive Playwright | Sensor-blind visual judgment |
 | Security adversarial | F | Other vendor; never self | Missing reviewer CLI → fail closed (L-005) |
 | Release / delivery-control audit | G scripts + S judgment | Scripts first (`scripts/delivery-control/`, `gate.sh`) | Promote/harden always human-gated |
@@ -540,7 +540,7 @@ minimization, not efficiency.
 
 1. Implement on S (or G if sensors are strong) in a dedicated worktree.
 2. Review and security adversarial on **F from another vendor**.
-3. Human merge gate (docs/14 / Tier C). Metered or capped subscription spend here
+3. **G12** floor (docs/14 / Tier C, D-015): E3 at the exact head + required checks. Metered or capped subscription spend here
    is expected; grinding auth on G-only with no F review is not.
 
 ---

@@ -46,9 +46,12 @@ for free.
    (e.g. conference-os's risk classifier — lives in that repo, not this one)
    and contribute the generalized version back via PR (see rule below).
 4. **Review-evidence gate** — PRs need independent review evidence before
-   merge; owner attestation path for humans; trusted-provider list for bots
-   (Devin's App belongs here IF the owner approves — that file is a security
-   boundary, adding to it is always an explicit owner decision, never implied).
+   merge. The `owner-attested-review:v1` marker is an optional identity record
+   for a reviewer without an App identity: it records that non-App reviewer's
+   verdict. Owner attestation is never required (D-014). The marker is never
+   an owner approval gate. Trusted-provider list for bots (Devin's App belongs
+   here IF the owner approves adding it — that file is a security boundary,
+   and adding to it is always an explicit owner decision, never implied).
    **No local template for this exists yet** — port it from a proven external
    implementation and contribute the generalized version back (rule below).
    Until installed, say plainly the repo has no machine-checked review gate.
@@ -70,8 +73,11 @@ for free.
    yes** (needs `DEVIN_API_KEY`; set `DEVIN_MAX_ACU` as the cap). Optional
    webhook wake per `adapters/devin/README.md`. Devin = merge captain: reviews
    finished branches and owns PRs; it merges only in the explicit `--merge`
-   handoff mode (docs/22) — the default leaves every merge to a human. Tier C
-   ends at the human gate in every mode (Law 7).
+   handoff mode (docs/22). `loop.sh` does not pass `--merge` yet, so Devin is
+   not the merger. That gap is not an owner gate. Tier C ends at the **G12**
+   floor (E3 at the exact head + required checks) in every mode (Law 7). In
+   single-platform or no-second-vendor mode, Tier C must BLOCK (fail closed)
+   until an E3 reviewer exists.
 
 ## Rules
 
@@ -80,7 +86,7 @@ for free.
 - **Right-sized, never under-gated**: install the lean baseline everywhere; add
   the heavy machinery where the audit found risk surfaces. But Law 7 is not
   profile-dependent — if ANY money/auth/consent/PII/security/prod-data surface
-  exists, its human merge gate gets wired regardless of chosen profile. A
+  exists, its **G12** floor (E3 at the exact head + required checks) gets wired regardless of chosen profile. A
   static brochure site with a contact form still has a PII surface.
 - Every owner-credential step (branch protection, App installs, API keys) is an
   Ask Contract item — batched, never a drip.

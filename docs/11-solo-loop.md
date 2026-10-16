@@ -33,6 +33,10 @@ Two findings from Anthropic's long-running harness work carry the whole design:
    homework" separation: the evaluator hat has no memory of writing the code, only
    the contract and the deployment. Where a second platform is reachable
    (`REVIEWER_CMD`), Tier B/C review still goes cross-vendor even in solo mode.
+   Tier A/B may use the E2 fresh-context pass when no second platform exists.
+   Tier C needs E3 (cross-vendor, exact head). In single-platform or
+   no-second-vendor mode, Tier C must BLOCK (fail closed) until an E3
+   reviewer exists.
 
 ## The loop
 
@@ -45,18 +49,20 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 │   ── context reset ──
 │   5. TEST      contract criteria → executable checks            [test-engineer hat]
 │   ── context reset ──
-│   6. REVIEW    lens review of the PR; Tier C → cross-vendor if  [reviewer hat]
-│                REVIEWER_CMD is set, else adversarial self-pass
-│                + flag for human merge gate
+│   6. REVIEW    lens review. Tier A/B: cross-vendor if           [reviewer hat]
+│                REVIEWER_CMD is set, else E2 fresh-context pass.
+│                Tier C needs E3 (cross-vendor, exact head). In
+│                single-platform or no-second-vendor mode, Tier C
+│                must BLOCK (fail closed) until an E3 reviewer exists.
 │   ── context reset ──
 │   7. UX-EVAL   Playwright vs. the PR's preview deployment       [ux-evaluator hat]
 │   8. SECURITY  CI layers run on the PR automatically; read      [security hat]
 │                results; adversarial pass on Tier B/C
 │   9. RESOLVE   REQUEST_CHANGES? → back to 4 (bounded: 3 rounds, [builder hat]
 │                then park the PR + write a handoff note)
-│  10. MERGE     if gates green and NOT human-gated → merge,      [release hat]
-│                verify deploy, smoke, cleanup. Human-gated →
-│                queue it for Mark, move on.
+│  10. MERGE     if gates green and G12 floor met: merge when     [release hat]
+│                not otherwise human-gated. Other human gates →
+│                queue for Mark, move on.
 │  11. RETRO     any lesson? file it; harness fix if small        [historian hat]
 │  12. JOURNAL   append loop-state.md: what/why/next; report to MC
 └── 13. REPEAT   next issue. Stop only for: human gate on ALL remaining work,
@@ -245,9 +251,13 @@ compare against a stale baseline.
   paths suppress Devin supervisor handoffs
   ([doc 22](22-devin-cloud-supervisor.md)). Origin forms: `https://`,
   `git@host:`, or `ssh://git@host/...` on the configured `GH_HOST`.
-- **Human-gate queue:** Tier C merges and other stops accumulate in a digest
-  (Hermes pings Mark) instead of blocking the loop — the loop moves to the next
-  issue and circles back after approval.
+- **Human-gate queue:** Stops other than the Tier C review floor accumulate in
+  a digest (Hermes pings Mark) instead of blocking the loop — the loop moves
+  to the next issue and circles back after approval. Tier C is not in that
+  queue. Tier C needs E3 (cross-vendor, exact head). In single-platform or
+  no-second-vendor mode, Tier C must BLOCK (fail closed) until an E3 reviewer
+  exists. A human gate is not an option for Tier C. The blocked change waits;
+  other eligible work continues.
 - **Heartbeat:** every iteration reports to Mission Control; 15 minutes of silence
   = presumed dead, per fleet telemetry rules.
 
@@ -316,17 +326,19 @@ installed and no second vendor is available, run:
 
 | Concern | Multi-vendor (default) | Single-platform (`--solo-platform`) |
 |---|---|---|
-| Pre-handoff review | Distinct vendor CLI required | Same vendor, **different model** / fresh-context plan pass (`vendor:model`) |
-| Law 5 | Different vendor | Fresh context + alt model counts as present reviewer |
-| Escalation | `--reviewers codex,claude` | Same-vendor alt-model second opinion (no deadlock) |
-| Tier B | One independent APPROVE | Prefer **two** independent fresh-context APPROVE verdicts when available |
-| Tier C | Human gate (docs/14 G12) | **Unchanged** — still human-gated |
-| Missing review path | Fail closed (block handoff) | Fail closed only if the configured solo review path itself breaks |
+| Pre-handoff review (Tier A/B, E2) | Distinct vendor CLI required | Same vendor, **different model** / fresh-context plan pass (`vendor:model`). Does not cover Tier C. |
+| Law 5 (Tier A/B, E2) | Different vendor | Fresh context + alt model counts as the present reviewer for Tier A/B only |
+| Escalation (Tier A/B) | `--reviewers codex,claude` | Same-vendor alt-model second opinion (no deadlock) for Tier A/B |
+| Tier B | One independent APPROVE | Prefer **two** independent fresh-context APPROVE verdicts when available (E2) |
+| Tier C | **G12** floor: E3 (cross-vendor, exact head) + required checks | In single-platform or no-second-vendor mode, Tier C must BLOCK (fail closed) until an E3 reviewer exists. A same-vendor alternate model does not satisfy E3. |
+| Missing review path | Fail closed (block handoff) | Tier A/B: fail closed only if the configured solo review path itself breaks. Tier C: always fail closed until an E3 reviewer exists. |
+
+Tier A/B rules (E2) are unchanged in single-platform mode. Tier C does not inherit them.
 
 Default `--reviewers` under `--solo-platform` becomes `<runner>:review` (e.g.
 `grok:review`, `claude:sonnet`) when the operator does not pass `--reviewers`.
 
-This is a **documented degraded mode**, not a silent skip. Pair with a dedicated
-reviewer GitHub identity (#67) so branch protection remains satisfiable under
-L-015/L-021.
+For Tier A/B this is a **documented degraded mode**, not a silent skip. It does
+not clear Tier C. Pair with a dedicated reviewer GitHub identity (#67) so branch
+protection remains satisfiable under L-015/L-021 for the tiers that mode can review.
 

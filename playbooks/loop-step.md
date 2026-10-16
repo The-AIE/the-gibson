@@ -137,9 +137,13 @@ touch /path/to/target/gibson/HALT
 ### If `{{hat}}` = reviewer
 
 - Entry: green PR#.
-- Read-only multi-lens review. Prefer `REVIEWER_CMD` cross-vendor if set
-  (especially Tier B/C). Else adversarial self-pass **from files only** + flag
-  human merge gate for Tier C.
+- Read-only multi-lens review. Tier A/B: prefer `REVIEWER_CMD` cross-vendor
+  when set; if it is absent, an E2 adversarial self-pass **from files only**
+  (a different session, never the authoring one) is the fallback.
+- Tier C needs E3 (cross-vendor, exact head). In single-platform or
+  no-second-vendor mode, Tier C must BLOCK (fail closed) until an E3 reviewer
+  exists. A same-vendor or fresh-context pass does not meet E3. Do not
+  flag-and-continue.
 - Verdict APPROVE → next `ux-evaluator` (or `security` if no UI).
 - REQUEST_CHANGES → next `builder`, round += 1; if `round` has reached the
   per-tier cap in `config/review-round-caps.json` (default A=1 / B=2 / C=3) the
@@ -162,7 +166,9 @@ touch /path/to/target/gibson/HALT
 ### If `{{hat}}` = release
 
 - Entry: all gates green.
-- If human-gated (Tier C/schema): queue for Mark, set next issue triage, **do not
+- If Tier C/schema: the **G12** floor (E3 at the exact head + required checks)
+  must be met before merge; if either is missing, request the cross-vendor review
+  and set next issue triage. Other doc 14 human gates: queue for Mark, **do not
   merge**.
 - If `RELEASE_CMD` is set: shell out to it for the actual merge, passing the PR
   number and repo path — the runner that built and/or reviewed this PR must not
@@ -267,7 +273,7 @@ touch /path/to/target/gibson/HALT
 | Retries | per-tier cap (`config/review-round-caps.json`) → park + human |
 | Error budget | driver stops after N consecutive red gates (default 5) |
 | Kill switch | `gibson/HALT` file or `GIBSON_HALT=1` (both unconditional); the `gibson-halt` label is a soft cue, only when `gh` is available → exit cleanly |
-| Human gates | queue + move on; never auto-approve Tier C merge |
+| Human gates | queue + move on; never auto-approve. Tier C merge is not one of them: without E3 it blocks (G12 floor, D-015) |
 | Fresh context | do not ask for prior chat; re-read artifacts |
 
 ## Done means

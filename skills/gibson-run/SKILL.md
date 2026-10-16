@@ -44,7 +44,7 @@ skill's job is to invoke and SUPERVISE it — not to reimplement it.
   honestly: `loop.sh` currently invokes handoff WITHOUT `--merge`, so full
   auto-merge needs either that flag wired into the loop or a direct
   `devin-supervisor.sh handoff --merge` call. Don't tell the owner merges are
-  automated until that's true. Tier C parks at the human gate in every mode.
+  automated until that's true. Tier C waits on the **G12** floor (E3 at the exact head + required checks) in every mode.
 - No Devin wired? Drop the flag; the loop's own review path applies, and the
   digest tells the owner what wiring Devin would take.
 
@@ -58,8 +58,8 @@ Check in on a cadence (10–30 min): read `gibson/loop-state.md` + journal tail.
 - **Loop stopped** (error budget, HALT, or done) → diagnose from the journal;
   restart, reroute the failing lane to a different vendor, or report — never
   silently leave the fleet dead.
-- **Owner-gate items** (Tier C parks, product-direction questions from
-  builders) → batch into the digest; interrupt only per `docs/14`.
+- **Owner-gate items** (remaining doc 14 gates, product-direction questions from
+  builders) → batch into the digest; interrupt only per `docs/14`. **G12** is the D-015 review floor, not an owner park.
 
 ## The digest (the owner's entire view)
 
@@ -83,7 +83,9 @@ show raw diffs or expect the owner to read code — describe behavior changes.
   gap is the loop's ordinary per-hat path (no supervisor configured): a
   same-vendor self-pass there is still only caught by you, so keep checking the
   journal each cadence for reviewer-hat entries by the authoring vendor and
-  reroute.**
+  reroute.** A same-vendor self-pass does not meet E3. In single-platform or
+  no-second-vendor mode, Tier C must BLOCK (fail closed) until an E3 reviewer
+  exists.
 - Cost discipline (docs/15): if Grok saturates, overflow to Codex. Claude's
   pool buys judgment first and skilled feature work when the capability bar
   genuinely requires it — what it never buys is VOLUME work a flat-rate pool

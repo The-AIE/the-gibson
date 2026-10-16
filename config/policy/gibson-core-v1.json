@@ -43,14 +43,14 @@
         "id": "src.roles",
         "path": "docs/03-roles.md",
         "digestAlgorithm": "sha256",
-        "digest": "126c0f616e598d950366cbfadaca40d2aaa857bcfade56bc19e132fe32ffc8dc",
+        "digest": "0e0a9a67ea2df4cc9e3913088b58b8894720fdb00d02b640dcfc96ffa8a50955",
         "role": "explanatory-history"
       },
       {
         "id": "src.sdlc-pipeline",
         "path": "docs/02-sdlc-pipeline.md",
         "digestAlgorithm": "sha256",
-        "digest": "c876a38d895e4408a72cdef6aee4a8e9c2e233d7239df09cde6679c47a4a000a",
+        "digest": "07edfc28659f8ba18a7a91765d7b9c323fb37f8a1697027a6c5a09f8a6218fa0",
         "role": "explanatory-history"
       },
       {
