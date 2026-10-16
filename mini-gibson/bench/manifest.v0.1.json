@@ -2,16 +2,44 @@
   "schema_version": "gibson-bench/v0.1",
   "status": "DRAFT_DO_NOT_TUNE",
   "freeze_required_before_lora": true,
+  "bench_file": "bench.v0.1.json",
+  "bench_sha256": "7ba00bd45da1fc68e65d763e9ec778084dc4314d1607d557b1f6f2c7c38c79ae",
+  "train_cutoff": "2026-10-08T20:26:48-04:00",
   "splits": {
-    "development": [],
-    "temporal_gibson_holdout": [],
+    "development": [
+      "gibson-pr-293",
+      "gibson-pr-315",
+      "gibson-pr-316",
+      "gibson-pr-347",
+      "gibson-pr-367",
+      "gibson-pr-369",
+      "gibson-pr-386",
+      "gibson-pr-383",
+      "gibson-pr-438",
+      "gibson-pr-448",
+      "gibson-pr-454",
+      "gibson-pr-458"
+    ],
+    "temporal_gibson_holdout": [
+      "gibson-pr-398",
+      "gibson-pr-460",
+      "gibson-pr-461",
+      "gibson-pr-466",
+      "gibson-pr-477",
+      "gibson-pr-494"
+    ],
     "external_holdout": []
   },
+  "external_holdout_note": "EMPTY: needs fail-to-pass tasks from a repository the model and the harness history never touched.",
   "configurations": [
     "raw_nemotron",
     "nemotron_gibson_harness",
     "mini_gibson_historical_lora"
   ],
   "primary_metric": "task_resolution_rate",
+  "secondary_metrics": [
+    "false_done_rate",
+    "jev_agreement_with_tests"
+  ],
   "failure_taxonomy": "failure-taxonomy.json"
 }

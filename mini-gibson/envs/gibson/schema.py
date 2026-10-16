@@ -48,6 +48,8 @@ class Verification:
     unresolved_tool_errors: bool
     verifier_pass: bool
     reward_components: dict[str, float] = field(default_factory=dict)
+    # Extra structured evidence (for example semantic-gate probabilities). Not scored.
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     @property
     def reward(self) -> float:
