@@ -56,7 +56,11 @@ const MARKER_RE = /<!--\s*(review-evidence:v1|owner-review-attestation:v1|owner-
 const TRAILER_LINE = /^Agent-Vendor:[ \t]*[A-Za-z0-9_-]+[ \t]*$/i;
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CONFIG = join(SCRIPT_DIR, "..", "config", "review-evidence.v1.json");
-const HOST_PATH_RE = /\/Users\/|\/home\/|\/private\/var\/|[A-Za-z]:\\/;
+// Core is the check that remains if the full pattern assignment is removed.
+const HOST_PATH_CORE_RE = /\/Users\/|\/home\/|\/private\/var\/|[A-Za-z]:\\/;
+// macOS temps, volume and package prefixes, and tilde-home. A quoted JSON
+// value counts: the character after the path may be /, ", \, or end.
+const HOST_PATH_RE = /\/Users\/|\/home\/|\/private\/var\/|\/private\/tmp(?:\/|["\\]|$)|\/var\/folders(?:\/|["\\]|$)|\/tmp(?:\/|["\\]|$)|\/Volumes\/|\/opt\/homebrew(?:\/|["\\]|$)|\/usr\/local(?:\/|["\\]|$)|~\/|[A-Za-z]:\\/;
 
 /** Injected gh runner for tests. Production uses spawnSync("gh") unless GIBSON_DELIVERY_GH_FIXTURE is set. */
 let injectedGhRunner = null;
@@ -223,18 +227,28 @@ function unsafePath(p) {
 }
 
 function assertNoHostLeak(text) {
-  if (HOST_PATH_RE.test(text)) {
-    throw new Error("redaction:absolute-path");
-  }
+  let hit = HOST_PATH_CORE_RE.test(text);
+  hit = HOST_PATH_RE.test(text); // MUTATION_ANCHOR_HOST_PATH
+  if (hit) throw new Error("redaction:absolute-path");
 }
 
-const STAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+const INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
 
-/** UTC stamp with no fractional seconds. Null when the value is not that shape. */
+/**
+ * Milliseconds since the epoch for a UTC RFC3339 instant. Fractional seconds
+ * are kept (Date millisecond resolution). Anything else is null. Callers that
+ * cannot place a row fail closed to unknown rather than treating it as early.
+ */
+function instantMs(value) {
+  if (typeof value !== "string" || !INSTANT_RE.test(value)) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** Second-resolution UTC stamp for receipt fields. Null when the instant is not RFC3339. */
 function stamp(value) {
-  if (typeof value !== "string") return null;
-  const s = value.replace(/\.\d+Z$/, "Z");
-  return STAMP_RE.test(s) ? s : null;
+  if (instantMs(value) == null) return null;
+  return value.replace(/\.\d+Z$/, "Z");
 }
 
 export function allowlistPull(p) {
@@ -249,7 +263,7 @@ export function allowlistPull(p) {
     number: Number.isInteger(p?.number) ? p.number : null,
     state: typeof p?.state === "string" ? p.state : null,
     merged: p?.merged === true,
-    merged_at: stamp(p?.merged_at),
+    merged_at: typeof p?.merged_at === "string" && instantMs(p.merged_at) != null ? p.merged_at : null,
     merge_commit_sha: typeof p?.merge_commit_sha === "string" ? p.merge_commit_sha : null,
     commits: Number.isInteger(p?.commits) ? p.commits : null,
     head: { sha: typeof p?.head?.sha === "string" ? p.head.sha : null },
@@ -356,14 +370,14 @@ function tierOf(labels) {
 
 function appMatches(req, run) {
   // A commit status matches on context. When the requirement names an app id,
-  // an app id GitHub supplied on the status has to be that app. A creator with
-  // no app id does not prove the app, so it does not match. A status that
-  // supplies neither still matches on context: the combined-status payload
-  // often has no creator field.
+  // the status must carry that app id (explicit app.id, or the id in the
+  // avatar, already folded into run.appId). No app id is unknown provenance,
+  // whether or not a creator login is present, and it does not match. Only a
+  // requirement that names no app id matches on context alone.
   if (run?.kind === "status") {
     if (req.appId == null) return true;
     if (run.appId != null && run.appId !== req.appId) return false; // MUTATION_ANCHOR_STATUS_APP
-    if (run.appId == null && run.creatorLogin) return false;
+    if (run.appId == null) return false; // MUTATION_ANCHOR_STATUS_PROVENANCE
     return true;
   }
   if (req.appId != null && run.appId !== req.appId) return false; // MUTATION_ANCHOR_APP_ID
@@ -401,14 +415,61 @@ export function matchChecks(required, gates, headSha) {
 }
 
 function costVendor(ev) {
+  if (VENDORS.has(ev?.vendor) && ev.vendor !== "unknown") return ev.vendor;
   if (VENDORS.has(ev?.runner) && ev.runner !== "unknown") return ev.runner;
   if (VENDORS.has(ev?.provider) && ev.provider !== "unknown") return ev.provider;
   return "unknown";
 }
 
+function costNumber(v) {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+/** Receipt row. usdTotal is never summed. A missing amount stays null. */
+function costRow(ev) {
+  const model = typeof ev?.model === "string" && ev.model.length > 0 && ev.model.length <= 80 ? ev.model : null;
+  return {
+    ts: ev.ts,
+    vendor: costVendor(ev),
+    model,
+    usd: costNumber(ev?.usd),
+    tokensIn: costNumber(ev?.tokensIn),
+    tokensOut: costNumber(ev?.tokensOut),
+  };
+}
+
+function legacyCostEvent(ev) {
+  return !!ev && (
+    Object.hasOwn(ev, "schema")
+    || Object.hasOwn(ev, "join_key")
+    || Object.hasOwn(ev, "runner")
+    || Object.hasOwn(ev, "provider")
+  );
+}
+
+function sortCostRows(rows) {
+  rows.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.vendor < b.vendor ? -1 : a.vendor > b.vendor ? 1 : 0));
+  return { status: "joined", rows, usdTotal: null };
+}
+
+/** Allowlisted ledger rows: pr was resolved at collect. No join_key remains. */
+function joinSealedCost(events, prNumber) {
+  const rows = [];
+  for (const ev of events) {
+    if (!ev || typeof ev.ts !== "string") return { status: "unknown" };
+    if (ev.repo != null && safeRepo(ev.repo) !== ev.repo) return { status: "unknown" };
+    if (ev.pr != null && (!Number.isInteger(ev.pr) || ev.pr < 0)) return { status: "unknown" };
+    if (ev.pr !== prNumber) continue;
+    rows.push(costRow(ev));
+  }
+  if (rows.length === 0) return { status: "unknown" };
+  return sortCostRows(rows);
+}
+
 /** gibson.cost.v1 join: a conflicting join_key, or no unique PR match, is unknown. Never summed. */
 export function joinCost(events, prNumber) {
   if (!Array.isArray(events) || events.length === 0) return { status: "unknown" };
+  if (!events.some(legacyCostEvent)) return joinSealedCost(events, prNumber);
   const joinToPr = new Map();
   for (const ev of events) {
     if (!ev || ev.schema !== "gibson.cost.v1" || typeof ev.ts !== "string") return { status: "unknown" };
@@ -426,18 +487,10 @@ export function joinCost(events, prNumber) {
       resolved = joinToPr.get(ev.join_key);
     }
     if (resolved !== prNumber) continue;
-    rows.push({
-      ts: ev.ts,
-      vendor: costVendor(ev),
-      model: null,
-      usd: null,
-      tokensIn: null,
-      tokensOut: null,
-    });
+    rows.push(costRow(ev));
   }
   if (rows.length === 0) return { status: "unknown" };
-  rows.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.vendor < b.vendor ? -1 : a.vendor > b.vendor ? 1 : 0));
-  return { status: "joined", rows, usdTotal: null };
+  return sortCostRows(rows);
 }
 
 function actor(login, vendor) {
@@ -815,7 +868,8 @@ export function projectBundle(bundle) {
   }
   const builderLogin = builderLogins.size === 1 ? [...builderLogins][0] : "unknown";
   const state = typeof pull?.state === "string" ? pull.state : "";
-  const mergedAt = stamp(pull?.merged_at);
+  const mergedAtRaw = typeof pull?.merged_at === "string" ? pull.merged_at : null;
+  const mergedAtMs = instantMs(mergedAtRaw);
   const merged = state === "closed" && pull?.merged === true && mergeSha != null;
   let requiredChecks = normalizeRequired(inputs.requiredChecks);
   // An unreadable combined-status source is unknown. Check runs must not
@@ -827,12 +881,18 @@ export function projectBundle(bundle) {
   let gates = normalizeGates(inputs.checkRuns, head);
   let postMerge = [];
   const mode = gateMode(merged);
-  if (mode === "as-of" && mergedAt) {
-    const picked = asOfGates(inputs.checkRuns, inputs.statusHistory, head, mergedAt);
-    gates = picked.gates;
-    postMerge = picked.postMerge;
+  if (mode === "as-of" && mergedAtMs != null) {
+    const picked = asOfGates(inputs.checkRuns, inputs.statusHistory, head, mergedAtRaw);
+    if (picked.unknown) {
+      requiredChecks = { status: "unknown", entries: [] };
+      gates = [];
+      postMerge = [];
+    } else {
+      gates = picked.gates;
+      postMerge = picked.postMerge;
+    }
   }
-  if (mode === "as-of" && mergedAt == null) requiredChecks = { status: "unknown", entries: [] }; // MUTATION_ANCHOR_MERGED_AT
+  if (mode === "as-of" && mergedAtMs == null) requiredChecks = { status: "unknown", entries: [] }; // MUTATION_ANCHOR_MERGED_AT
   const cost = joinCost(inputs.costEvents, pr);
   const baseRef = safeRef(pull?.base?.ref);
   const defaultBranch = safeRef(inputs.repository?.defaultBranch);
@@ -936,7 +996,7 @@ function normalizeGates(runs, head) {
     if (sha !== head) continue;
     const appId = r?.appId == null ? null : normalizeAppId(r.appId);
     const appSlug = typeof r?.appSlug === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(r.appSlug) ? r.appSlug : null;
-    const completedAt = typeof r?.completedAt === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(r.completedAt) ? r.completedAt : null;
+    const completedAt = typeof r?.completedAt === "string" ? r.completedAt : null;
     const kind = r?.kind === "status" ? "status" : "check";
     let creatorLogin = null;
     if (r?.creatorLogin != null) {
@@ -964,25 +1024,38 @@ function gateMode(merged) {
   return "as-of";
 }
 
-function timeOf(row) {
+function rowClock(row) {
   if (!row) return null;
-  if (row.kind === "status") return stamp(row.createdAt);
-  return stamp(row.completedAt);
+  return row.kind === "status" ? row.createdAt : row.completedAt;
 }
 
+/**
+ * Split on the full instant. Equal to merged_at is pre-merge. A present clock
+ * that is not RFC3339 is unknown (the caller fails closed). A missing clock
+ * is skipped. The truncated compare is what remains if the millisecond
+ * assignment is removed: that is the fractional-second bug.
+ */
 function splitAtMerge(rows, mergedAt) {
+  const mergedMs = instantMs(mergedAt);
+  const mergedTrunc = stamp(mergedAt);
+  if (mergedMs == null || mergedTrunc == null) return { before: [], after: [], unknown: true };
   const before = [];
   const after = [];
   for (const row of rows) {
-    const at = timeOf(row);
-    if (at == null) continue;
-    if (at > mergedAt) { after.push(row); continue; } // MUTATION_ANCHOR_AS_OF_MERGE
+    const raw = rowClock(row);
+    if (raw == null) continue;
+    const atMs = instantMs(raw);
+    const atTrunc = stamp(raw);
+    if (atMs == null || atTrunc == null) return { before: [], after: [], unknown: true }; // MUTATION_ANCHOR_STAMP_CLOSED
+    let afterMerge = atTrunc > mergedTrunc;
+    afterMerge = atMs > mergedMs; // MUTATION_ANCHOR_FRACTIONAL_STAMP
+    if (afterMerge) { after.push(row); continue; } // MUTATION_ANCHOR_AS_OF_MERGE
     before.push(row);
   }
-  return { before, after };
+  return { before, after, unknown: false };
 }
 
-/** Every row that shares the newest stamp. A tie is not one row. */
+/** Every row that shares the newest instant. A tie is not one row. */
 function selectLatest(rows) {
   const byName = new Map();
   for (const row of rows) {
@@ -992,12 +1065,14 @@ function selectLatest(rows) {
   }
   const selected = [];
   for (const list of byName.values()) {
-    let max = "";
+    let max = null;
     for (const row of list) {
-      const at = timeOf(row);
-      if (at > max) max = at;
+      const at = instantMs(rowClock(row));
+      if (at == null) continue;
+      if (max == null || at > max) max = at;
     }
-    for (const row of list) if (timeOf(row) === max) selected.push(row);
+    if (max == null) continue;
+    for (const row of list) if (instantMs(rowClock(row)) === max) selected.push(row);
   }
   return selected;
 }
@@ -1022,7 +1097,7 @@ function normalizeHistory(rows, head) {
       appSlug: null,
       appId,
       headSha: sha,
-      createdAt: stamp(r?.createdAt),
+      createdAt: typeof r?.createdAt === "string" ? r.createdAt : null,
       kind: "status",
       creatorLogin,
     });
@@ -1031,7 +1106,7 @@ function normalizeHistory(rows, head) {
 }
 
 function asGate(row) {
-  const completedAt = row.kind === "status" ? (row.createdAt ?? null) : (row.completedAt ?? null);
+  const completedAt = stamp(row.kind === "status" ? row.createdAt : row.completedAt);
   return {
     name: row.name,
     conclusion: row.conclusion,
@@ -1045,7 +1120,7 @@ function asGate(row) {
 }
 
 function toNote(row) {
-  const at = row.kind === "status" ? row.createdAt : row.completedAt;
+  const at = stamp(row.kind === "status" ? row.createdAt : row.completedAt);
   if (typeof at !== "string") return null;
   return {
     name: row.name,
@@ -1065,11 +1140,12 @@ function asOfGates(checkRuns, statusHistory, head, mergedAt) {
   const statuses = normalizeHistory(statusHistory, head);
   const checkSplit = splitAtMerge(checks, mergedAt);
   const statusSplit = splitAtMerge(statuses, mergedAt);
+  if (checkSplit.unknown || statusSplit.unknown) return { gates: [], postMerge: [], unknown: true };
   const gates = [...selectLatest(checkSplit.before), ...selectLatest(statusSplit.before)].map(asGate);
   gates.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : (a.appId ?? -1) - (b.appId ?? -1)));
   const postMerge = [...checkSplit.after, ...statusSplit.after].map(toNote).filter(Boolean);
   postMerge.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : (a.appId ?? -1) - (b.appId ?? -1)));
-  return { gates, postMerge };
+  return { gates, postMerge, unknown: false };
 }
 
 function factsFromReceipt(receipt) {
@@ -1569,6 +1645,78 @@ function source(endpoint, pageResult, exhausted) {
   };
 }
 
+function ledgerStrings(value, out) {
+  if (typeof value === "string") {
+    out.push(value);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const list = Array.isArray(value) ? value : Object.values(value);
+  for (const item of list) ledgerStrings(item, out);
+}
+
+function assertLedgerClean(ev) {
+  const parts = [];
+  ledgerStrings(ev, parts);
+  assertNoHostLeak(parts.join("\n"));
+}
+
+/** Wide copy. The seal assignment replaces it; deleting that assignment keeps these fields. */
+function wideLedgerCopy(ev) {
+  const copy = {};
+  if (ev.schema != null) copy.schema = ev.schema;
+  if (ev.ts != null) copy.ts = ev.ts;
+  for (const key of ["runner", "provider", "join_key", "repo", "note", "model", "vendor"]) {
+    if (typeof ev[key] === "string") copy[key] = ev[key];
+  }
+  if (ev.pr != null) copy.pr = ev.pr;
+  for (const key of ["usd", "tokensIn", "tokensOut"]) {
+    if (typeof ev[key] === "number") copy[key] = ev[key];
+  }
+  return copy;
+}
+
+/**
+ * Fields copied into the bundle: ts, vendor, model, usd, tokensIn, tokensOut,
+ * pr, and repo. repo must be an owner/name slug. join_key is not copied.
+ */
+function sealLedgerEvent(ev) {
+  if (!ev || ev.schema !== "gibson.cost.v1") return null;
+  if (typeof ev.ts !== "string" || ev.ts.length < 1 || ev.ts.length > 40) return null;
+  if (ev.pr != null && (!Number.isInteger(ev.pr) || ev.pr < 0)) return null;
+  if (ev.repo != null && safeRepo(ev.repo) !== ev.repo) return null;
+  if (ev.model != null && (typeof ev.model !== "string" || ev.model.length < 1 || ev.model.length > 80)) return null;
+  for (const key of ["usd", "tokensIn", "tokensOut"]) {
+    if (ev[key] == null) continue;
+    if (costNumber(ev[key]) == null) return null;
+  }
+  const out = { ts: ev.ts, vendor: costVendor(ev) };
+  if (typeof ev.model === "string") out.model = ev.model;
+  for (const key of ["usd", "tokensIn", "tokensOut"]) {
+    if (ev[key] != null) out[key] = ev[key];
+  }
+  if (ev.pr != null) out.pr = ev.pr;
+  if (typeof ev.repo === "string") out.repo = ev.repo;
+  return out;
+}
+
+/** One join_key must name one PR. The key is applied, then dropped. */
+function resolveLedgerPrs(events) {
+  const joinToPr = new Map();
+  for (const ev of events) {
+    if (typeof ev.join_key !== "string" || !ev.join_key || !Number.isInteger(ev.pr)) continue;
+    if (joinToPr.has(ev.join_key) && joinToPr.get(ev.join_key) !== ev.pr) return null;
+    joinToPr.set(ev.join_key, ev.pr);
+  }
+  return events.map((ev) => {
+    if (Number.isInteger(ev.pr)) return ev;
+    if (typeof ev.join_key === "string" && ev.join_key && joinToPr.has(ev.join_key)) {
+      return { ...ev, pr: joinToPr.get(ev.join_key) };
+    }
+    return ev;
+  });
+}
+
 function loadLedger(path) {
   if (!path) return [];
   let text;
@@ -1579,7 +1727,7 @@ function loadLedger(path) {
   } catch {
     return null;
   }
-  const events = [];
+  const raw = [];
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     let ev;
@@ -1589,13 +1737,18 @@ function loadLedger(path) {
       return null;
     }
     if (!ev || ev.schema !== "gibson.cost.v1") return null;
-    const allow = { schema: ev.schema, ts: ev.ts };
-    if (typeof ev.runner === "string") allow.runner = ev.runner;
-    if (typeof ev.provider === "string") allow.provider = ev.provider;
-    if (ev.pr != null) allow.pr = ev.pr;
-    if (typeof ev.join_key === "string") allow.join_key = ev.join_key;
-    if (typeof ev.repo === "string") allow.repo = ev.repo;
-    events.push(allow);
+    raw.push(ev);
+  }
+  const resolved = resolveLedgerPrs(raw);
+  if (resolved == null) return null;
+  const events = [];
+  for (const ev of resolved) {
+    assertLedgerClean(ev);
+    let stored = wideLedgerCopy(ev);
+    stored = sealLedgerEvent(ev); // MUTATION_ANCHOR_LEDGER_ALLOW
+    if (stored == null) return null;
+    assertLedgerClean(stored);
+    events.push(stored);
   }
   return events;
 }
@@ -1665,7 +1818,7 @@ function readCombinedStatuses(call, head) {
         appSlug: null,
         appId: explicit != null ? explicit : avatar,
         headSha: head,
-        completedAt: typeof completed === "string" ? completed.replace(/\.\d+Z$/, "Z") : null,
+        completedAt: typeof completed === "string" ? completed : null,
         kind: "status",
         creatorLogin,
       });
@@ -1696,7 +1849,7 @@ function readStatusHistory(call, head) {
       conclusion: s?.state ?? null,
       appId: explicit != null ? explicit : avatar,
       headSha: head,
-      createdAt: stamp(s?.created_at),
+      createdAt: typeof s?.created_at === "string" ? s.created_at : null,
       kind: "status",
       creatorLogin,
     });
@@ -1870,7 +2023,7 @@ function collect(args) {
           appSlug: cr?.app?.slug ?? null,
           appId: typeof cr?.app?.id === "number" ? cr.app.id : null,
           headSha: typeof cr?.head_sha === "string" ? cr.head_sha.toLowerCase() : null,
-          completedAt: typeof cr?.completed_at === "string" ? cr.completed_at.replace(/\.\d+Z$/, "Z") : null,
+          completedAt: typeof cr?.completed_at === "string" ? cr.completed_at : null,
         });
       }
     }
