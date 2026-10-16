@@ -169,6 +169,15 @@ case "\$mode" in
     sleep 0.2
     echo done > "$CALLS/done"
     ;;
+  pause)
+    printf '%s\n' "\$\$" > "$CALLS/runner.pid"
+    : > "$CALLS/runner.ready"
+    i=0
+    while [[ ! -f "$CALLS/runner.release" && "\$i" -lt 200 ]]; do
+      sleep 0.1
+      i=\$((i + 1))
+    done
+    ;;
   wall-rewrite)
     python3 - "$ALLOW" <<'PY'
 import json, sys
@@ -289,7 +298,7 @@ path = sys.argv[1]
 doc = json.load(open(path, encoding="utf-8"))
 for kv in sys.argv[2:]:
     key, val = kv.split("=", 1)
-    if key in ("consumed_starts", "completed_iterations", "max_iterations", "max_wall_min"):
+    if key in ("consumed_starts", "completed_iterations", "max_iterations", "max_wall_min", "runner_pid"):
         doc[key] = int(val)
     elif key == "unbounded":
         doc[key] = (val == "true")
@@ -331,7 +340,7 @@ doc = {
 }
 for kv in sys.argv[2:]:
     key, val = kv.split("=", 1)
-    if key in ("consumed_starts", "completed_iterations", "max_iterations", "max_wall_min"):
+    if key in ("consumed_starts", "completed_iterations", "max_iterations", "max_wall_min", "runner_pid"):
         doc[key] = int(val)
     elif key == "unbounded":
         doc[key] = (val == "true")
@@ -340,6 +349,29 @@ for kv in sys.argv[2:]:
 with open(path, "w", encoding="utf-8") as fh:
     fh.write(json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n")
 PY
+}
+
+# Operator reset through the sourced gate. The engine must journal and delete
+# under its own lock. rc is the gate's status.
+reset_gate() {
+  local out="$1"
+  (
+    export STATE_DIR="$REPO/gibson"
+    export JOURNAL="$JOURNAL"
+    export EXPECTED_REPO_SLUG="acme/app"
+    export GIBSON_LANE_ID="solo"
+    export SB_LIMIT_ITERATIONS=50
+    export SB_LIMIT_WALL_MIN=480
+    export SB_LIMIT_COST_USD=20
+    export SB_UNBOUNDED=0
+    export SB_RESET=1
+    unset GIBSON_COST_LEDGER || true
+    unset SB_LOOP_PID || true
+    # shellcheck disable=SC1090
+    source "$LIB"
+    info() { printf '%s\n' "$*" >&2; }
+    sb_startup_gate
+  ) >"$out.out" 2>"$out"
 }
 
 check_eq() {
@@ -456,8 +488,18 @@ run_loop "$ROOT/cost-default.err" --once
 check_rc "default cost stop exits 0" 0
 check_eq "default cost stop ran the in-flight runner" "$(runner_count)" 1
 check_has "default cost diagnosis" "$JOURNAL" "diagnosis: budget: cost"
-check_has "default cost receipt is complete" "$JOURNAL" "cost_status: complete"
+# Replaced "default cost receipt is complete". One cost_usd event is not
+# positive evidence that the session spend is complete (owner amendment
+# 2026-10-04). The #74 ledger has no session-closed marker.
+check_has "default cost receipt stays partial" "$JOURNAL" "cost_status: partial"
+check_lacks "default cost receipt is not complete" "$JOURNAL" "cost_status: complete"
 check_has "default cost receipt names the dollars" "$JOURNAL" '"cost_usd":"20"'
+check_has "default cost receipt says the measurement is incomplete" "$JOURNAL" "not every iteration measured"
+if grep -qx 'cost: partial 20' "$JOURNAL"; then
+  ok "default cost receipt keeps the partial amount"
+else
+  bad "default cost receipt did not say cost: partial 20"
+fi
 
 echo "per-budget values and flag-over-env"
 clear_hooks
@@ -509,7 +551,7 @@ fi
 check_has "unmeasured cost_status" "$JOURNAL" "cost_status: not_measured"
 check_lacks "unmeasured is not stored as cost: 0" "$JOURNAL" "cost_status: complete"
 
-echo "fractional sum stays partial-free under the cap"
+echo "fractional sum stays exact and partial under the cap"
 clear_hooks
 setup_repo
 USE_LEDGER="$ROOT/cost-frac.jsonl"
@@ -519,12 +561,13 @@ run_loop "$ROOT/frac.err" --max-iterations 2 --max-cost-usd 1
 check_rc "fractional sum exits 0" 0
 check_eq "fractional sum runs both iterations" "$(runner_count)" 2
 check_has "fractional stop is iterations" "$JOURNAL" "diagnosis: budget: iterations"
-if grep -qx 'cost: 0.3' "$JOURNAL"; then
-  ok "0.10+0.20 prints as cost: 0.3"
+if grep -qx 'cost: partial 0.3' "$JOURNAL"; then
+  ok "0.10+0.20 prints as cost: partial 0.3"
 else
-  bad "fractional total was not cost: 0.3"
+  bad "fractional total was not cost: partial 0.3"
 fi
-check_has "fractional cost_status is complete" "$JOURNAL" "cost_status: complete"
+check_has "fractional cost_status stays partial" "$JOURNAL" "cost_status: partial"
+check_lacks "fractional coverage is not complete" "$JOURNAL" "cost_status: complete"
 check_has "fractional json strips the trailing zero" "$JOURNAL" '"cost_usd":"0.3"'
 
 echo "partial cost stays partial, and partial over the cap stops"
@@ -538,6 +581,7 @@ check_rc "partial under cap exits 0" 0
 check_eq "partial under cap runs both iterations" "$(runner_count)" 2
 check_has "partial under cap stops on iterations" "$JOURNAL" "diagnosis: budget: iterations"
 check_has "partial status" "$JOURNAL" "cost_status: partial"
+check_has "partial says not every iteration measured" "$JOURNAL" "not every iteration measured"
 if grep -qx 'cost: partial 0.5' "$JOURNAL"; then
   ok "partial wording names the measured subset"
 else
@@ -582,11 +626,12 @@ USE_LEDGER="$ROOT/cost-zero.jsonl"
 echo cost-zero > "$CALLS/mode"
 run_loop "$ROOT/zero.err" --max-iterations 1
 check_rc "explicit zero cost exits 0" 0
-check_has "explicit zero is measured" "$JOURNAL" "cost_status: complete"
-if grep -qx 'cost: 0' "$JOURNAL"; then
-  ok "explicit zero prints cost: 0"
+check_has "explicit zero is measured" "$JOURNAL" "cost_status: partial"
+check_lacks "explicit zero is not complete session spend" "$JOURNAL" "cost_status: complete"
+if grep -qx 'cost: partial 0' "$JOURNAL"; then
+  ok "explicit zero prints cost: partial 0"
 else
-  bad "explicit zero did not print cost: 0"
+  bad "explicit zero did not print cost: partial 0"
 fi
 check_lacks "explicit zero is not not-measured" "$JOURNAL" "cost: not measured"
 check_has "explicit zero still stops on iterations" "$JOURNAL" "diagnosis: budget: iterations"
@@ -805,6 +850,9 @@ check_eq "symlink ledger does not start a runner" "$(runner_count)" 0
 check_has "symlink ledger diagnosis" "$JOURNAL" "diagnosis: budget: cost-ledger-unreadable"
 [[ -e "$ALLOW" ]] && bad "symlink ledger granted an allowance" || ok "symlink ledger grants no allowance"
 [[ -f "$LATCH" ]] && ok "symlink ledger writes a latch" || bad "symlink ledger wrote no latch"
+check_has "unreadable latch records kind" "$LATCH" "kind=unreadable"
+check_has "unreadable latch records the reason" "$LATCH" "reason=cost-ledger-unreadable"
+check_has "unreadable latch is journaled" "$LATCH" "journaled=1"
 run_loop "$ROOT/unread-2.err" --once --max-iterations 2
 check_rc "second unreadable launch exits 1" 1
 check_eq "second unreadable launch adds no diagnosis" "$(count_in "$JOURNAL" 'diagnosis: budget: cost-ledger-unreadable')" 1
@@ -901,9 +949,751 @@ direct=$(sb_format_rollup "$FLEET_DIR_P/lane-docs/gibson/journal.md" docs)
 check_eq "direct rollup of a missing journal is none" "$direct" "session-budget lane=docs receipt=none"
 
 mkdir -p "$FLEET_DIR_P/lane-docs/gibson/journal.md"
+(
+  unset FLEET_PROFILE FLEET_DIR LOG_DIR GIBSON_LANE_ID
+  "$FLEET" --profile "$PROF" --status >"$ROOT/fleet-dir.out" 2>"$ROOT/fleet-dir.err"
+) && fleet_rc=0 || fleet_rc=$?
+check_eq "directory journal status exits 0" "$fleet_rc" 0
+check_has "directory journal status is unreadable" "$ROOT/fleet-dir.out" "session-budget lane=docs receipt=unreadable"
+check_lacks "directory journal status is not missing" "$ROOT/fleet-dir.out" "session-budget lane=docs receipt=none"
 direct=$(sb_format_rollup "$FLEET_DIR_P/lane-docs/gibson/journal.md" docs)
 rmdir "$FLEET_DIR_P/lane-docs/gibson/journal.md"
 check_eq "direct rollup of a directory journal is unreadable" "$direct" "session-budget lane=docs receipt=unreadable"
+
+echo "one USD event over one completed iteration stays partial"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-one-event.jsonl"
+: > "$USE_LEDGER"
+echo cost-150 > "$CALLS/mode"
+run_loop "$ROOT/one-event.err" --max-iterations 1 --max-cost-usd 20
+check_rc "one USD event exits 0" 0
+check_eq "one USD event ran the iteration" "$(runner_count)" 1
+check_has "one USD event stops on iterations" "$JOURNAL" "diagnosis: budget: iterations"
+check_has "one USD event is partial" "$JOURNAL" "cost_status: partial"
+check_lacks "one USD event is not complete" "$JOURNAL" "cost_status: complete"
+check_has "one USD event sums the row" "$JOURNAL" '"cost_usd":"1.5"'
+check_has "one USD event says not every iteration measured" "$JOURNAL" "not every iteration measured"
+if grep -qx 'cost: partial 1.5' "$JOURNAL"; then
+  ok "one USD event prints cost: partial 1.5"
+else
+  bad "one USD event did not print cost: partial 1.5"
+fi
+
+echo "two iterations with one USD row stay partial"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-two-one.jsonl"
+: > "$USE_LEDGER"
+echo partial-one > "$CALLS/mode"
+run_loop "$ROOT/two-one.err" --max-iterations 2 --max-cost-usd 20
+check_rc "two iterations one USD row exits 0" 0
+check_eq "two iterations one USD row runs both" "$(runner_count)" 2
+check_has "two iterations one USD row is partial" "$JOURNAL" "cost_status: partial"
+check_lacks "two iterations one USD row is not complete" "$JOURNAL" "cost_status: complete"
+if grep -qx 'cost: partial 0.5' "$JOURNAL"; then
+  ok "two iterations one USD row prints cost: partial 0.5"
+else
+  bad "two iterations one USD row did not print cost: partial 0.5"
+fi
+check_has "two iterations one USD row says not every iteration measured" "$JOURNAL" "not every iteration measured"
+
+echo "no cost events stay not measured"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-empty.jsonl"
+: > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/no-events.err" --max-iterations 1 --max-cost-usd 1
+check_rc "no cost events exits 0" 0
+check_eq "no cost events runs the iteration" "$(runner_count)" 1
+check_has "no cost events stop on iterations" "$JOURNAL" "diagnosis: budget: iterations"
+check_has "no cost events are not measured" "$JOURNAL" "cost_status: not_measured"
+if grep -qx 'cost: not measured' "$JOURNAL"; then
+  ok "no cost events say cost: not measured"
+else
+  bad "no cost events missing exact cost: not measured line"
+fi
+check_lacks "no cost events are not partial" "$JOURNAL" "cost_status: partial"
+check_lacks "no cost events are not complete" "$JOURNAL" "cost_status: complete"
+check_lacks "no cost events do not invent a dollar amount" "$JOURNAL" '"cost_usd":"'
+
+# Direct engine calls. loop.sh is not involved, so a pause or crash hook can
+# sit inside the locked stop transaction. Extra arguments are KEY=VALUE
+# exports visible to that one call.
+engine_boundary() {
+  local log="$1"
+  shift
+  (
+    export STATE_DIR="$REPO/gibson"
+    export JOURNAL="$JOURNAL"
+    export EXPECTED_REPO_SLUG="acme/app"
+    export GIBSON_LANE_ID="solo"
+    export SB_LIMIT_ITERATIONS=1
+    export SB_LIMIT_WALL_MIN=480
+    export SB_LIMIT_COST_USD=20
+    export SB_UNBOUNDED=0
+    unset GIBSON_COST_LEDGER || true
+    unset SB_CRASH_AFTER_LATCH SB_HOLD_FILE SB_RELEASE_FILE || true
+    local kv key val
+    for kv in "$@"; do
+      key=${kv%%=*}
+      val=${kv#*=}
+      export "$key=$val"
+    done
+    # shellcheck disable=SC1090
+    source "$LIB"
+    info() { printf '%s\n' "$*" >&2; }
+    sb_boundary_check
+  ) >"$log.out" 2>"$log"
+}
+
+echo "two concurrent boundary checks publish one receipt"
+clear_hooks
+setup_repo
+mkdir -p "$REPO/gibson"
+write_seed_allowance max_iterations=1 max_wall_min=480 max_cost_usd=20 consumed_starts=1 completed_iterations=1
+rm -f "$ROOT/hold" "$ROOT/release"
+engine_boundary "$ROOT/conc-a" "SB_HOLD_FILE=$ROOT/hold" "SB_RELEASE_FILE=$ROOT/release" &
+conc_a=$!
+if [[ -f "$ROOT/hold" ]] || python3 - "$ROOT/hold" <<'PY'
+import sys, time
+path = sys.argv[1]
+deadline = time.time() + 5
+while time.time() < deadline:
+    try:
+        open(path, "r", encoding="utf-8").read()
+        sys.exit(0)
+    except OSError:
+        time.sleep(0.05)
+sys.exit(1)
+PY
+then
+  ok "first boundary paused inside the stop lock"
+else
+  bad "first boundary did not pause inside the stop lock"
+fi
+engine_boundary "$ROOT/conc-b" &
+conc_b=$!
+# Stay inside A's lock long enough for B to block on it, then release A.
+sleep 0.5
+: > "$ROOT/release"
+wait "$conc_a"
+conc_a_rc=$?
+wait "$conc_b"
+conc_b_rc=$?
+check_eq "concurrent boundary A stops" "$conc_a_rc" 2
+check_eq "concurrent boundary B stops" "$conc_b_rc" 2
+check_eq "concurrent boundaries publish one receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+check_eq "concurrent boundaries publish one receipt id" "$(count_in "$JOURNAL" '"receipt_id":')" 1
+
+echo "a crash after the latch publishes one receipt on the next launch"
+clear_hooks
+setup_repo
+mkdir -p "$REPO/gibson"
+write_seed_allowance max_iterations=1 max_wall_min=480 max_cost_usd=20 consumed_starts=1 completed_iterations=0
+engine_boundary "$ROOT/crash-1" SB_CRASH_AFTER_LATCH=1
+crash_rc=$?
+check_eq "crash after the latch returns nonzero" "$crash_rc" 1
+[[ -f "$LATCH" ]] && ok "crash leaves the latch" || bad "crash removed the latch"
+check_eq "crash writes no receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 0
+# The in-flight runner finishes after the stop snapshot was latched.
+patch_allow completed_iterations=1
+engine_boundary "$ROOT/crash-2"
+crash_recover_rc=$?
+check_eq "next launch after the crash stops" "$crash_recover_rc" 2
+check_eq "next launch publishes one receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+check_has "recovered receipt records the in-flight stop" "$JOURNAL" "in_flight: 1"
+check_has "recovered receipt keeps the stop-time count" "$JOURNAL" "iterations_completed: 0"
+check_has "recovered receipt does not adopt the later completion" "$JOURNAL" "starts_consumed: 1"
+engine_boundary "$ROOT/crash-3"
+crash_again_rc=$?
+check_eq "third launch still stops" "$crash_again_rc" 2
+check_eq "third launch does not append another receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+
+echo "a stop with a runner in flight records it"
+clear_hooks
+setup_repo
+mkdir -p "$REPO/gibson"
+write_seed_allowance max_iterations=1 max_wall_min=480 max_cost_usd=20 consumed_starts=1 completed_iterations=0
+engine_boundary "$ROOT/inflight"
+inflight_rc=$?
+check_eq "in-flight stop returns stop" "$inflight_rc" 2
+check_eq "in-flight stop publishes one receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+check_has "in-flight stop says in_flight: 1" "$JOURNAL" "in_flight: 1"
+check_has "in-flight stop records iterations_completed 0" "$JOURNAL" "iterations_completed: 0"
+check_has "in-flight json records the flag" "$JOURNAL" '"in_flight":1'
+check_lacks "in-flight stop does not claim a finished iteration" "$JOURNAL" "iterations_completed: 1"
+
+echo "a torn receipt id is not a published receipt"
+clear_hooks
+setup_repo
+mkdir -p "$REPO/gibson"
+write_seed_allowance max_iterations=1 max_wall_min=480 max_cost_usd=20 consumed_starts=1 completed_iterations=1
+engine_boundary "$ROOT/torn-1" SB_CRASH_AFTER_LATCH=1
+torn_rc=$?
+check_eq "torn setup crashes before the receipt" "$torn_rc" 1
+check_eq "torn setup writes no schema line" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 0
+torn_id=$(sed -n 's/^receipt_id=//p' "$LATCH" | head -n 1)
+[[ -n "$torn_id" ]] && ok "torn setup left a receipt id on the latch" || bad "torn setup left no receipt id"
+# A crash can leave the receipt id on disk without the rest of the receipt.
+printf '%s\n' "partial {\"receipt_id\":\"${torn_id}\"" >> "$JOURNAL"
+engine_boundary "$ROOT/torn-2"
+torn_recover_rc=$?
+check_eq "torn fragment still returns stop" "$torn_recover_rc" 2
+check_eq "torn recovery writes one schema line" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+check_eq "torn recovery writes one end marker" "$(count_in "$JOURNAL" "receipt_end: ${torn_id}")" 1
+if python3 - "$JOURNAL" >/dev/null 2>&1 <<'PY'
+import json, sys
+last = ""
+for line in open(sys.argv[1], encoding="utf-8").read().splitlines():
+    if '"schema":"gibson.session-budget.v1"' in line:
+        last = line.strip()
+json.loads(last)
+if not last:
+    raise SystemExit(1)
+PY
+then
+  ok "torn recovery leaves a parseable receipt"
+else
+  bad "torn recovery left an unreadable receipt"
+fi
+engine_boundary "$ROOT/torn-3"
+torn_again_rc=$?
+check_eq "torn receipt stays stopped" "$torn_again_rc" 2
+check_eq "torn recovery does not append another end marker" "$(count_in "$JOURNAL" "receipt_end: ${torn_id}")" 1
+
+echo "a latched stop refuses a different lane and a different repo"
+clear_hooks
+setup_repo
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/latch-lane-seed.err" --max-iterations 1
+check_rc "latched lane seed exits 0" 0
+check_eq "latched lane seed publishes one receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+: > "$CALLS/runner.count"
+USE_LANE=other
+run_loop "$ROOT/latch-lane-other.err" --once
+check_rc "latched other lane exits 1" 1
+check_eq "latched other lane does not start a runner" "$(runner_count)" 0
+check_has "latched other lane does not cross-charge" "$ROOT/latch-lane-other.err" "Resumed identities do not cross-charge"
+check_has "latched other lane journals the refusal" "$JOURNAL" "session-budget-refused"
+check_eq "latched other lane does not append a receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+[[ -f "$LATCH" ]] && ok "latched other lane leaves the latch" || bad "latched other lane removed the latch"
+USE_LANE=""
+: > "$CALLS/runner.count"
+run_loop "$ROOT/latch-lane-home.err" --once --max-iterations 1
+check_rc "owning lane after refusal still stops" 0
+check_eq "owning lane after refusal does not start a runner" "$(runner_count)" 0
+check_eq "owning lane after refusal does not append a receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+clear_hooks
+setup_repo
+mkdir -p "$REPO/gibson"
+write_seed_allowance max_iterations=1 max_wall_min=480 max_cost_usd=20 consumed_starts=1 completed_iterations=1
+engine_boundary "$ROOT/latch-repo-seed"
+latch_repo_rc=$?
+check_eq "latched repo seed stops" "$latch_repo_rc" 2
+check_eq "latched repo seed publishes one receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+engine_boundary "$ROOT/latch-repo-other" EXPECTED_REPO_SLUG=other/repo
+latch_repo_other_rc=$?
+check_eq "latched other repo exits 1" "$latch_repo_other_rc" 1
+check_has "latched other repo does not cross-charge" "$ROOT/latch-repo-other" "Resumed identities do not cross-charge"
+check_eq "latched other repo does not append a receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+[[ -f "$LATCH" ]] && ok "latched other repo leaves the latch" || bad "latched other repo removed the latch"
+
+echo "a merged flag without an integer pr is not a measured zero"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/prs-bare.jsonl"
+: > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/prs-bare-seed.err" --once --max-iterations 2
+check_rc "bare merged seed exits 0" 0
+SID=$(allow_field session_id)
+python3 - "$USE_LEDGER" "$SID" <<'PY'
+import json, sys
+path, sid = sys.argv[1:]
+ev = {"schema": "gibson.cost.v1", "session_id": sid, "merged": False}
+open(path, "a", encoding="utf-8").write(json.dumps(ev) + "\n")
+PY
+run_loop "$ROOT/prs-bare.err" --max-iterations 2
+check_rc "bare merged stop exits 0" 0
+check_has "bare merged stays not measured" "$JOURNAL" "prs_merged: not measured"
+check_lacks "bare merged is not a counted zero" "$JOURNAL" "prs_merged: 0"
+
+echo "boolean merged plus an integer pr is counted"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/prs-counted.jsonl"
+: > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/prs-count-seed.err" --once --max-iterations 2
+check_rc "counted pr seed exits 0" 0
+SID=$(allow_field session_id)
+python3 - "$USE_LEDGER" "$SID" <<'PY'
+import json, sys
+path, sid = sys.argv[1:]
+ev = {"schema": "gibson.cost.v1", "session_id": sid, "merged": True, "pr": 7}
+open(path, "a", encoding="utf-8").write(json.dumps(ev) + "\n")
+PY
+run_loop "$ROOT/prs-count.err" --max-iterations 2
+check_rc "counted pr stop exits 0" 0
+check_has "integer pr is counted" "$JOURNAL" "prs_merged: 1"
+check_lacks "integer pr is not left unmeasured" "$JOURNAL" "prs_merged: not measured"
+
+echo "fine-grained and large cost_usd strings are summed"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-fine.jsonl"
+: > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/cost-fine-seed.err" --once --max-iterations 2
+check_rc "fine cost seed exits 0" 0
+SID=$(allow_field session_id)
+python3 - "$USE_LEDGER" "$SID" <<'PY'
+import json, sys
+path, sid = sys.argv[1:]
+ev = {"schema": "gibson.cost.v1", "session_id": sid, "cost_usd": "0.0000001", "iteration": 1}
+open(path, "a", encoding="utf-8").write(json.dumps(ev) + "\n")
+PY
+run_loop "$ROOT/cost-fine.err" --max-iterations 2
+check_rc "fine cost stop exits 0" 0
+check_has "fine cost is partial" "$JOURNAL" "cost_status: partial"
+if grep -qx 'cost: partial 0.0000001' "$JOURNAL"; then
+  ok "fine cost prints cost: partial 0.0000001"
+else
+  bad "fine cost did not print cost: partial 0.0000001"
+fi
+check_lacks "fine cost is not rejected as malformed" "$ROOT/cost-fine.err" "not an exact non-negative decimal"
+
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-large.jsonl"
+: > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/cost-large-seed.err" --once --max-iterations 5 --max-cost-usd 20
+check_rc "large cost seed exits 0" 0
+check_eq "large cost seed ran one runner" "$(runner_count)" 1
+SID=$(allow_field session_id)
+python3 - "$USE_LEDGER" "$SID" <<'PY'
+import json, sys
+path, sid = sys.argv[1:]
+ev = {"schema": "gibson.cost.v1", "session_id": sid, "cost_usd": "10000000000", "iteration": 1}
+open(path, "a", encoding="utf-8").write(json.dumps(ev) + "\n")
+PY
+: > "$CALLS/runner.count"
+run_loop "$ROOT/cost-large.err" --max-iterations 5 --max-cost-usd 20
+check_rc "large cost stop exits 0" 0
+check_eq "large cost does not start another runner" "$(runner_count)" 0
+check_has "large cost stops on cost" "$JOURNAL" "diagnosis: budget: cost"
+if grep -qx 'cost: partial 10000000000' "$JOURNAL"; then
+  ok "large cost prints the full dollar string"
+else
+  bad "large cost did not print cost: partial 10000000000"
+fi
+
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-exp.jsonl"
+: > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/cost-exp-seed.err" --once --max-iterations 2
+SID=$(allow_field session_id)
+python3 - "$USE_LEDGER" "$SID" <<'PY'
+import json, sys
+path, sid = sys.argv[1:]
+ev = {"schema": "gibson.cost.v1", "session_id": sid, "cost_usd": "1e-7", "iteration": 1}
+open(path, "a", encoding="utf-8").write(json.dumps(ev) + "\n")
+PY
+: > "$CALLS/runner.count"
+run_loop "$ROOT/cost-exp.err" --max-iterations 2
+check_rc "exponent cost_usd exits 1" 1
+check_eq "exponent cost_usd does not start a runner" "$(runner_count)" 0
+check_has "exponent cost_usd is not an exact decimal" "$ROOT/cost-exp.err" "not an exact non-negative decimal"
+
+echo "a symlink journal is not followed"
+clear_hooks
+setup_repo
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/jlink-seed.err" --once
+check_rc "symlink journal seed exits 0" 0
+mv "$JOURNAL" "$ROOT/journal-real.md"
+printf 'SECRET\n' > "$ROOT/journal-target.md"
+ln -s "$ROOT/journal-target.md" "$JOURNAL"
+USE_LANE=other
+run_loop "$ROOT/jlink-other.err" --once
+check_rc "symlink journal refusal exits 1" 1
+check_lacks "symlink journal target has no refusal" "$ROOT/journal-target.md" "session-budget-refused"
+check_has "symlink journal names the link" "$ROOT/jlink-other.err" "journal is a symlink"
+if [[ "$(cat "$ROOT/journal-target.md")" == "SECRET" ]]; then
+  ok "symlink journal target is unchanged"
+else
+  bad "symlink journal target was written"
+fi
+USE_LANE=""
+
+echo "another session's malformed cost_usd does not fail this session"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-foreign-bad.jsonl"
+: > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+python3 - "$USE_LEDGER" <<'PY'
+import json, sys
+ev = {"schema": "gibson.cost.v1", "session_id": "sb-20261015T120000Z-ffffeeee", "cost_usd": 1.5}
+open(sys.argv[1], "a", encoding="utf-8").write(json.dumps(ev) + "\n")
+PY
+run_loop "$ROOT/foreign-bad.err" --max-iterations 1 --max-cost-usd 1
+check_rc "foreign malformed cost exits 0" 0
+check_eq "foreign malformed cost runs the iteration" "$(runner_count)" 1
+check_has "foreign malformed cost stays not measured" "$JOURNAL" "cost_status: not_measured"
+check_lacks "foreign malformed cost is not a ledger fatal" "$ROOT/foreign-bad.err" "cost_usd must be a decimal string"
+check_lacks "foreign malformed cost does not latch unreadable" "$JOURNAL" "diagnosis: budget: cost-ledger-unreadable"
+
+echo "a dangling cost-ledger symlink fails closed"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-dangling.jsonl"
+ln -s "$ROOT/cost-missing.jsonl" "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/dangling.err" --once --max-iterations 2
+check_rc "dangling ledger exits 1" 1
+check_eq "dangling ledger does not start a runner" "$(runner_count)" 0
+check_has "dangling ledger diagnosis" "$JOURNAL" "diagnosis: budget: cost-ledger-unreadable"
+[[ -e "$ALLOW" ]] && bad "dangling ledger granted an allowance" || ok "dangling ledger grants no allowance"
+[[ -f "$LATCH" ]] && ok "dangling ledger writes a latch" || bad "dangling ledger wrote no latch"
+
+echo "an unbounded opt-out is refused when the journal cannot record it"
+clear_hooks
+setup_repo
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/optout-prep.err" --once
+check_rc "opt-out prep exits 0" 0
+rm -f "$ALLOW" "$LATCH"
+mv "$JOURNAL" "$ROOT/journal-real-optout.md"
+printf 'SECRET\n' > "$ROOT/optout-target.md"
+ln -s "$ROOT/optout-target.md" "$JOURNAL"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/optout-link.err" --once --unbounded
+check_rc "unbounded symlink journal exits 1" 1
+check_eq "unbounded symlink journal does not start a runner" "$(runner_count)" 0
+check_lacks "unbounded symlink journal target has no opt-out" "$ROOT/optout-target.md" "session-budget-opt-out"
+check_has "unbounded symlink journal names the link" "$ROOT/optout-link.err" "journal is a symlink"
+if [[ "$(cat "$ROOT/optout-target.md")" == "SECRET" ]]; then
+  ok "unbounded symlink journal target is unchanged"
+else
+  bad "unbounded symlink journal target was written"
+fi
+[[ -e "$ALLOW" ]] && bad "unbounded symlink journal left an allowance" || ok "unbounded symlink journal leaves no allowance"
+
+echo "a reset is refused when the journal cannot record it"
+clear_hooks
+setup_repo
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/reset-link-seed.err" --once
+check_rc "reset symlink seed exits 0" 0
+SID=$(allow_field session_id)
+mv "$JOURNAL" "$ROOT/journal-real-reset.md"
+printf 'SECRET\n' > "$ROOT/reset-target.md"
+ln -s "$ROOT/reset-target.md" "$JOURNAL"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/reset-link.err" --once --reset-session-budget
+check_rc "reset symlink journal exits 1" 1
+check_eq "reset symlink journal does not start a runner" "$(runner_count)" 0
+check_lacks "reset symlink journal target has no reset" "$ROOT/reset-target.md" "session-budget-reset"
+check_has "reset symlink journal names the link" "$ROOT/reset-link.err" "journal is a symlink"
+if [[ "$(cat "$ROOT/reset-target.md")" == "SECRET" ]]; then
+  ok "reset symlink journal target is unchanged"
+else
+  bad "reset symlink journal target was written"
+fi
+if [[ -f "$ALLOW" && "$(allow_field session_id)" == "$SID" ]]; then
+  ok "reset symlink journal keeps the allowance"
+else
+  bad "reset symlink journal replaced the allowance"
+fi
+
+echo "a reset does not delete the allowance when the latch is not a regular file"
+clear_hooks
+setup_repo
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/reset-latch-link-seed.err" --once
+check_rc "reset latch symlink seed exits 0" 0
+SID=$(allow_field session_id)
+ln -s "$ROOT/no-such-latch" "$LATCH"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/reset-latch-link.err" --once --reset-session-budget
+check_rc "reset latch symlink exits 1" 1
+check_eq "reset latch symlink does not start a runner" "$(runner_count)" 0
+if [[ -f "$ALLOW" && "$(allow_field session_id)" == "$SID" ]]; then
+  ok "reset latch symlink keeps the allowance"
+else
+  bad "reset latch symlink deleted the allowance"
+fi
+[[ -L "$LATCH" ]] && ok "reset latch symlink leaves the latch link" || bad "reset latch symlink removed the latch link"
+
+clear_hooks
+setup_repo
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/reset-latch-dir-seed.err" --once
+check_rc "reset latch directory seed exits 0" 0
+SID=$(allow_field session_id)
+mkdir -p "$LATCH"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/reset-latch-dir.err" --once --reset-session-budget
+check_rc "reset latch directory exits 1" 1
+check_eq "reset latch directory does not start a runner" "$(runner_count)" 0
+if [[ -f "$ALLOW" && "$(allow_field session_id)" == "$SID" ]]; then
+  ok "reset latch directory keeps the allowance"
+else
+  bad "reset latch directory deleted the allowance"
+fi
+[[ -d "$LATCH" ]] && ok "reset latch directory leaves the directory" || bad "reset latch directory removed the directory"
+
+echo "a reset does not delete the allowance when the journal is not writable"
+clear_hooks
+setup_repo
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/reset-ro-seed.err" --once
+check_rc "read-only journal seed exits 0" 0
+SID=$(allow_field session_id)
+chmod 0444 "$JOURNAL"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/reset-ro.err" --once --reset-session-budget
+if grep -F -q "session-budget-reset" "$JOURNAL"; then
+  ok "read-only journal reset wrote the line before removing state"
+  [[ ! -e "$ALLOW" ]] && ok "read-only journal reset removed the allowance after the line" || bad "read-only journal reset wrote the line and left the allowance"
+else
+  if [[ -f "$ALLOW" && "$(allow_field session_id)" == "$SID" ]]; then
+    ok "read-only journal reset kept the allowance"
+  else
+    bad "read-only journal reset deleted the allowance without a journal line"
+  fi
+  ok "read-only journal reset did not need a second allowance check"
+fi
+check_eq "read-only journal reset does not start a runner" "$(runner_count)" 0
+chmod u+w "$JOURNAL" 2>/dev/null || true
+
+echo "a dangling latch is not a missing latch"
+clear_hooks
+setup_repo
+echo progress > "$CALLS/mode"
+ln -s "$ROOT/no-such-latch" "$LATCH"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/dangling-latch.err" --once
+check_rc "dangling latch exits 1" 1
+check_eq "dangling latch does not start a runner" "$(runner_count)" 0
+[[ -e "$ALLOW" ]] && bad "dangling latch created an allowance" || ok "dangling latch creates no allowance"
+[[ -L "$LATCH" ]] && ok "dangling latch leaves the link" || bad "dangling latch removed the link"
+check_has "dangling latch names the latch" "$ROOT/dangling-latch.err" "latch is not a regular file"
+
+echo "another lane does not clear an unreadable latch"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/unread-other-ledger.jsonl"
+echo '{}' > "$ROOT/unread-other-target.jsonl"
+ln -s "$ROOT/unread-other-target.jsonl" "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/unread-other-1.err" --once --max-iterations 2
+check_rc "unreadable latch seed exits 1" 1
+check_has "unreadable latch seed records the lane" "$LATCH" "lane_id=solo"
+check_has "unreadable latch seed records the repo" "$LATCH" "repo=acme/app"
+rm -f "$USE_LEDGER"
+: > "$USE_LEDGER"
+USE_LANE=other
+: > "$CALLS/runner.count"
+run_loop "$ROOT/unread-other-2.err" --once --max-iterations 2
+check_rc "other lane unreadable latch exits 1" 1
+check_eq "other lane unreadable latch does not start a runner" "$(runner_count)" 0
+check_has "other lane unreadable latch does not cross-charge" "$ROOT/unread-other-2.err" "Resumed identities do not cross-charge"
+[[ -f "$LATCH" ]] && ok "other lane leaves the unreadable latch" || bad "other lane cleared the unreadable latch"
+check_has "other lane leaves kind=unreadable" "$LATCH" "kind=unreadable"
+[[ -e "$ALLOW" ]] && bad "other lane created an allowance" || ok "other lane creates no allowance"
+USE_LANE=""
+
+echo "a concurrent journal append survives the receipt write"
+clear_hooks
+setup_repo
+mkdir -p "$REPO/gibson"
+printf 'BEFORE\n' > "$JOURNAL"
+write_seed_allowance max_iterations=1 max_wall_min=480 max_cost_usd=20 consumed_starts=1 completed_iterations=1
+rm -f "$ROOT/jhold" "$ROOT/jrelease"
+engine_boundary "$ROOT/jrace" "SB_JOURNAL_HOLD_FILE=$ROOT/jhold" "SB_JOURNAL_RELEASE_FILE=$ROOT/jrelease" &
+jrace_pid=$!
+if [[ -f "$ROOT/jhold" ]] || python3 - "$ROOT/jhold" <<'PY'
+import sys, time
+path = sys.argv[1]
+deadline = time.time() + 5
+while time.time() < deadline:
+    try:
+        open(path, "r", encoding="utf-8").read()
+        sys.exit(0)
+    except OSError:
+        time.sleep(0.05)
+sys.exit(1)
+PY
+then
+  ok "receipt write paused after reading the journal"
+else
+  bad "receipt write did not pause"
+fi
+printf 'CONCURRENT\n' >> "$JOURNAL"
+: > "$ROOT/jrelease"
+wait "$jrace_pid"
+jrace_rc=$?
+check_eq "concurrent journal append still stops" "$jrace_rc" 2
+check_has "concurrent journal append keeps the earlier line" "$JOURNAL" "BEFORE"
+check_has "concurrent journal append keeps the raced line" "$JOURNAL" "CONCURRENT"
+check_eq "concurrent journal append publishes one receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
+
+echo "an interrupted start with no loop pid still resets"
+clear_hooks
+setup_repo
+mkdir -p "$REPO/gibson"
+printf '# Gibson loop journal\n' > "$JOURNAL"
+write_seed_allowance consumed_starts=1 completed_iterations=0
+SID=$(allow_field session_id)
+reset_gate "$ROOT/reset-interrupted.err"
+reset_interrupted_rc=$?
+check_eq "interrupted start reset exits 0" "$reset_interrupted_rc" 0
+check_has "interrupted start reset is journaled" "$JOURNAL" "session-budget-reset"
+if [[ -e "$ALLOW" || -L "$ALLOW" ]]; then
+  bad "interrupted start reset left the allowance"
+else
+  ok "interrupted start reset deletes the allowance"
+fi
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/reset-interrupted-next.err" --once --max-iterations 2
+check_eq "interrupted start reset then runs one runner" "$(runner_count)" 1
+if [[ -f "$ALLOW" && "$(allow_field session_id)" != "$SID" ]]; then
+  ok "interrupted start reset creates a fresh session"
+else
+  bad "interrupted start reset did not create a fresh session"
+fi
+
+echo "a dead loop pid still resets"
+clear_hooks
+setup_repo
+mkdir -p "$REPO/gibson"
+printf '# Gibson loop journal\n' > "$JOURNAL"
+sleep 30 &
+dead_pid=$!
+kill -9 "$dead_pid" 2>/dev/null || true
+wait "$dead_pid" 2>/dev/null || true
+if kill -0 "$dead_pid" 2>/dev/null; then
+  bad "dead pid fixture is still alive"
+else
+  ok "dead pid fixture is not alive"
+fi
+write_seed_allowance consumed_starts=1 completed_iterations=0 runner_pid="$dead_pid"
+reset_gate "$ROOT/reset-dead.err"
+reset_dead_rc=$?
+check_eq "dead pid reset exits 0" "$reset_dead_rc" 0
+check_has "dead pid reset is journaled" "$JOURNAL" "session-budget-reset"
+if [[ -e "$ALLOW" || -L "$ALLOW" ]]; then
+  bad "dead pid reset left the allowance"
+else
+  ok "dead pid reset deletes the allowance"
+fi
+
+echo "a live recorded loop pid refuses reset"
+clear_hooks
+setup_repo
+mkdir -p "$REPO/gibson"
+printf '# Gibson loop journal\n' > "$JOURNAL"
+sleep 60 &
+live_pid=$!
+write_seed_allowance consumed_starts=1 completed_iterations=0 runner_pid="$live_pid"
+SID=$(allow_field session_id)
+reset_gate "$ROOT/reset-live.err"
+reset_live_rc=$?
+check_eq "live pid reset exits 1" "$reset_live_rc" 1
+check_has "live pid reset names the refusal" "$ROOT/reset-live.err" "reset refused while a start is in flight"
+check_lacks "live pid reset writes no reset line" "$JOURNAL" "session-budget-reset"
+if [[ -f "$ALLOW" && "$(allow_field session_id)" == "$SID" ]]; then
+  ok "live pid reset keeps the allowance"
+else
+  bad "live pid reset deleted the allowance"
+fi
+check_eq "live pid reset keeps the consumed start" "$(allow_field consumed_starts)" 1
+kill -9 "$live_pid" 2>/dev/null || true
+wait "$live_pid" 2>/dev/null || true
+
+echo "a running loop records its pid and reset refuses"
+clear_hooks
+setup_repo
+rm -f "$CALLS/runner.ready" "$CALLS/runner.release" "$CALLS/runner.pid"
+echo pause > "$CALLS/mode"
+run_loop "$ROOT/pause.err" --once --max-iterations 2 &
+pause_pid=$!
+if [[ -f "$CALLS/runner.ready" ]] || python3 - "$CALLS/runner.ready" <<'PY'
+import sys, time
+path = sys.argv[1]
+deadline = time.time() + 10
+while time.time() < deadline:
+    try:
+        open(path, "r", encoding="utf-8").read()
+        sys.exit(0)
+    except OSError:
+        time.sleep(0.05)
+sys.exit(1)
+PY
+then
+  ok "paused runner reached the reserved start"
+else
+  bad "paused runner did not start"
+fi
+stored_pid=$(python3 - "$ALLOW" <<'PY'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    sys.stdout.write("")
+    raise SystemExit(0)
+pid = doc.get("runner_pid")
+if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+    sys.stdout.write("")
+else:
+    sys.stdout.write(str(pid))
+PY
+)
+runner_self=$(cat "$CALLS/runner.pid" 2>/dev/null || true)
+if [[ -n "$stored_pid" ]] && kill -0 "$stored_pid" 2>/dev/null; then
+  ok "reserved pid is alive while the runner is in flight"
+else
+  bad "reserved pid is not alive while the runner is in flight (got '${stored_pid}')"
+fi
+ps -p "$stored_pid" -ww -o args= > "$ROOT/pause.ps" 2>/dev/null || true
+check_has "reserved pid is loop.sh" "$ROOT/pause.ps" "loop.sh"
+if [[ -n "$stored_pid" && -n "$runner_self" && "$stored_pid" != "$runner_self" ]]; then
+  ok "reserved pid is not the runner process"
+else
+  bad "reserved pid is the runner or empty (stored '${stored_pid}' runner '${runner_self}')"
+fi
+SID=$(allow_field session_id)
+reset_gate "$ROOT/reset-running.err"
+reset_running_rc=$?
+check_eq "reset during a live loop exits 1" "$reset_running_rc" 1
+check_has "reset during a live loop names the refusal" "$ROOT/reset-running.err" "reset refused while a start is in flight"
+if [[ -f "$ALLOW" && "$(allow_field session_id)" == "$SID" ]]; then
+  ok "reset during a live loop keeps the allowance"
+else
+  bad "reset during a live loop deleted the allowance"
+fi
+: > "$CALLS/runner.release"
+wait "$pause_pid" || true
+pause_rc=$?
+check_eq "live loop finishes after the refused reset" "$pause_rc" 0
+check_eq "live loop completed the reserved start" "$(allow_field completed_iterations)" 1
+if python3 - "$ALLOW" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if "runner_pid" not in doc else 1)
+PY
+then
+  ok "completed start clears the loop pid"
+else
+  bad "completed start left the loop pid"
+fi
 
 echo "session-budget.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
