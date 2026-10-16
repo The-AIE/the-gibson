@@ -7,10 +7,34 @@
 #   A persisted allowance (gibson/session-budget.json) with session identity,
 #   start time, and consumed starts. Defaults are 50 iterations, 480 minutes,
 #   and USD 20. 0 on a dimension, or --unbounded, is an explicit opt-out and is
-#   journaled. Ordinary relaunch resumes the same allowance. Only
-#   --reset-session-budget creates a fresh one. An atomic latch
-#   (gibson/session-budget-latch) keeps a budget stop from being forgotten by
-#   launchd KeepAlive.
+#   journaled. If that line cannot be written, the launch is refused and the
+#   allowance created for it is removed. That removal is outside the engine
+#   lock: a second launch that already resumed the file can lose it, and the
+#   next reserve can start a fresh session. Ordinary relaunch resumes the
+#   same allowance. Only
+#   --reset-session-budget creates a fresh one. Under the allowance lock,
+#   reset is refused while the recorded loop pid is still alive. An
+#   interrupted start with no pid, or a pid that is not alive, is what that
+#   flag discards. Ordinary relaunch still keeps that start consumed. The
+#   reset line is written before either file is deleted. A crash after the
+#   line and before either delete leaves the old allowance; the journal line
+#   is not proof the files are gone, and the next ordinary launch resumes it.
+#   A symlink or
+#   non-regular journal or latch leaves the allowance unchanged. A dangling
+#   latch is not a missing latch.
+#   The stop latch
+#   (gibson/session-budget-latch) and the journal receipt are one transaction
+#   under the allowance lock: the latch is renamed into place first, then the
+#   receipt is appended to the journal only if a final `receipt_end: <id>`
+#   line is absent. A fragment that merely contains the receipt id is not
+#   that line. The id is derived from the session id, the allowance id (the
+#   persisted session id; the allowance schema has no second id), and the
+#   stop reason. A later launch that finds the latch without that end line
+#   publishes the stored snapshot once. A latched stop for a different lane
+#   or repo is refused and does not publish. A launchd KeepAlive relaunch
+#   that observes the latch does not start another runner or append another
+#   receipt. Two launches that both enter during the lock race in LIMITS
+#   can still publish two receipts.
 #
 # STOPS
 #   Checked only at iteration boundaries (before a runner is started, and after
@@ -25,13 +49,16 @@
 #   Exact Decimal sum of JSON-string cost_usd values on gibson.cost.v1 ledger
 #   events whose session_id equals this allowance. Tokens, ACUs, and flat_rate
 #   are never converted to dollars. No matching cost_usd → "cost: not measured"
-#   (not $0). A measured subset that does not cover every completed iteration,
-#   or any event that lacks an iteration id, stays "partial": one cost_usd event
-#   does not establish complete session spend. A partial or complete sum that
-#   reaches the cap stops; an unmeasured session does not stop on cost.
-#   scripts/cost-ledger.sh is not modified and its append path does not write
-#   cost_usd. A metered runner records a line itself. The loop exports
-#   GIBSON_SESSION_ID and GIBSON_SESSION_ITERATION before the runner starts.
+#   (not $0). Any matching cost_usd stays "partial": scripts/cost-ledger.sh
+#   writes no cost_usd, no session_id, and no session-complete or session-closed
+#   marker, so the ledger never certifies that every consumed start was measured.
+#   Iteration coverage is not that certificate. One cost_usd event does not
+#   establish complete session spend, and cost_status complete is not emitted.
+#   The partial receipt names the summed amount and says "not every iteration
+#   measured". A partial sum that reaches the cap stops; an unmeasured session
+#   does not stop on cost. A metered runner records a line itself. The loop
+#   exports GIBSON_SESSION_ID and GIBSON_SESSION_ITERATION before the runner
+#   starts.
 #
 # LIMITS (honest)
 #   The allowance file is local state writable by the same user and by the
@@ -43,6 +70,18 @@
 #   latches a distinct blocked state, exits nonzero, and does not grant a new
 #   allowance; the next launch rechecks and stays quiet while it is still
 #   unreadable.
+#   runner_pid is loop.sh's pid, stored when a start is reserved and removed
+#   when that start completes. Reset consults it only when it is a non-boolean
+#   integer and kill(pid, 0) succeeds. A missing pid, any other JSON type, or
+#   a pid that is not alive is an interrupted start. pid_alive treats EPERM as
+#   not alive, the same way lock reclaim does. A recycled pid can look alive
+#   until that other process exits.
+#   The allowance lock is a directory plus a pid file. Two launches that
+#   overlap after the directory exists and before that pid file is durable
+#   can both enter. Counters can overwrite each other, and two receipts can
+#   be published. That race, the opt-out discard race, and a crash between
+#   the reset line and the delete are stated limits (The-AIE/the-gibson#499),
+#   not closed here.
 #
 # Caller globals (loop.sh): STATE_DIR JOURNAL EXPECTED_REPO_SLUG MAX iter
 #   plus info(). Limits: SB_LIMIT_ITERATIONS SB_LIMIT_WALL_MIN SB_LIMIT_COST_USD
@@ -51,29 +90,15 @@
 
 # Result fields filled by sb_engine. Cleared at the start of each call.
 SB_STATUS=""
-SB_QUIET=""
 SB_REASON=""
 SB_MESSAGE=""
 SB_SESSION_ID=""
 SB_CREATED=""
 SB_OPT_OUT=""
 SB_ITERATION=""
-SB_CONSUMED=""
-SB_COMPLETED=""
-SB_ELAPSED=""
-SB_OVERSHOOT=""
 SB_COST_STATUS=""
 SB_COST_TEXT=""
-SB_EXHAUSTED=""
-SB_PRS_TEXT=""
-SB_PREVIOUS_SESSION_ID=""
-SB_STARTED_AT=""
-SB_MAX_ITERATIONS=""
-SB_MAX_WALL_MIN=""
-SB_MAX_COST_USD=""
-SB_LANE_STORED=""
 SB_DIAGNOSIS=""
-SB_RECEIPT_JSON=""
 
 sb_allowance_path() { printf '%s/session-budget.json' "$STATE_DIR"; }
 sb_latch_path() { printf '%s/session-budget-latch' "$STATE_DIR"; }
@@ -93,29 +118,15 @@ sb_engine() {
   local op="$1"
   local err out rc line key val
   SB_STATUS=""
-  SB_QUIET=""
   SB_REASON=""
   SB_MESSAGE=""
   SB_SESSION_ID=""
   SB_CREATED=""
   SB_OPT_OUT=""
   SB_ITERATION=""
-  SB_CONSUMED=""
-  SB_COMPLETED=""
-  SB_ELAPSED=""
-  SB_OVERSHOOT=""
   SB_COST_STATUS=""
   SB_COST_TEXT=""
-  SB_EXHAUSTED=""
-  SB_PRS_TEXT=""
-  SB_PREVIOUS_SESSION_ID=""
-  SB_STARTED_AT=""
-  SB_MAX_ITERATIONS=""
-  SB_MAX_WALL_MIN=""
-  SB_MAX_COST_USD=""
-  SB_LANE_STORED=""
   SB_DIAGNOSIS=""
-  SB_RECEIPT_JSON=""
   err=$(mktemp "${TMPDIR:-/tmp}/gibson-sb.XXXXXX") || return 1
   local abs_state
   if [[ -z "${STATE_DIR:-}" ]]; then
@@ -138,6 +149,8 @@ sb_engine() {
   }
   set +e
   out=$(
+    # $$ is the sourcing shell (loop.sh), including inside this substitution.
+    # Python's pid exits before the runner starts, so it cannot mark a live loop.
     SB_OP="$op" \
       SB_STATE_DIR="$abs_state" \
       SB_LIMIT_ITERATIONS="${SB_LIMIT_ITERATIONS:-}" \
@@ -150,8 +163,18 @@ sb_engine() {
       SB_LEDGER="${GIBSON_COST_LEDGER:-}" \
       SB_LEGACY_MAX="${SB_LEGACY_MAX:-}" \
       SB_LEGACY_ITER="${SB_LEGACY_ITER:-}" \
+      SB_JOURNAL="${JOURNAL:-}" \
+      SB_CRASH_AFTER_LATCH="${SB_CRASH_AFTER_LATCH:-}" \
+      SB_HOLD_FILE="${SB_HOLD_FILE:-}" \
+      SB_RELEASE_FILE="${SB_RELEASE_FILE:-}" \
+      SB_JOURNAL_HOLD_FILE="${SB_JOURNAL_HOLD_FILE:-}" \
+      SB_JOURNAL_RELEASE_FILE="${SB_JOURNAL_RELEASE_FILE:-}" \
+      SB_LATCH_KIND="${SB_LATCH_KIND:-}" \
+      SB_LATCH_REASON="${SB_LATCH_REASON:-}" \
+      SB_LATCH_SESSION="${SB_LATCH_SESSION:-}" \
+      SB_LOOP_PID="${SB_LOOP_PID:-$$}" \
       python3 - <<'PY'
-import errno, json, os, re, sys, tempfile, time
+import errno, hashlib, json, os, re, sys, tempfile, time
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -193,7 +216,11 @@ def fatal(message):
     setf("message", message)
     finish()
 
-DEC_RE = re.compile(r"^(0|[1-9][0-9]{0,8})(\.[0-9]{1,6})?$")
+# Canonical non-negative decimal: no exponent, no leading zeros, at most 18
+# integer digits and 12 fractional digits. Inside that grammar the sum is
+# exact Decimal. Outside it, fail closed — do not infer a value and do not
+# treat the row as zero. 0.0000001 and amounts past 9 digits are inside it.
+DEC_RE = re.compile(r"^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$")
 LANE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 SID_RE = re.compile(r"^sb-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 
@@ -209,6 +236,13 @@ def dec_str(value):
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
+
+def make_receipt_id(session_id, allowance_id, reason):
+    # The allowance schema has no id besides session_id. allowance_id is that
+    # session_id. The receipt id still mixes both fields with the reason so a
+    # different reason cannot reuse the receipt.
+    raw = "session=%s\nallowance=%s\nreason=%s" % (session_id, allowance_id, reason)
+    return "sbr1-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 def env_int(name):
     raw = os.environ.get(name, "")
@@ -235,6 +269,8 @@ if not state_dir or state_dir.startswith("/") is False:
 allowance_path = os.path.join(state_dir, "session-budget.json")
 latch_path = os.path.join(state_dir, "session-budget-latch")
 lock_path = os.path.join(state_dir, "session-budget.lock")
+journal_env = os.environ.get("SB_JOURNAL", "")
+journal_path = journal_env if journal_env else os.path.join(state_dir, "journal.md")
 
 def pid_alive(pid):
     if pid <= 0:
@@ -244,6 +280,13 @@ def pid_alive(pid):
     except OSError:
         return False
     return True
+
+def recorded_loop_pid():
+    # SB_LOOP_PID is loop.sh. A non-integer must not be stored as a live pid.
+    raw = os.environ.get("SB_LOOP_PID", "").strip()
+    if not re.match(r"^[1-9][0-9]{0,9}$", raw):
+        return None
+    return int(raw)
 
 def release_lock():
     pid_path = os.path.join(lock_path, "pid")
@@ -364,10 +407,12 @@ def load_allowance():
     return doc
 
 def load_latch():
-    if not os.path.exists(latch_path):
+    # lexists: a dangling symlink is a latch path, not a missing latch.
+    # exists() follows the link and would let a reserve create a new allowance.
+    if not os.path.lexists(latch_path):
         return None
-    if os.path.islink(latch_path):
-        fatal("session budget latch is a symlink")
+    if os.path.islink(latch_path) or not os.path.isfile(latch_path):
+        fatal("session budget latch is not a regular file")
     doc = {}
     try:
         lines = open(latch_path, "r", encoding="utf-8").read().splitlines()
@@ -389,15 +434,288 @@ def write_allowance(doc):
     payload = json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
     atomic_write(allowance_path, payload)
 
-def write_latch(kind, reason, session_id, journaled):
-    body = (
-        "schema=gibson.session-budget.latch.v1\n"
-        "kind=%s\n"
-        "reason=%s\n"
-        "session_id=%s\n"
-        "journaled=%s\n"
-    ) % (kind, reason, session_id, journaled)
-    atomic_write(latch_path, body.encode("utf-8"))
+def write_latch(kind, reason, session_id, journaled, extra=None):
+    lines = [
+        "schema=gibson.session-budget.latch.v1",
+        "kind=%s" % kind,
+        "reason=%s" % reason,
+        "session_id=%s" % session_id,
+        "journaled=%s" % journaled,
+    ]
+    if extra:
+        for key in sorted(extra):
+            value = extra[key]
+            if not isinstance(value, str):
+                value = str(value)
+            if "\n" in value or "\r" in value or "\n" in key or "=" in key:
+                fatal("invalid latch field " + key)
+            lines.append("%s=%s" % (key, value))
+    atomic_write(latch_path, ("\n".join(lines) + "\n").encode("utf-8"))
+
+SNAPSHOT_KEYS = (
+    "diagnosis", "lane_id", "repo", "started_at", "iterations_completed", "in_flight",
+    "starts_consumed", "wall_seconds", "wall_overshoot_seconds",
+    "iteration_budget", "wall_budget_min", "cost_budget_usd", "cost_text",
+    "cost_status", "prs_text", "exhausted", "receipt_json", "receipt_id",
+    "allowance_id",
+)
+
+def journal_has_receipt(receipt_id):
+    # Positive evidence is the final receipt_end line, not a substring of the
+    # receipt id. A torn or planted fragment can contain "receipt_id" and
+    # still be incomplete.
+    if not isinstance(receipt_id, str) or not receipt_id:
+        return False
+    if "\n" in receipt_id or "\r" in receipt_id:
+        return False
+    if os.path.islink(journal_path) or not os.path.isfile(journal_path):
+        return False
+    marker = "receipt_end: " + receipt_id
+    try:
+        lines = open(journal_path, "r", encoding="utf-8").read().splitlines()
+    except OSError as exc:
+        fatal("session budget journal unreadable: " + exc.strerror)
+    return marker in lines
+
+def append_journal(text):
+    # Append only the new bytes. Replacing the file dropped a line another
+    # writer added after this function had read the old contents. A crash can
+    # leave a partial tail. A receipt is published only when its receipt_end
+    # line is present, so the next launch writes that stored receipt once.
+    if os.path.islink(journal_path):
+        fatal("session budget journal is a symlink")
+    parent = os.path.dirname(journal_path) or "."
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except OSError as exc:
+        fatal("session budget journal directory failed: " + (exc.strerror or "unknown"))
+    if os.path.lexists(journal_path):
+        if os.path.islink(journal_path) or not os.path.isfile(journal_path):
+            fatal("session budget journal is not a regular file")
+    else:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(journal_path, flags, 0o644)
+        except OSError as exc:
+            fatal("session budget journal create failed: " + (exc.strerror or "unknown"))
+        try:
+            os.write(fd, b"# Gibson loop journal\n")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    maybe_journal_hold()
+    flags = os.O_APPEND | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = None
+    try:
+        fd = os.open(journal_path, flags)
+        view = text.encode("utf-8")
+        while view:
+            wrote = os.write(fd, view)
+            if wrote <= 0:
+                raise OSError("short write")
+            view = view[wrote:]
+        os.fsync(fd)
+    except OSError as exc:
+        fatal("session budget journal write failed: " + (getattr(exc, "strerror", None) or str(exc)))
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+def render_receipt(fields):
+    cost_status = fields["cost_status"]
+    lines = [
+        "",
+        "## %s · session-budget" % now_utc(),
+        "diagnosis: %s" % fields["diagnosis"],
+        "session_id: %s" % fields["session_id"],
+        "lane_id: %s" % fields["lane_id"],
+        "started_at: %s" % fields["started_at"],
+        "iterations_completed: %s" % fields["iterations_completed"],
+        "in_flight: %s" % fields["in_flight"],
+        "starts_consumed: %s" % fields["starts_consumed"],
+        "wall_seconds: %s" % fields["wall_seconds"],
+        "wall_overshoot_seconds: %s" % fields["wall_overshoot_seconds"],
+        "iteration_budget: %s" % fields["iteration_budget"],
+        "wall_budget_min: %s" % fields["wall_budget_min"],
+        "cost_budget_usd: %s" % fields["cost_budget_usd"],
+        "receipt_id: %s" % fields["receipt_id"],
+        fields["cost_text"],
+        "cost_status: %s" % cost_status,
+        fields["prs_text"],
+        "exhausted: %s" % fields["exhausted"],
+        "note: stopped at an iteration boundary. The session budget does not kill the runner. Per-iteration kills stay with --runner-timeout. Wall time can overshoot the cap by the remainder of the last iteration.",
+    ]
+    if cost_status == "not_measured":
+        lines.append(
+            "note: cost: not measured. Flat-rate or pool runners report no cost_usd. "
+            "That is not $0. Iterations and wall-clock still bound the session."
+        )
+    elif cost_status == "partial":
+        lines.append(
+            "note: cost is partial; not every iteration measured. Measured dollars "
+            "are not a complete session total. One cost_usd event does not establish "
+            "complete session spend."
+        )
+    lines.append(fields["receipt_json"])
+    # Last line. journal_has_receipt matches this exact line and nothing earlier.
+    lines.append("receipt_end: %s" % fields["receipt_id"])
+    return "\n".join(lines) + "\n"
+
+def require_snapshot(fields):
+    for key in SNAPSHOT_KEYS:
+        if key not in fields or fields[key] == "":
+            fatal("session budget latch missing " + key)
+    needle = '"receipt_id":"%s"' % fields["receipt_id"]
+    if needle not in fields["receipt_json"]:
+        fatal("session budget latch receipt does not carry its receipt id")
+
+def latch_extra(fields):
+    skip = {"schema", "kind", "reason", "session_id", "journaled"}
+    extra = {}
+    for key in SNAPSHOT_KEYS:
+        if key in skip:
+            continue
+        extra[key] = fields[key]
+    return extra
+
+def maybe_test_hold():
+    # Test-only. Unset in production. Holds the allowance lock so a second
+    # boundary can block before this stop publishes.
+    hold = os.environ.get("SB_HOLD_FILE", "")
+    if not hold:
+        return
+    release = os.environ.get("SB_RELEASE_FILE", "")
+    try:
+        fd = os.open(hold, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+        os.write(fd, b"held\n")
+        os.fsync(fd)
+        os.close(fd)
+    except OSError as exc:
+        fatal("session budget test hold failed: " + exc.strerror)
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if release and os.path.exists(release):
+            return
+        time.sleep(0.02)
+    fatal("session budget test hold expired")
+
+def maybe_journal_hold():
+    # Test-only. Pauses before the receipt bytes are appended, so a
+    # concurrent journal line can land and must still be there afterwards.
+    hold = os.environ.get("SB_JOURNAL_HOLD_FILE", "")
+    if not hold:
+        return
+    release = os.environ.get("SB_JOURNAL_RELEASE_FILE", "")
+    try:
+        fd = os.open(hold, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+        os.write(fd, b"held\n")
+        os.fsync(fd)
+        os.close(fd)
+    except OSError as exc:
+        fatal("session budget journal hold failed: " + exc.strerror)
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if release and os.path.exists(release):
+            return
+        time.sleep(0.02)
+    fatal("session budget journal hold expired")
+
+def commit_stop(doc, reason):
+    # Lock is already held by acquire_lock. Latch first (atomic rename), then
+    # the receipt. A crash between the two leaves the snapshot in the latch;
+    # the next launch publishes that snapshot once.
+    maybe_test_hold()
+    fields = {
+        "session_id": doc["session_id"],
+        "reason": reason,
+        "diagnosis": OUT["diagnosis"],
+        "lane_id": OUT["lane_id"],
+        "repo": doc["repo"],
+        "started_at": OUT["started_at"],
+        "iterations_completed": OUT["completed"],
+        "in_flight": OUT["in_flight"],
+        "starts_consumed": OUT["consumed"],
+        "wall_seconds": OUT["elapsed"],
+        "wall_overshoot_seconds": OUT["overshoot"],
+        "iteration_budget": OUT["max_iterations"],
+        "wall_budget_min": OUT["max_wall_min"],
+        "cost_budget_usd": OUT["max_cost_usd"],
+        "cost_text": OUT["cost_text"],
+        "cost_status": OUT["cost_status"],
+        "prs_text": OUT["prs_text"],
+        "exhausted": OUT["exhausted"],
+        "receipt_json": OUT["receipt_json"],
+        "receipt_id": OUT["receipt_id"],
+        "allowance_id": OUT["allowance_id"],
+    }
+    require_snapshot(fields)
+    extra = latch_extra(fields)
+    write_latch("exhausted", reason, doc["session_id"], "0", extra)
+    if os.environ.get("SB_CRASH_AFTER_LATCH") == "1":
+        # Test hook: latch is durable, receipt is not. os._exit skips the
+        # lock release; the next launch reclaims the dead pid.
+        os._exit(137)
+    if not journal_has_receipt(fields["receipt_id"]):
+        append_journal(render_receipt(fields))
+    write_latch("exhausted", reason, doc["session_id"], "1", extra)
+    setf("status", "stop")
+    setf("quiet", "1")
+
+def check_latch_identity(latch, want):
+    # A latched stop is still this allowance. A different lane or repo must
+    # get the same refusal as a live allowance, not a clean budget stop.
+    if not LANE_RE.match(want["lane_id"]):
+        fatal("GIBSON_LANE_ID is not a lane id")
+    if not want["repo"]:
+        fatal("session budget requires a repo slug")
+    lane = latch.get("lane_id", "")
+    repo = latch.get("repo", "")
+    if not isinstance(lane, str) or not lane or not isinstance(repo, str) or not repo:
+        fatal("session budget latch missing lane_id or repo")
+    if lane != want["lane_id"] or repo != want["repo"]:
+        fatal(
+            "refusing to resume session %s for lane %s repo %s; allowance is lane %s repo %s. "
+            "Resumed identities do not cross-charge another lane. Pass --reset-session-budget "
+            "to start a fresh allowance. No runner was started."
+            % (latch.get("session_id") or "unknown", want["lane_id"], want["repo"], lane, repo)
+        )
+    doc = load_allowance()
+    if doc is not None:
+        check_identity(doc, want)
+
+def publish_latched_stop(latch):
+    # Republish the stop-time snapshot. Do not reread the allowance or the
+    # ledger: a runner that finishes after the stop must not change the count
+    # this receipt already froze, and a later unreadable ledger must not turn
+    # a stable stop into a new receipt.
+    require_snapshot(latch)
+    if "session_id" not in latch or not latch.get("reason"):
+        fatal("session budget latch missing session_id or reason")
+    reason = latch["reason"]
+    setf("status", "stop")
+    setf("quiet", "1")
+    setf("reason", reason)
+    setf("diagnosis", latch["diagnosis"])
+    setf("session_id", latch["session_id"])
+    setf("cost_text", latch["cost_text"])
+    setf("cost_status", latch["cost_status"])
+    setf("completed", latch["iterations_completed"])
+    setf("consumed", latch["starts_consumed"])
+    setf("in_flight", latch["in_flight"])
+    rid = latch["receipt_id"]
+    if journal_has_receipt(rid):
+        if latch.get("journaled") != "1":
+            write_latch("exhausted", reason, latch["session_id"], "1", latch_extra(latch))
+        return
+    append_journal(render_receipt(latch))
+    write_latch("exhausted", reason, latch["session_id"], "1", latch_extra(latch))
 
 def new_session_id():
     import secrets
@@ -451,7 +769,9 @@ def scan_ledger(session_id):
     ledger = os.environ.get("SB_LEDGER", "")
     if ledger == "":
         return "not_measured", None, ("not_measured", None), "no-ledger"
-    if not os.path.exists(ledger):
+    # lexists: a dangling symlink exists as a path and is not a missing file.
+    # exists() follows the link and would treat that block as "no ledger".
+    if not os.path.lexists(ledger):
         return "not_measured", None, ("not_measured", None), "missing-ledger"
     if os.path.islink(ledger) or not os.path.isfile(ledger):
         fatal("cost ledger is not a regular file; refusing to treat cost as zero")
@@ -477,10 +797,6 @@ def scan_ledger(session_id):
         if schema != "gibson.cost.v1":
             continue
         where = "cost ledger line %d" % idx
-        if "cost_usd" in ev:
-            amount = parse_cost_string(ev.get("cost_usd"), where)
-        else:
-            amount = None
         sid = ev.get("session_id")
         if sid is None:
             continue
@@ -488,6 +804,13 @@ def scan_ledger(session_id):
             fatal(where + ": session_id must be a string")
         if sid != session_id:
             continue
+        # Another session's row was skipped above. A malformed cost_usd on
+        # this session still fails closed. A malformed cost_usd on a
+        # different session is not this allowance's telemetry.
+        if "cost_usd" in ev:
+            amount = parse_cost_string(ev.get("cost_usd"), where)
+        else:
+            amount = None
         iteration = ev.get("iteration", None)
         if iteration is not None:
             if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 1:
@@ -496,10 +819,14 @@ def scan_ledger(session_id):
             merged = ev.get("merged")
             if not isinstance(merged, bool):
                 fatal(where + ": merged must be a boolean")
-            merge_seen = True
             pr = ev.get("pr")
-            if merged and isinstance(pr, int) and not isinstance(pr, bool) and pr > 0:
-                merged_prs.add(pr)
+            # Docs: a row counts only when it carries boolean merged AND an
+            # integer pr. A merged flag alone is not telemetry, so it must
+            # not turn the receipt into prs_merged: 0.
+            if isinstance(pr, int) and not isinstance(pr, bool):
+                merge_seen = True
+                if merged and pr > 0:
+                    merged_prs.add(pr)
         if amount is not None:
             measured.append((iteration, amount))
     if not measured:
@@ -510,23 +837,24 @@ def scan_ledger(session_id):
     return "measured", (total, measured), prs, "ok"
 
 def cost_view(doc):
+    # Completeness check, exactly:
+    # scripts/cost-ledger.sh appends gibson.cost.v1 rows with schema, ts,
+    # runner, pool, hat, wall_ms, and optional tokens, acus, issue, pr,
+    # iteration, repo, note, join_key, requested_runner, provider,
+    # fallback_reason, event_kind, and flat_rate. That writer has no
+    # cost_usd, no session_id, and no session-complete or session-closed
+    # field. This function sums cost_usd decimal strings a metered runner
+    # attached to rows for this session_id. Those rows are measurements.
+    # They are not a certificate that every consumed start was measured,
+    # and matching iteration numbers do not create one. No matching
+    # cost_usd → not_measured. One or more → partial. complete is not
+    # returned.
     kind, payload, prs, _how = scan_ledger(doc["session_id"])
     prs_status, prs_count = prs
     if kind == "not_measured":
         return "not_measured", None, "cost: not measured", prs_status, prs_count
-    total, measured = payload
-    completed = doc["completed_iterations"]
-    consumed = doc["consumed_starts"]
-    iters = [item[0] for item in measured]
-    covered = (
-        completed >= 1
-        and consumed == completed
-        and all(isinstance(item, int) and 1 <= item <= completed for item in iters)
-        and set(iters) >= set(range(1, completed + 1))
-    )
+    total, _measured = payload
     text_amount = dec_str(total)
-    if covered:
-        return "complete", total, "cost: " + text_amount, prs_status, prs_count
     return "partial", total, "cost: partial " + text_amount, prs_status, prs_count
 
 def elapsed_seconds(doc):
@@ -599,6 +927,13 @@ def fill_common(doc, exhausted, elapsed, overshoot, cost_status, total, cost_tex
         diagnosis = "budget: cost-ledger-unreadable"
     setf("diagnosis", diagnosis)
     setf("reason", reason)
+    in_flight = 1 if doc["consumed_starts"] > doc["completed_iterations"] else 0
+    # Allowance id is the persisted session_id. See make_receipt_id.
+    allowance_id = doc["session_id"]
+    receipt_id = make_receipt_id(doc["session_id"], allowance_id, reason) if reason else ""
+    setf("in_flight", str(in_flight))
+    setf("allowance_id", allowance_id)
+    setf("receipt_id", receipt_id)
     receipt = {
         "schema": "gibson.session-budget.v1",
         "session_id": doc["session_id"],
@@ -621,6 +956,9 @@ def fill_common(doc, exhausted, elapsed, overshoot, cost_status, total, cost_tex
         "prs_text": OUT.get("prs_text", ""),
         "exhausted": exhausted,
         "unbounded": doc["unbounded"],
+        "in_flight": in_flight,
+        "receipt_id": receipt_id if receipt_id else None,
+        "allowance_id": allowance_id,
     }
     setf("receipt_json", json.dumps(receipt, sort_keys=True, separators=(",", ":")))
 
@@ -641,21 +979,55 @@ acquire_lock()
 try:
     want = want_limits()
     if op == "reset":
-        previous = ""
-        if os.path.exists(allowance_path) and not os.path.islink(allowance_path):
-            try:
-                previous = json.loads(open(allowance_path, "r", encoding="utf-8").read()).get("session_id", "")
-            except (OSError, json.JSONDecodeError, AttributeError):
-                previous = "unreadable"
-            if not isinstance(previous, str):
-                previous = "unreadable"
+        # Under the allowance lock: refuse only a start whose recorded loop
+        # pid is still alive, append the reset line, then delete. The counter
+        # gap is also what a killed runner leaves behind, so counters alone
+        # do not refuse. A missing pid, a boolean, or any other non-integer
+        # is an interrupted start. A failed journal write does not delete.
+        # A symlink or directory is refused before either step.
         for path in (allowance_path, latch_path):
-            if os.path.lexists(path):
-                if os.path.islink(path):
-                    fatal("refusing to delete a symlink during reset: " + os.path.basename(path))
-                os.remove(path)
+            if not os.path.lexists(path):
+                continue
+            if os.path.islink(path) or not os.path.isfile(path):
+                fatal("refusing to delete a non-regular file during reset: " + os.path.basename(path))
+        previous = "none"
+        if os.path.isfile(allowance_path) and not os.path.islink(allowance_path):
+            try:
+                loaded = json.loads(open(allowance_path, "r", encoding="utf-8").read())
+            except (OSError, json.JSONDecodeError, AttributeError):
+                loaded = None
+            if isinstance(loaded, dict):
+                sid = loaded.get("session_id", "")
+                previous = sid if isinstance(sid, str) and sid else "unreadable"
+                consumed = loaded.get("consumed_starts")
+                completed = loaded.get("completed_iterations")
+                runner = loaded.get("runner_pid")
+                if (
+                    isinstance(consumed, int) and not isinstance(consumed, bool)
+                    and isinstance(completed, int) and not isinstance(completed, bool)
+                    and consumed > completed
+                    and isinstance(runner, int) and not isinstance(runner, bool)
+                    and pid_alive(runner)
+                ):
+                    fatal("session budget reset refused while a start is in flight")
+            else:
+                previous = "unreadable"
+        append_journal(
+            "\n## %s · session-budget-reset\n"
+            "diagnosis: operator reset session budget (--reset-session-budget)\n"
+            "previous_session_id: %s\n"
+            "note: a fresh allowance is created on the next runner start. "
+            "Relaunch without this flag resumes the allowance.\n"
+            % (now_utc(), previous)
+        )
+        for path in (allowance_path, latch_path):
+            if not os.path.lexists(path):
+                continue
+            if os.path.islink(path) or not os.path.isfile(path):
+                fatal("refusing to delete a non-regular file during reset: " + os.path.basename(path))
+            os.remove(path)
         setf("status", "ok")
-        setf("previous_session_id", previous or "none")
+        setf("previous_session_id", previous)
         finish()
 
     if op == "latch":
@@ -666,39 +1038,30 @@ try:
             fatal("invalid latch kind")
         if not reason:
             fatal("latch requires a reason")
-        write_latch(kind, reason, sid, "1")
+        if not LANE_RE.match(want["lane_id"]):
+            fatal("GIBSON_LANE_ID is not a lane id")
+        if not want["repo"]:
+            fatal("session budget requires a repo slug")
+        write_latch(kind, reason, sid, "1", {
+            "lane_id": want["lane_id"],
+            "repo": want["repo"],
+        })
         setf("status", "ok")
         finish()
 
     latch = load_latch()
     if latch and latch.get("kind") == "exhausted" and op in ("startup", "reserve", "boundary"):
-        setf("status", "stop")
-        setf("quiet", "1" if latch.get("journaled") == "1" else "0")
-        setf("reason", latch.get("reason", "iterations"))
-        setf("diagnosis", "budget: " + latch.get("reason", "iterations"))
-        setf("session_id", latch.get("session_id", ""))
-        # Already journaled: do not rescan the ledger. A later unreadable
-        # ledger must not turn a stable budget stop into a new receipt.
-        if latch.get("journaled") == "1":
-            finish()
-        doc = load_allowance()
-        if doc is not None:
-            try:
-                exhausted, elapsed, overshoot, cost_status, total, cost_text, prs_status, prs_count = exhaustion(doc)
-            except SystemExit:
-                raise
-            fill_common(doc, exhausted, elapsed, overshoot, cost_status, total, cost_text, prs_status, prs_count, latch.get("reason", "iterations"))
-            setf("quiet", "1" if latch.get("journaled") == "1" else "0")
-            setf("diagnosis", "budget: " + latch.get("reason", "iterations"))
-            setf("reason", latch.get("reason", "iterations"))
+        check_latch_identity(latch, want)
+        publish_latched_stop(latch)
         finish()
 
     if latch and latch.get("kind") == "unreadable" and op == "startup":
-        # Recheck. scan_ledger fatals by finish() if still unreadable.
-        # The first unreadable stop does not grant an allowance. Recovery
-        # must still clear the latch once the ledger is a regular file again,
-        # so a later launch can create a fresh allowance. A still-unreadable
-        # ledger fatals and does not create one.
+        # The latch names the lane and repo that blocked. A different lane
+        # must not clear it. scan_ledger fatals if the ledger is still
+        # unreadable. The first stop does not grant an allowance. Recovery
+        # clears the latch only after that identity check and only once the
+        # ledger is a regular file again.
+        check_latch_identity(latch, want)
         doc = load_allowance()
         if doc is None:
             scan_ledger("sb-00000000T000000Z-00000000")
@@ -722,8 +1085,7 @@ try:
         reason = exhausted[0] if exhausted else ""
         fill_common(doc, exhausted, elapsed, overshoot, cost_status, total, cost_text, prs_status, prs_count, reason)
         if exhausted:
-            setf("status", "stop")
-            setf("quiet", "0")
+            commit_stop(doc, reason)
         else:
             setf("status", "ok")
         finish()
@@ -772,11 +1134,14 @@ try:
                 write_allowance(doc)
             reason = exhausted[0]
             fill_common(doc, exhausted, elapsed, overshoot, cost_status, total, cost_text, prs_status, prs_count, reason)
-            setf("status", "stop")
-            setf("quiet", "0")
+            commit_stop(doc, reason)
             setf("created", "1" if created else "0")
             finish()
         doc["consumed_starts"] += 1
+        pid = recorded_loop_pid()
+        if pid is None:
+            fatal("session budget reserve requires the loop pid")
+        doc["runner_pid"] = pid
         write_allowance(doc)
         setf("status", "ok")
         setf("created", "1" if created else "0")
@@ -794,6 +1159,7 @@ try:
         if doc["completed_iterations"] >= doc["consumed_starts"]:
             fatal("completed iterations would exceed consumed starts")
         doc["completed_iterations"] += 1
+        doc.pop("runner_pid", None)
         write_allowance(doc)
         setf("status", "ok")
         setf("session_id", doc["session_id"])
@@ -810,8 +1176,7 @@ try:
         reason = exhausted[0] if exhausted else ""
         fill_common(doc, exhausted, elapsed, overshoot, cost_status, total, cost_text, prs_status, prs_count, reason)
         if exhausted:
-            setf("status", "stop")
-            setf("quiet", "0")
+            commit_stop(doc, reason)
         else:
             setf("status", "ok")
         finish()
@@ -839,7 +1204,6 @@ PY
     val=${line#*=}
     case "$key" in
       status) SB_STATUS=$val ;;
-      quiet) SB_QUIET=$val ;;
       reason) SB_REASON=$val ;;
       message) SB_MESSAGE=$val ;;
       diagnosis) SB_DIAGNOSIS=$val ;;
@@ -847,21 +1211,8 @@ PY
       created) SB_CREATED=$val ;;
       opt_out) SB_OPT_OUT=$val ;;
       iteration) SB_ITERATION=$val ;;
-      consumed) SB_CONSUMED=$val ;;
-      completed) SB_COMPLETED=$val ;;
-      elapsed) SB_ELAPSED=$val ;;
-      overshoot) SB_OVERSHOOT=$val ;;
       cost_status) SB_COST_STATUS=$val ;;
       cost_text) SB_COST_TEXT=$val ;;
-      exhausted) SB_EXHAUSTED=$val ;;
-      prs_text) SB_PRS_TEXT=$val ;;
-      previous_session_id) SB_PREVIOUS_SESSION_ID=$val ;;
-      started_at) SB_STARTED_AT=$val ;;
-      max_iterations) SB_MAX_ITERATIONS=$val ;;
-      max_wall_min) SB_MAX_WALL_MIN=$val ;;
-      max_cost_usd) SB_MAX_COST_USD=$val ;;
-      lane_id) SB_LANE_STORED=$val ;;
-      receipt_json) SB_RECEIPT_JSON=$val ;;
       *) ;;
     esac
   done <<EOF
@@ -874,16 +1225,53 @@ EOF
   return 0
 }
 
+# Shell redirects follow symlinks. The engine does not. A refusal or opt-out
+# must not be written through a symlink journal.
 sb_ensure_journal() {
-  mkdir -p "$STATE_DIR"
-  if [[ ! -e "$JOURNAL" && ! -L "$JOURNAL" ]]; then
-    echo "# Gibson loop journal" > "$JOURNAL"
+  if [[ -z "${JOURNAL:-}" ]]; then
+    echo "loop.sh: ERROR: session budget: journal path is unset" >&2
+    return 1
+  fi
+  if [[ -L "$JOURNAL" ]]; then
+    echo "loop.sh: ERROR: session budget: journal is a symlink" >&2
+    return 1
+  fi
+  if [[ -e "$JOURNAL" && ! -f "$JOURNAL" ]]; then
+    echo "loop.sh: ERROR: session budget: journal is not a regular file" >&2
+    return 1
+  fi
+  if [[ -e "$JOURNAL" && ! -w "$JOURNAL" ]]; then
+    echo "loop.sh: ERROR: session budget: journal is not writable" >&2
+    return 1
+  fi
+  if [[ ! -e "$JOURNAL" ]]; then
+    mkdir -p -- "$(dirname -- "$JOURNAL")" || return 1
+    printf '%s\n' "# Gibson loop journal" > "$JOURNAL" || return 1
+  fi
+}
+
+sb_journal_append() {
+  sb_ensure_journal || return 1
+  cat >> "$JOURNAL"
+}
+
+# The engine has already created this allowance. If the required journal
+# line was not written, remove that file so the next launch cannot resume
+# an opt-out that was never recorded. A symlink is not removed.
+sb_discard_created_allowance() {
+  local path
+  path=$(sb_allowance_path)
+  if [[ -L "$path" ]]; then
+    echo "loop.sh: ERROR: session budget: refusing to remove a symlink allowance" >&2
+    return 1
+  fi
+  if [[ -f "$path" ]]; then
+    rm -f -- "$path" || return 1
   fi
 }
 
 sb_journal_opt_out() {
   [[ -n "${SB_OPT_OUT:-}" ]] || return 0
-  sb_ensure_journal
   {
     echo ""
     echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · session-budget-opt-out"
@@ -891,48 +1279,14 @@ sb_journal_opt_out() {
     echo "session_id: ${SB_SESSION_ID}"
     echo "dimensions: ${SB_OPT_OUT}"
     echo "note: 0 or --unbounded is an explicit unlimited dimension. This launch opted out. It is not the default."
-  } >> "$JOURNAL"
+  } | sb_journal_append || return 1
 }
 
-sb_journal_reset() {
-  sb_ensure_journal
-  {
-    echo ""
-    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · session-budget-reset"
-    echo "diagnosis: operator reset session budget (--reset-session-budget)"
-    echo "previous_session_id: ${SB_PREVIOUS_SESSION_ID:-none}"
-    echo "note: a fresh allowance is created on the next runner start. Relaunch without this flag resumes the allowance."
-  } >> "$JOURNAL"
-}
-
-sb_journal_receipt() {
-  sb_ensure_journal
-  {
-    echo ""
-    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · session-budget"
-    echo "diagnosis: ${SB_DIAGNOSIS}"
-    echo "session_id: ${SB_SESSION_ID}"
-    echo "lane_id: ${SB_LANE_STORED}"
-    echo "started_at: ${SB_STARTED_AT}"
-    echo "iterations_completed: ${SB_COMPLETED}"
-    echo "starts_consumed: ${SB_CONSUMED}"
-    echo "wall_seconds: ${SB_ELAPSED}"
-    echo "wall_overshoot_seconds: ${SB_OVERSHOOT}"
-    echo "iteration_budget: ${SB_MAX_ITERATIONS}"
-    echo "wall_budget_min: ${SB_MAX_WALL_MIN}"
-    echo "cost_budget_usd: ${SB_MAX_COST_USD}"
-    echo "${SB_COST_TEXT}"
-    echo "cost_status: ${SB_COST_STATUS}"
-    echo "${SB_PRS_TEXT}"
-    echo "exhausted: ${SB_EXHAUSTED}"
-    echo "note: stopped at an iteration boundary. The session budget does not kill the runner. Per-iteration kills stay with --runner-timeout. Wall time can overshoot the cap by the remainder of the last iteration."
-    if [[ "$SB_COST_STATUS" == "not_measured" ]]; then
-      echo "note: cost: not measured. Flat-rate or pool runners report no cost_usd. That is not \$0. Iterations and wall-clock still bound the session."
-    elif [[ "$SB_COST_STATUS" == "partial" ]]; then
-      echo "note: cost is partial. Measured dollars are not a complete session total. One cost_usd event does not establish complete session spend."
-    fi
-    echo "${SB_RECEIPT_JSON}"
-  } >> "$JOURNAL"
+# True only when nothing is at the path. A symlink, including a dangling one,
+# is present. -f and -e both follow and would call that path missing.
+sb_path_absent() {
+  local path="$1"
+  [[ ! -L "$path" && ! -e "$path" ]]
 }
 
 sb_emit_stop_info() {
@@ -956,6 +1310,10 @@ sb_latch_stop() {
   if [[ "$SB_REASON" == "cost-ledger-unreadable" ]]; then
     kind="unreadable"
   fi
+  # The engine names SB_LATCH_KIND, SB_LATCH_REASON, and SB_LATCH_SESSION
+  # on the python command. The latch op reads those three from the process
+  # environment and refuses an empty reason, so an unreadable ledger stays
+  # latched instead of journaling a new refusal on every relaunch.
   SB_LATCH_KIND="$kind" \
     SB_LATCH_REASON="$SB_REASON" \
     SB_LATCH_SESSION="${SB_SESSION_ID:-}" \
@@ -974,14 +1332,19 @@ sb_unreadable_latched() {
 }
 
 # Map an engine result to 0 continue, 2 graceful stop, 1 fatal.
-# sb_engine clears SB_* at entry, so snapshot anything still needed after a
-# nested latch call.
+# A budget stop's receipt and latch are already published inside the engine.
 sb_apply_status() {
-  local saved_diag saved_reason saved_cost_text saved_cost_status saved_message
+  local saved_message
   case "$SB_STATUS" in
     ok)
       if [[ "${SB_CREATED:-}" == "1" && -n "${SB_OPT_OUT:-}" ]]; then
-        sb_journal_opt_out
+        # The opt-out line is the record that this launch chose unlimited.
+        # Ignoring a failed write would start the runner and leave the
+        # allowance for the next launch to resume with no record.
+        if ! sb_journal_opt_out; then
+          sb_discard_created_allowance || return 1
+          return 1
+        fi
       fi
       if [[ -n "${SB_SESSION_ID:-}" ]]; then
         export GIBSON_SESSION_ID="$SB_SESSION_ID"
@@ -992,20 +1355,8 @@ sb_apply_status() {
       return 0
       ;;
     stop)
-      saved_diag="${SB_DIAGNOSIS:-}"
-      saved_reason="${SB_REASON:-}"
-      saved_cost_text="${SB_COST_TEXT:-}"
-      saved_cost_status="${SB_COST_STATUS:-}"
-      if [[ "${SB_QUIET:-}" != "1" ]]; then
-        if [[ -n "${SB_RECEIPT_JSON:-}" ]]; then
-          sb_journal_receipt || return 1
-        fi
-        sb_latch_stop || return 1
-      fi
-      SB_DIAGNOSIS="$saved_diag"
-      SB_REASON="$saved_reason"
-      SB_COST_TEXT="$saved_cost_text"
-      SB_COST_STATUS="$saved_cost_status"
+      # The engine already renamed the latch and appended the receipt under
+      # the same lock. Doing either step again here would race.
       sb_emit_stop_info
       return 2
       ;;
@@ -1017,26 +1368,24 @@ sb_apply_status() {
         return 1
       fi
       if [[ "$saved_message" == *cost\ ledger* || "$saved_message" == *unreadable-ledger* ]]; then
-        sb_ensure_journal
         {
           echo ""
           echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · session-budget"
           echo "diagnosis: budget: cost-ledger-unreadable"
           echo "note: the cost ledger could not be evaluated. Cost was not treated as zero and the allowance was not reset."
           echo "detail: ${saved_message}"
-        } >> "$JOURNAL"
+        } | sb_journal_append || return 1
         SB_REASON="cost-ledger-unreadable"
         SB_SESSION_ID="${SB_SESSION_ID:-}"
         sb_latch_stop || return 1
       else
-        sb_ensure_journal
         {
           echo ""
           echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · session-budget-refused"
           echo "diagnosis: session budget refused the launch"
           echo "detail: ${saved_message}"
           echo "note: the allowance was not replaced. Ordinary relaunch does not start a fresh budget."
-        } >> "$JOURNAL"
+        } | sb_journal_append || return 1
       fi
       echo "loop.sh: ERROR: session budget: ${saved_message}" >&2
       return 1
@@ -1050,11 +1399,13 @@ sb_apply_status() {
 
 sb_startup_gate() {
   if [[ "${SB_RESET:-0}" == "1" ]]; then
+    # The engine holds the allowance lock across the journal append and the
+    # delete. A start whose recorded loop pid is still alive is refused
+    # before either one. A dead or absent pid is reset.
     sb_engine reset || return 1
     [[ "$SB_STATUS" == "ok" ]] || { echo "loop.sh: ERROR: session budget: ${SB_MESSAGE}" >&2; return 1; }
-    sb_journal_reset
   fi
-  if [[ ! -f "$(sb_allowance_path)" && ! -f "$(sb_latch_path)" ]]; then
+  if sb_path_absent "$(sb_allowance_path)" && sb_path_absent "$(sb_latch_path)"; then
     return 0
   fi
   SB_LEGACY_MAX=""

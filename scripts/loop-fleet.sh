@@ -2871,12 +2871,13 @@ do_status() {
   done
   # Per-lane session receipt (#409). Missing and unreadable stay distinct.
   # A lane with no journal has not stopped on a session budget yet.
+  # A symlink, directory, or other non-regular path is unreadable, not absent.
   echo
   i=0
   while [[ $i -lt ${#LANE_IDS[@]} ]]; do
     id="${LANE_IDS[$i]}"
     journal="$(lane_dir "$id")/gibson/journal.md"
-    if [[ -L "$journal" ]]; then
+    if [[ -L "$journal" ]] || [[ -e "$journal" && ! -f "$journal" ]]; then
       printf 'session-budget lane=%s receipt=unreadable\n' "$id"
     elif [[ -f "$journal" ]]; then
       sb_format_rollup "$journal" "$id" \
