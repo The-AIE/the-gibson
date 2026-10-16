@@ -29,8 +29,11 @@ canary Tier A issue. Operator-facing install always uses the Ask Contract
 
 Routine merges of already-gated work deploy per your Vercel branch model
 ([docs/12](docs/12-vercel.md)). **First** public launches, money, destructive ops,
-and Tier C merges stop for you ([docs/14](docs/14-human-gates.md)). Silence never
-auto-approves a gate.
+and the other human gates in [docs/14](docs/14-human-gates.md) still stop for you.
+Tier C merges do not. They use the **G12** floor (D-015): E3 at the exact head
+plus required checks. In single-platform or no-second-vendor mode, Tier C must
+BLOCK (fail closed) until an E3 reviewer exists. A human gate is not an option
+for Tier C. Silence never auto-approves a gate.
 
 ## What's a "green gate"?
 

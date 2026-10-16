@@ -29,7 +29,7 @@ The end goal is met when **all** of the following are true on at least one live 
 - [ ] Green gate (typecheck/lint/test/build) hard-fails regressions.
 - [ ] Generator and evaluator are separate agents (never grade own homework).
 - [ ] UX-eval runs against a live preview for user-visible changes (not skip-as-green when preview exists).
-- [ ] Security layers 1–3 hard-fail; Tier C surfaces get adversarial review + human gate.
+- [ ] Security layers 1–3 hard-fail; Tier C surfaces get adversarial review + the **G12** floor (E3 at the exact head + required checks). A missing E3 reviewer blocks. A human gate is not the substitute.
 - [ ] Claims + worktrees prevent agents overwriting each other.
 - [ ] Ratchet: repeated failures become permanent guides or sensors.
 - [x] Silent-noop detection (L-008): loop does not burn iterations while doing nothing. *(Sensor `scripts/silent-noop.sh` wired into `scripts/loop.sh` via `silent_noop_progressed` + `--stale-budget` — issue #63. Broader operator-readiness goal #18 remains open.)*
@@ -44,7 +44,7 @@ The end goal is met when **all** of the following are true on at least one live 
 ## D. Proven in the real world
 
 - [ ] Phase 2 demo: one Tier A issue flows end-to-end with zero technical human touches.
-- [ ] Phase 3: one production repo adopted; morning digests show merged work + queued Tier C cards.
+- [ ] Phase 3: one production repo adopted; morning digests show merged work and any Tier C change blocked pending E3 (not an owner card).
 - [ ] At least one external non-technical reader successfully operates via VIBECODING for a real request.
 - [ ] Case study with metrics (cycle time, owner minutes per ship, defect escapes) published.
 

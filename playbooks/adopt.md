@@ -34,8 +34,11 @@ sources:
 > **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter `gates:` / `forbidden:` / role outputs are routing mirrors of that contract and must not introduce obligations absent from AGENTS.md.
 
 You are running **adoption**. Target: install doctrine + enforcement so a Tier A
-issue can flow plan→…→verified deploy with zero human touches, and Tier C stops
-only at documented human gates.
+issue can flow plan→…→verified deploy with zero human touches, and a Tier C
+issue merges only when the **G12** floor is met (E3 at the exact head +
+required checks, D-015). In single-platform or no-second-vendor mode, Tier C
+must BLOCK (fail closed) until an E3 reviewer exists. Other human gates still
+stop where AGENTS.md says they do.
 
 ## How to use this
 
@@ -190,7 +193,7 @@ immediately; whole-codebase hard-fail when burn-down completes.
 | Check | Pass |
 |---|---|
 | Tier A issue | plan→issue→build→test→review→eval→merge→deploy→verified with **zero** human touches |
-| Tier C issue | stops at **exactly** the human gates in AGENTS.md, nowhere else |
+| Tier C issue | meets the **G12** floor (E3 at the exact head + required checks, D-015). Without an E3 reviewer it BLOCKS (fail closed) until one exists. It does not stop for a human merge gate. Other human gates in AGENTS.md still apply, and nowhere else |
 | Deploy truth | Production Branch written from verified settings |
 | Claims | active-work.md + labels live |
 | Gate | CI gibson-gate green on a canary PR |

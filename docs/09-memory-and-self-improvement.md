@@ -141,8 +141,10 @@ gates:
 - Harness changes go through the same pipeline (PR + review) as product changes —
   the harness never gets a lower bar than the code it governs.
 - Changes to **human gates** (doc 14), Tier definitions, or hard-fail security
-  layers are themselves Tier C: human approval required. The ratchet may tighten
-  autonomously; it may only loosen with Mark's sign-off.
+  layers are themselves Tier C. The self-modification ratchet may tighten
+  autonomously and may loosen only with Mark's sign-off. That sign-off changes
+  the brakes. It is not a merge gate on Tier C product work (D-015: G12 is the
+  E3 floor).
 - The quarterly *downward* stress-test (principle 1): the historian proposes removing
   controls that stronger models have made into pure friction, with evidence.
 

@@ -63,8 +63,9 @@ claim semantics — [doc 05](05-concurrency.md) still owns those.
 
 [Doc 23](23-delivery-control.md)'s promote step already binds a production advance to
 a **verified SHA on `main`** rather than a loose "looks done." The same discipline
-generalizes to any formal review point, including Tier C approval and Blueprint
-sign-off: treat a decision or spec artifact as moving through its own small state
+generalizes to any formal review point, including a Blueprint sign-off. Tier C
+records the E3 verdict at the exact head (G12 floor, D-015), not an owner
+approval. Treat a decision or spec artifact as moving through its own small state
 machine —
 
 ```text
@@ -72,9 +73,9 @@ draft ──▶ rfi-resolved ──▶ frozen ──▶ approved ──▶ super
 ```
 
 **Frozen** means the artifact's content hash is recorded at the moment of formal
-review — the same object a human approved is the object whose hash a later diff can
-be checked against, so drift after approval (an edit that lands without a fresh
-approval) is detectable rather than assumed away. **Superseded** entries are never
+review — the same object that was accepted is the object whose hash a later diff can
+be checked against, so drift after that acceptance (an edit that lands without a fresh
+review) is detectable rather than assumed away. **Superseded** entries are never
 rewritten; a correction is a new entry that links back, matching the append-only
 convention `memory/DECISIONS.md` and `memory/LESSONS.md` already use.
 

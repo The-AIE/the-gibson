@@ -111,8 +111,11 @@ issues. Details: `docs/08-security.md`.
 
 **Entry:** PR with review APPROVE + all gates green. **Role:** `release`.
 **Work:** verify `Closes #issue`, DCO/signoff intact through squash, CI green,
-gates green. **Human gate** applies to Tier C and schema PRs. Schema merges are
-serialized — one in flight at a time.
+gates green. Tier C and schema PRs merge only when the **G12** floor is met
+(E3 at the exact head + required checks, D-015). In single-platform or
+no-second-vendor mode, Tier C must BLOCK (fail closed) until an E3 reviewer
+exists. A human gate is not an option for Tier C. Other human gates still
+apply. Schema merges are serialized — one in flight at a time.
 **Exit artifact:** merged main.
 
 ## Stage 8 — Deploy + Verify

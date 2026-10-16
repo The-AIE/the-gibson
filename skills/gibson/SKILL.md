@@ -36,7 +36,8 @@ target repo's canonical checkout — worktrees only (Law 3).
    routing table from step 2. Devin (cloud supervisor, `docs/22`) reviews
    finished branches and opens/owns PRs via the `handoff:` field in loop-state;
    it MERGES only in the explicit `--merge` handoff mode — which `loop.sh` does
-   not pass yet, so today a human clicks the merge (gibson-run has the detail).
+   not pass yet, so Devin is not the merger (gibson-run has the detail). That
+   gap is not an owner gate. Tier C still ends at the G12 floor.
 
 ## Cost routing (docs/15 — the standing order)
 
@@ -52,10 +53,12 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
 ## Rules that override everything
 
 - Law 5: no agent reviews or merges its own work. Cross-vendor whenever any
-  second vendor is alive; if truly none is, the ONLY permitted fallback is
-  docs/11's fresh-context adversarial pass (a different session, never the
-  authoring one) with Tier C still waiting on the G12 floor (E3 at the exact head + required checks) — and the digest
-  must say that degraded mode was used. On the supervisor path this is
+  second vendor is alive. If truly none is, Tier A/B may use docs/11's
+  fresh-context adversarial pass (E2: a different session, never the authoring
+  one), and the digest must say that degraded mode was used. Tier C needs E3
+  (cross-vendor, exact head). In single-platform or no-second-vendor mode,
+  Tier C must BLOCK (fail closed) until an E3 reviewer exists. A same-vendor
+  fresh-context pass does not meet E3. On the supervisor path this is
   machine-enforced: `loop.sh` will not hand a branch to Devin without a completed
   distinct-vendor review of the exact SHA being handed off, and a missing, stale,
   or failed review blocks the handoff (the branch stays queued in loop-state).

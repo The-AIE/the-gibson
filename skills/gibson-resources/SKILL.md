@@ -44,10 +44,12 @@ standing order (flat-rate absorbs volume; metered buys judgment):
   closed in this strict order: (1) cross-vendor review remains MANDATORY while
   any second vendor is alive — Devin being unwired never relaxes Law 5; (2)
   only if NO other vendor is reachable at all, docs/11's fresh-context
-  adversarial pass (different session, same platform) substitutes, flagged in
-  the digest as degraded mode; (3) Tier C parks at the human gate in every
-  mode. The routing table must say plainly that Devin is unwired and exactly
-  what wiring it needs.
+  adversarial pass (different session, same platform) substitutes for Tier A/B
+  (E2) only, flagged in the digest as degraded mode; (3) Tier C needs E3
+  (cross-vendor, exact head). In single-platform or no-second-vendor mode,
+  Tier C must BLOCK (fail closed) until an E3 reviewer exists. A human gate
+  is not an option for Tier C. The routing table must say plainly that Devin
+  is unwired and exactly what wiring it needs.
 - Per-resource: verified-at timestamp, failure notes, cost tier.
 
 Also report gaps as Ask Contract items when only the owner can fix them

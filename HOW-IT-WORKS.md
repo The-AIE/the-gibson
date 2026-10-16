@@ -167,8 +167,12 @@ friction itself:
 
 The closed list of real interruptions is in
 [docs/14-human-gates.md](docs/14-human-gates.md). It includes destructive changes,
-money, outward-facing actions, owner identity, product-scope ambiguity, Tier C
-merges, credentials, active exploitation, and prompt-injection incidents.
+money, outward-facing actions, owner identity, product-scope ambiguity,
+credentials, active exploitation, and prompt-injection incidents. Tier C merges
+are not on that stop list. **G12** is the review floor (D-015): E3 at the exact
+head plus required checks. In single-platform or no-second-vendor mode, Tier C
+must BLOCK (fail closed) until an E3 reviewer exists. A human gate is not an
+option for Tier C.
 
 ### How several AI systems work as one crew
 

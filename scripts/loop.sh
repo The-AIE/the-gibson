@@ -103,7 +103,8 @@ OPTIONS
                       With --solo-platform use vendor:model (e.g. grok:review).
   --solo-platform     single-vendor mode (#69): same platform supplies the
                       pre-handoff review via different model / fresh context.
-                      No second CLI required. Tier C still human-gated.
+                      No second CLI required. Tier C blocks until an E3
+                      cross-vendor reviewer exists.
   --supervisor NAME   'devin' hands finished branches to the cloud supervisor
                       whenever loop-state carries a `handoff:` field (docs/22).
                       Each handoff is gated on a fresh distinct-vendor review of

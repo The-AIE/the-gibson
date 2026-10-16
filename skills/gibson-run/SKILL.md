@@ -83,7 +83,9 @@ show raw diffs or expect the owner to read code — describe behavior changes.
   gap is the loop's ordinary per-hat path (no supervisor configured): a
   same-vendor self-pass there is still only caught by you, so keep checking the
   journal each cadence for reviewer-hat entries by the authoring vendor and
-  reroute.**
+  reroute.** A same-vendor self-pass does not meet E3. In single-platform or
+  no-second-vendor mode, Tier C must BLOCK (fail closed) until an E3 reviewer
+  exists.
 - Cost discipline (docs/15): if Grok saturates, overflow to Codex. Claude's
   pool buys judgment first and skilled feature work when the capability bar
   genuinely requires it — what it never buys is VOLUME work a flat-rate pool

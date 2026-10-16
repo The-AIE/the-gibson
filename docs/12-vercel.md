@@ -111,7 +111,7 @@ shared state with another PR is not evidence.
 ### Non-goals
 
 - Gibson does not host Neon credentials or create branches itself.
-- Not a substitute for Tier C human review of money/auth/PII schema.
+- Not a substitute for the Tier C **G12** floor (E3 cross-vendor review at the exact head + required checks) on money/auth/PII schema.
 
 
 ## Env vars & secrets

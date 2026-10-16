@@ -34,9 +34,13 @@ it up at stage 2.
 
 ## 2. Your approval queue (human gates)
 
-Agents stop only for the 16 gates in [docs/14-human-gates.md](docs/14-human-gates.md)
-— destructive ops, money, outward-facing sends/launches, scope breaks, Tier C
-merges, credentials. Everything else proceeds without you.
+Agents stop only for the gates in [docs/14-human-gates.md](docs/14-human-gates.md)
+— destructive ops, money, outward-facing sends/launches, scope breaks,
+credentials, and the rest of G1–G11 and G13–G16. **G12** is not a stop. It is
+the Tier C review floor (D-015): E3 at the exact head plus required checks. In
+single-platform or no-second-vendor mode, Tier C must BLOCK (fail closed) until
+an E3 reviewer exists. A human gate is not an option for Tier C. Everything
+else proceeds without you.
 
 You'll get gate requests batched in the digest (below) and as PR comments tagged
 `@mrhinkle` with **exactly one decision** stated. Answer on the PR or via Hermes;
