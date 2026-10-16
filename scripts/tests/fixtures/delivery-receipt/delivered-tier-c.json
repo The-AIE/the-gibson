@@ -88,6 +88,12 @@
       "pages": 1,
       "exhausted": true,
       "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    {
+      "endpoint": "repos/example/example/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/status",
+      "pages": 1,
+      "exhausted": true,
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     }
   ],
   "inputs": {
@@ -95,6 +101,7 @@
       "number": 1,
       "state": "closed",
       "merged": true,
+      "merged_at": "2026-10-01T00:06:00Z",
       "merge_commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
       "commits": 1,
       "head": {
@@ -220,6 +227,8 @@
         }
       ]
     },
+    "combinedStatus": "known",
+    "statusHistory": [],
     "checkRuns": [
       {
         "name": "review-evidence",

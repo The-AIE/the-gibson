@@ -581,7 +581,16 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   const crossVendor = newest.filter((e) => e.identity.vendor !== "unknown" && !authors.vendors.has(e.identity.vendor));
   const eligible = unvendored ? crossVendor.filter((e) => e.identity.vendor === "independent" || e.result === "fail") : crossVendor;
   const ineligible = newest.filter((e) => !eligible.includes(e));
-  const base = { authorVendors: [...authors.vendors], attestation: att, evidence: newest.map((e) => `${e.identity.login}:${e.result}:${e.source}`) };
+  // evidence stays login:result:source. evidenceRows keeps the vendor evaluate()
+  // already used for eligibility, including the synthetic owner-attested-review
+  // login, whose vendor is not an identity-table row.
+  const evidenceRows = newest.map((e) => ({
+    login: e.identity.login,
+    vendor: e.identity.vendor,
+    result: e.result,
+    source: e.source,
+  }));
+  const base = { authorVendors: [...authors.vendors], attestation: att, evidence: newest.map((e) => `${e.identity.login}:${e.result}:${e.source}`), evidenceRows };
   if (eligible.some((e) => e.result === "fail")) return { state: "failure", reason: "changes-requested", detail: eligible.filter((e) => e.result === "fail").map((e) => e.identity.login).join(","), ...base };
   if (eligible.some((e) => e.result === "pass")) {
     // A deleted comment is invisible to REST, so a writer could delete an
