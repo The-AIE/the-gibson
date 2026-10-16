@@ -711,5 +711,134 @@
       "path": "/inputs/combinedStatus",
       "value": "unknown"
     }
+  ],
+  "status-no-provenance": [
+    {
+      "op": "replace",
+      "path": "/inputs/checkRuns",
+      "value": []
+    },
+    {
+      "op": "add",
+      "path": "/inputs/statusHistory/-",
+      "value": {
+        "name": "review-evidence",
+        "conclusion": "success",
+        "appId": null,
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "createdAt": "2026-10-01T00:05:00Z",
+        "kind": "status"
+      }
+    }
+  ],
+  "status-context-only": [
+    {
+      "op": "replace",
+      "path": "/inputs/checkRuns",
+      "value": []
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/requiredChecks",
+      "value": {
+        "status": "known",
+        "entries": [{ "context": "review-evidence", "appId": null }]
+      }
+    },
+    {
+      "op": "add",
+      "path": "/inputs/statusHistory/-",
+      "value": {
+        "name": "review-evidence",
+        "conclusion": "success",
+        "appId": null,
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "createdAt": "2026-10-01T00:05:00Z",
+        "kind": "status"
+      }
+    }
+  ],
+  "fractional-after-merge": [
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merged_at",
+      "value": "2026-10-01T00:06:00.100Z"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/checkRuns",
+      "value": []
+    },
+    {
+      "op": "add",
+      "path": "/inputs/statusHistory/-",
+      "value": {
+        "name": "review-evidence",
+        "conclusion": "success",
+        "appId": 1,
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "createdAt": "2026-10-01T00:06:00.900Z",
+        "kind": "status",
+        "creatorLogin": "github-actions[bot]"
+      }
+    }
+  ],
+  "fractional-equal-merge": [
+    {
+      "op": "replace",
+      "path": "/inputs/pull/merged_at",
+      "value": "2026-10-01T00:06:00.100Z"
+    },
+    {
+      "op": "replace",
+      "path": "/inputs/checkRuns",
+      "value": []
+    },
+    {
+      "op": "add",
+      "path": "/inputs/statusHistory/-",
+      "value": {
+        "name": "review-evidence",
+        "conclusion": "success",
+        "appId": 1,
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "createdAt": "2026-10-01T00:06:00.100Z",
+        "kind": "status",
+        "creatorLogin": "github-actions[bot]"
+      }
+    }
+  ],
+  "unparseable-status-time": [
+    {
+      "op": "replace",
+      "path": "/inputs/checkRuns",
+      "value": []
+    },
+    {
+      "op": "add",
+      "path": "/inputs/statusHistory/-",
+      "value": {
+        "name": "review-evidence",
+        "conclusion": "success",
+        "appId": 1,
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "createdAt": "2026-10-01T00:05:00Z",
+        "kind": "status",
+        "creatorLogin": "github-actions[bot]"
+      }
+    },
+    {
+      "op": "add",
+      "path": "/inputs/statusHistory/-",
+      "value": {
+        "name": "review-evidence",
+        "conclusion": "success",
+        "appId": 1,
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "createdAt": "not-a-time",
+        "kind": "status",
+        "creatorLogin": "github-actions[bot]"
+      }
+    }
   ]
 }

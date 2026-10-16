@@ -234,6 +234,16 @@ expect_row "merged success only after merged_at is unmatched" merged-status-only
   "incomplete	required-check-unmatched,g12-not-met	C	true	false	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
 expect_row "merged pull request with no merged_at is unknown" merged-at-missing.json \
   "incomplete	required-checks-unknown,g12-not-met	C	true	unknown	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
+expect_row "status with no app id does not satisfy an app-specific requirement" status-no-provenance.json \
+  "incomplete	required-check-unmatched,g12-not-met	C	true	false	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
+expect_row "requirement with no app id matches a status on context" status-context-only.json \
+  "delivered		C	true	true	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
+expect_row "status 00.900Z is after merged_at 00.100Z" fractional-after-merge.json \
+  "incomplete	required-check-unmatched,g12-not-met	C	true	false	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
+expect_row "status instant equal to merged_at counts as pre-merge" fractional-equal-merge.json \
+  "delivered		C	true	true	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
+expect_row "unparseable status clock is unknown" unparseable-status-time.json \
+  "incomplete	required-checks-unknown,g12-not-met	C	true	unknown	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
 expect_row "open pull request uses the latest status, not history" open-latest-not-history.json \
   "blocked	required-check-failed	C	true	false	unknown	APPROVE	E3	grok	devin	unknown	unknown	unknown	unknown	report-only"
 
@@ -252,6 +262,28 @@ node -e '
 ' "$EVAL" "$CASES/merged-status-then-failure.json" "$CASES/delivered-tier-c.json" \
   && ok "post-merge failure is a note and not the verdict" \
   || bad "postMerge note missing or it changed disposition"
+
+node -e '
+  const { execFileSync } = require("child_process");
+  const evalPath = process.argv[1];
+  const late = process.argv[2];
+  const equal = process.argv[3];
+  const project = (file) => JSON.parse(execFileSync(process.execPath, [evalPath, "project", "--bundle", file], { encoding: "utf8" }));
+  const j = project(late);
+  const note = (j.postMerge || [])[0];
+  const gate = (j.gates || []).find((g) => g.name === "review-evidence");
+  if (j.disposition === "delivered") process.exit(2);
+  if (!(j.reasons || []).includes("required-check-unmatched")) process.exit(3);
+  if (gate) process.exit(4);
+  if (!note || note.conclusion !== "success" || note.at !== "2026-10-01T00:06:00Z") process.exit(5);
+  const eq = project(equal);
+  if (eq.disposition !== "delivered") process.exit(6);
+  if ((eq.postMerge || []).length !== 0) process.exit(7);
+  const eqGate = (eq.gates || []).find((g) => g.name === "review-evidence");
+  if (!eqGate || eqGate.completedAt !== "2026-10-01T00:06:00Z") process.exit(8);
+' "$EVAL" "$CASES/fractional-after-merge.json" "$CASES/fractional-equal-merge.json" \
+  && ok "fractional 00.900Z is post-merge and 00.100Z equal is pre-merge" \
+  || bad "fractional instant pair did not split at merged_at"
 
 node -e '
   const fs = require("fs");
@@ -557,6 +589,148 @@ else
   bad "host path collect rc/out $(cat "$ROOT/host.err") exists=$( [ -e "$ROOT/host.json" ] && echo yes || echo no )"
 fi
 
+node "$FX_JS" "$ROOT/fx-varfolders" "$(node -e '
+  const sha="d".repeat(40);
+  const c={sha,author:{login:"aie-agent-lanes-grok[bot]"},committer:{login:"aie-agent-lanes-grok[bot]"},commit:{message:"fix path /var/folders/zz/T/secret\n\nAgent-Vendor: grok\n",verification:{verified:true}}};
+  process.stdout.write(JSON.stringify({"repos/example/example/pulls/1/commits?per_page=100":{ok:true,body:[[c]]}}));
+')"
+GIBSON_DELIVERY_GH_FIXTURE="$ROOT/fx-varfolders" \
+  node "$EVAL" collect --repo example/example --pr 1 --out "$ROOT/varfolders.json" --config "$CFG" >/dev/null 2>"$ROOT/varfolders.err"
+if [ $? -eq 2 ] && [ ! -e "$ROOT/varfolders.json" ] && grep -q 'redaction:absolute-path' "$ROOT/varfolders.err"; then
+  ok "host path /var/folders in a commit message is rejected"
+else
+  bad "var/folders collect rc/out $(cat "$ROOT/varfolders.err") exists=$( [ -e "$ROOT/varfolders.json" ] && echo yes || echo no )"
+fi
+
+# merged_at ...00.100Z, status ...00.900Z, app id present. Stripping the
+# fraction would count the status as pre-merge and drop required-check-unmatched.
+node "$FX_JS" "$ROOT/fx-frac" "$(node -e '
+  const h="a".repeat(40);
+  const pull={number:1,state:"closed",merged:true,merged_at:"2026-10-01T00:06:00.100Z",merge_commit_sha:"c".repeat(40),commits:1,head:{sha:h},base:{sha:"b".repeat(40),ref:"main"},labels:[{name:"tier-c"}]};
+  const row=(context)=>({context,state:"success",created_at:"2026-10-01T00:06:00.900Z",creator:{login:"github-actions[bot]"},avatar_url:"https://avatars.githubusercontent.com/in/15368?v=4"});
+  const key=(p)=>"repos/example/example/commits/"+h+p;
+  process.stdout.write(JSON.stringify({
+    "repos/example/example/pulls/1":{ok:true,body:[pull]},
+    [key("/statuses?per_page=100")]:{ok:true,body:[[row("sensors"),row("claim-isolation")]]},
+    [key("/check-runs?per_page=100")]:{ok:true,body:[{check_runs:[{name:"sensors",conclusion:"success",completed_at:"2026-10-01T00:05:00.100Z",head_sha:h,app:{slug:"github-actions",id:15368}}],total_count:1}]}
+  }));
+')"
+GIBSON_DELIVERY_GH_FIXTURE="$ROOT/fx-frac" \
+  node "$EVAL" collect --repo example/example --pr 1 --out "$ROOT/frac.json" --config "$CFG" >/dev/null 2>"$ROOT/frac.err"
+if [ $? -eq 0 ]; then
+  node -e '
+    const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    if (b.inputs.pull.merged_at !== "2026-10-01T00:06:00.100Z") process.exit(2);
+    const hist=(b.inputs.statusHistory||[]).map((s)=>s.createdAt);
+    if (!hist.includes("2026-10-01T00:06:00.900Z")) process.exit(3);
+    const check=(b.inputs.checkRuns||[]).find((r)=>r.kind!=="status" && r.name==="sensors");
+    if (!check || check.completedAt !== "2026-10-01T00:05:00.100Z") process.exit(4);
+  ' "$ROOT/frac.json" \
+    && ok "collect keeps fractional merged_at, status, and check clocks" \
+    || bad "collect stripped a fractional clock"
+  node "$EVAL" project --bundle "$ROOT/frac.json" >"$ROOT/frac.proj" 2>"$ROOT/frac.proj.err"
+  node -e '
+    const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    if (!(j.reasons||[]).includes("required-check-unmatched")) process.exit(2);
+    if (j.disposition==="delivered") process.exit(3);
+  ' "$ROOT/frac.proj" \
+    && ok "collected 00.900Z status is not a pre-merge match for 00.100Z" \
+    || bad "collected fractional status counted as pre-merge $(cat "$ROOT/frac.proj")"
+else
+  bad "fractional collect rc $(cat "$ROOT/frac.err")"
+fi
+
+node "$FX_JS" "$ROOT/fx-noprov" "$(node -e '
+  const h="a".repeat(40);
+  const pull={number:1,state:"closed",merged:true,merged_at:"2026-10-01T00:06:00Z",merge_commit_sha:"c".repeat(40),commits:1,head:{sha:h},base:{sha:"b".repeat(40),ref:"main"},labels:[{name:"tier-c"}]};
+  const row=(context)=>({context,state:"success",created_at:"2026-10-01T00:05:00Z"});
+  const key=(p)=>"repos/example/example/commits/"+h+p;
+  process.stdout.write(JSON.stringify({
+    "repos/example/example/pulls/1":{ok:true,body:[pull]},
+    [key("/statuses?per_page=100")]:{ok:true,body:[[row("sensors"),row("claim-isolation")]]},
+    [key("/check-runs?per_page=100")]:{ok:true,body:[{check_runs:[],total_count:0}]}
+  }));
+')"
+GIBSON_DELIVERY_GH_FIXTURE="$ROOT/fx-noprov" \
+  node "$EVAL" collect --repo example/example --pr 1 --out "$ROOT/noprov.json" --config "$CFG" >/dev/null 2>"$ROOT/noprov.err"
+if [ $? -eq 0 ]; then
+  node "$EVAL" project --bundle "$ROOT/noprov.json" >"$ROOT/noprov.proj" 2>"$ROOT/noprov.proj.err"
+  node -e '
+    const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    if (!(j.reasons||[]).includes("required-check-unmatched")) process.exit(2);
+    if (j.disposition==="delivered") process.exit(3);
+  ' "$ROOT/noprov.proj" \
+    && ok "collected status with no provenance does not match an app id" \
+    || bad "no-provenance status matched $(cat "$ROOT/noprov.proj")"
+else
+  bad "no-provenance collect rc $(cat "$ROOT/noprov.err")"
+fi
+
+printf '%s\n' \
+  '{"schema":"gibson.cost.v1","ts":"2026-10-01T00:00:00Z","runner":"grok","pr":1,"join_key":"fleet-sel:v1:ok","repo":"example/example","model":"grok-4","usd":1.25,"tokensIn":3,"tokensOut":4,"note":"drop-me"}' \
+  '{"schema":"gibson.cost.v1","ts":"2026-10-01T00:00:01Z","runner":"codex","join_key":"fleet-sel:v1:ok","repo":"example/example"}' \
+  >"$ROOT/ledger-ok.jsonl"
+node "$FX_JS" "$ROOT/fx-ledger"
+GIBSON_DELIVERY_GH_FIXTURE="$ROOT/fx-ledger" \
+  node "$EVAL" collect --repo example/example --pr 1 --out "$ROOT/ledger-ok.json" --ledger "$ROOT/ledger-ok.jsonl" --config "$CFG" >/dev/null 2>"$ROOT/ledger-ok.err"
+if [ $? -eq 0 ]; then
+  node -e '
+    const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    const rows=b.inputs.costEvents||[];
+    if (rows.length!==2) process.exit(2);
+    const text=JSON.stringify(rows);
+    if (text.includes("join_key") || text.includes("drop-me") || text.includes("fleet-sel")) process.exit(3);
+    if (!rows.every((r)=>r.pr===1 && r.repo==="example/example" && r.vendor)) process.exit(4);
+    const first=rows.find((r)=>r.vendor==="grok");
+    if (!first || first.model!=="grok-4" || first.usd!==1.25 || first.tokensIn!==3 || first.tokensOut!==4) process.exit(5);
+    const keys=Object.keys(first);
+    for (const k of keys) if (!["ts","vendor","model","usd","tokensIn","tokensOut","pr","repo"].includes(k)) process.exit(6);
+  ' "$ROOT/ledger-ok.json" \
+    && ok "ledger copy is allowlisted and join_key is resolved then dropped" \
+    || bad "ledger allowlist shape $(node -e 'console.log(JSON.stringify(require(process.argv[1]).inputs.costEvents))' "$ROOT/ledger-ok.json")"
+else
+  bad "clean ledger collect rc $(cat "$ROOT/ledger-ok.err")"
+fi
+
+refuse_ledger() {
+  local name="$1" line="$2"
+  printf '%s\n' "$line" >"$ROOT/ledger-$name.jsonl"
+  local log="$ROOT/ledger-$name.gh.log"
+  rm -f "$log"
+  GIBSON_DELIVERY_GH_FIXTURE="$ROOT/empty-fx" GIBSON_DELIVERY_GH_LOG="$log" \
+    node "$EVAL" collect --repo example/example --pr 1 --out "$ROOT/ledger-$name.json" --ledger "$ROOT/ledger-$name.jsonl" --config "$CFG" >/dev/null 2>"$ROOT/ledger-$name.err"
+  if [ $? -eq 2 ] && [ ! -e "$ROOT/ledger-$name.json" ] && [ ! -e "$log" ] && grep -q 'redaction:absolute-path' "$ROOT/ledger-$name.err"; then
+    ok "ledger $name exits 2 with no bundle"
+  else
+    bad "ledger $name rc/out $(cat "$ROOT/ledger-$name.err") exists=$( [ -e "$ROOT/ledger-$name.json" ] && echo yes || echo no ) gh=$( [ -e "$log" ] && echo yes || echo no )"
+  fi
+}
+refuse_ledger "var-folders-repo" '{"schema":"gibson.cost.v1","ts":"2026-10-01T00:00:00Z","runner":"grok","pr":1,"repo":"/var/folders/zz/T/secret"}'
+refuse_ledger "tmp-join-key" '{"schema":"gibson.cost.v1","ts":"2026-10-01T00:00:00Z","runner":"grok","pr":1,"join_key":"/tmp/secret","repo":"example/example"}'
+refuse_ledger "private-tmp" '{"schema":"gibson.cost.v1","ts":"2026-10-01T00:00:00Z","runner":"grok","pr":1,"repo":"example/example","note":"/private/tmp/secret"}'
+refuse_ledger "tilde" '{"schema":"gibson.cost.v1","ts":"2026-10-01T00:00:00Z","runner":"grok","pr":1,"repo":"example/example","note":"~/secret"}'
+
+printf '%s\n' '{"schema":"gibson.cost.v1","ts":"2026-10-01T00:00:00Z","runner":"grok","pr":1,"repo":"not a slug"}' >"$ROOT/ledger-slug.jsonl"
+GIBSON_DELIVERY_GH_FIXTURE="$ROOT/empty-fx" GIBSON_DELIVERY_GH_LOG="$ROOT/ledger-slug.gh.log" \
+  node "$EVAL" collect --repo example/example --pr 1 --out "$ROOT/ledger-slug.json" --ledger "$ROOT/ledger-slug.jsonl" --config "$CFG" >/dev/null 2>"$ROOT/ledger-slug.err"
+if [ $? -eq 2 ] && [ ! -e "$ROOT/ledger-slug.json" ] && [ ! -e "$ROOT/ledger-slug.gh.log" ]; then
+  ok "ledger repo that is not a slug exits 2 with no bundle"
+else
+  bad "ledger slug rc $(cat "$ROOT/ledger-slug.err") exists=$( [ -e "$ROOT/ledger-slug.json" ] && echo yes || echo no )"
+fi
+
+printf '%s\n' \
+  '{"schema":"gibson.cost.v1","ts":"2026-10-01T00:00:00Z","runner":"grok","pr":1,"join_key":"fleet-sel:v1:same"}' \
+  '{"schema":"gibson.cost.v1","ts":"2026-10-01T00:00:01Z","runner":"codex","pr":2,"join_key":"fleet-sel:v1:same"}' \
+  >"$ROOT/ledger-ambiguous.jsonl"
+GIBSON_DELIVERY_GH_FIXTURE="$ROOT/empty-fx" GIBSON_DELIVERY_GH_LOG="$ROOT/ledger-ambiguous.gh.log" \
+  node "$EVAL" collect --repo example/example --pr 1 --out "$ROOT/ledger-ambiguous.json" --ledger "$ROOT/ledger-ambiguous.jsonl" --config "$CFG" >/dev/null 2>"$ROOT/ledger-ambiguous.err"
+if [ $? -eq 2 ] && [ ! -e "$ROOT/ledger-ambiguous.json" ] && [ ! -e "$ROOT/ledger-ambiguous.gh.log" ]; then
+  ok "ambiguous ledger join_key exits 2 with no bundle"
+else
+  bad "ambiguous ledger rc $(cat "$ROOT/ledger-ambiguous.err") exists=$( [ -e "$ROOT/ledger-ambiguous.json" ] && echo yes || echo no )"
+fi
+
 node "$FX_JS" "$ROOT/fx-status-down" "$(node -e 'const h="a".repeat(40); process.stdout.write(JSON.stringify({["repos/example/example/commits/"+h+"/status?per_page=100"]:{ok:false,stderr:"gh: HTTP 502"}}))')"
 GIBSON_DELIVERY_GH_FIXTURE="$ROOT/fx-status-down" \
   node "$EVAL" collect --repo example/example --pr 1 --out "$ROOT/status-down.json" --config "$CFG" >/dev/null 2>"$ROOT/status-down.err"
@@ -681,6 +855,9 @@ expect_mut_project "app-id" "MUTATION_ANCHOR_APP_ID" "app-id-mismatch.json"
 expect_mut_project "status-app" "MUTATION_ANCHOR_STATUS_APP" "status-wrong-creator.json"
 expect_mut_project "status-unknown" "MUTATION_ANCHOR_STATUS_UNKNOWN" "status-endpoint-unknown.json"
 expect_mut_project "as-of-merge" "MUTATION_ANCHOR_AS_OF_MERGE" "merged-status-only-after.json"
+expect_mut_project "fractional-stamp" "MUTATION_ANCHOR_FRACTIONAL_STAMP" "fractional-after-merge.json"
+expect_mut_project "stamp-closed" "MUTATION_ANCHOR_STAMP_CLOSED" "unparseable-status-time.json"
+expect_mut_project "status-provenance" "MUTATION_ANCHOR_STATUS_PROVENANCE" "status-no-provenance.json"
 expect_mut_project "merged-at" "MUTATION_ANCHOR_MERGED_AT" "merged-at-missing.json"
 
 expect_mut_open() {
@@ -758,6 +935,64 @@ expect_mut_leak() {
   fi
 }
 expect_mut_leak
+
+node --input-type=module <<EOF
+import { readFileSync, writeFileSync } from "node:fs";
+const bundle = JSON.parse(readFileSync("${CASES}/delivered-tier-c.json", "utf8"));
+bundle.inputs.commits[0].commit.message = "Agent-Vendor: grok\n/var/folders/zz/T/secret\n/tmp/secret";
+writeFileSync("${ROOT}/leak-hostpath.json", JSON.stringify(bundle));
+EOF
+node "$EVAL" project --bundle "$ROOT/leak-hostpath.json" >"$ROOT/leak-hostpath.out" 2>"$ROOT/leak-hostpath.err"
+rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'redaction:absolute-path' "$ROOT/leak-hostpath.out"; then
+  ok "project refuses /var/folders and /tmp in an existing bundle"
+else
+  bad "project accepted a temp host path rc=$rc $(cat "$ROOT/leak-hostpath.out" "$ROOT/leak-hostpath.err")"
+fi
+
+expect_mut_hostpath() {
+  local dest="$ROOT/mut-hostpath"
+  if ! mutant_for "MUTATION_ANCHOR_HOST_PATH" "$dest"; then bad "host-path mutant does not parse"; return; fi
+  node "$EVAL" project --bundle "$ROOT/leak-hostpath.json" >"$ROOT/hostpath.orig" 2>"$ROOT/hostpath.orig.err"
+  local o=$?
+  node "$dest/delivery-receipt.mjs" project --bundle "$ROOT/leak-hostpath.json" >"$ROOT/hostpath.mut" 2>"$ROOT/hostpath.mut.err"
+  local m=$?
+  local disp=""
+  if [ "$m" -eq 0 ]; then
+    disp=$(node -e 'const fs=require("fs"); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).disposition)' "$ROOT/hostpath.mut")
+  fi
+  if [ "$o" -eq 1 ] && grep -q 'redaction:absolute-path' "$ROOT/hostpath.orig" && [ "$m" -eq 0 ] && [ "$disp" = "delivered" ]; then
+    ok "mutation host-path: project $o -> $m"
+    echo "    receipt host-path: original project exit $o, mutant project exit $m disposition $disp"
+  else
+    bad "mutation host-path: orig $o mut $m disp=$disp orig=$(cat "$ROOT/hostpath.orig") mut=$(cat "$ROOT/hostpath.mut" "$ROOT/hostpath.mut.err")"
+  fi
+}
+expect_mut_hostpath
+
+expect_mut_ledger_allow() {
+  local dest="$ROOT/mut-ledger-allow"
+  if ! mutant_for "MUTATION_ANCHOR_LEDGER_ALLOW" "$dest"; then bad "ledger-allow mutant does not parse"; return; fi
+  printf '%s\n' '{"schema":"gibson.cost.v1","ts":"2026-10-01T00:00:00Z","runner":"grok","pr":1,"join_key":"fleet-sel:v1:leak-me","repo":"example/example","note":"drop-me"}' >"$ROOT/ledger-allow.jsonl"
+  node "$FX_JS" "$ROOT/fx-ledger-allow"
+  GIBSON_DELIVERY_GH_FIXTURE="$ROOT/fx-ledger-allow" \
+    node "$EVAL" collect --repo example/example --pr 1 --out "$ROOT/ledger-allow.orig.json" --ledger "$ROOT/ledger-allow.jsonl" --config "$CFG" >/dev/null 2>"$ROOT/ledger-allow.orig.err"
+  local o=$?
+  GIBSON_DELIVERY_GH_FIXTURE="$ROOT/fx-ledger-allow" \
+    node "$dest/delivery-receipt.mjs" collect --repo example/example --pr 1 --out "$ROOT/ledger-allow.mut.json" --ledger "$ROOT/ledger-allow.jsonl" --config "$CFG" >/dev/null 2>"$ROOT/ledger-allow.mut.err"
+  local m=$?
+  if [ "$o" -eq 0 ] && [ "$m" -eq 0 ] \
+    && ! grep -q 'leak-me' "$ROOT/ledger-allow.orig.json" \
+    && ! grep -q 'drop-me' "$ROOT/ledger-allow.orig.json" \
+    && grep -q 'leak-me' "$ROOT/ledger-allow.mut.json" \
+    && grep -q 'drop-me' "$ROOT/ledger-allow.mut.json"; then
+    ok "mutation ledger-allow: join_key and note stay out until the seal is removed"
+    echo "    receipt ledger-allow: original bundle omitted join_key, mutant kept it"
+  else
+    bad "mutation ledger-allow: orig $o mut $m orig=$(cat "$ROOT/ledger-allow.orig.err") mut=$(cat "$ROOT/ledger-allow.mut.err")"
+  fi
+}
+expect_mut_ledger_allow
 
 node --input-type=module <<EOF
 import { readFileSync, writeFileSync } from "node:fs";
