@@ -31,7 +31,7 @@ RISKS
   - Sends the task description, branch name, and diffstat to Devin. Never pass
     secrets in --task (docs/20 rule 6: secrets move by blind pipe).
   - With --merge the supervisor may merge without a human. Omit it for Tier C
-    work (AGENTS.md Law 7 — money, auth, PII, security boundaries).
+    work: D-015 needs E3 at the exact head + required checks (AGENTS.md Law 7).
   - Each handoff spends ACUs. Cap it with DEVIN_MAX_ACU (default 10).
   - The session state file lives in <repo>/gibson/devin-session.json; deleting
     it orphans the session rather than closing it.

@@ -95,7 +95,7 @@ Prefer the agent that hit it ships the small fix in-session. Else file
 ## Self-modification bounds
 
 - Harness PRs use the same pipeline as product code.
-- Changes to doc 14, tier definitions, hard-fail layers → Tier C human approval.
+- Changes to doc 14, tier definitions, or hard-fail layers are themselves Tier C. Loosening them needs the owner's sign-off (self-modification ratchet). That sign-off is not a Tier C merge gate.
 - Ratchet may tighten autonomously; may only loosen with owner sign-off.
 - Quarterly: propose removing controls that stronger models made pure friction
   (principle 1 downward stress-test) — with evidence.

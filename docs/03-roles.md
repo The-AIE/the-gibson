@@ -81,8 +81,12 @@ cleanup (worktree, branch, claim, issue).
 [playbooks/delivery-control.md](../playbooks/delivery-control.md)): audit/harden the
 production write path; model-B promote/hotfix/freeze. Secret rotation stays G4
 (owner only) — never part of this role.
-**Forbidden:** merging Tier C or schema PRs without the human gate; more than one
-schema merge in flight; force-pushing main; rotating long-lived secrets.
+**Forbidden:** merging Tier C or schema PRs before the G12 floor is met (E3
+cross-vendor review at the exact head + required checks, D-015). In
+single-platform or no-second-vendor mode, Tier C must BLOCK (fail closed)
+until an E3 reviewer exists. A human gate is not a substitute. Also forbidden:
+more than one schema merge in flight; force-pushing main; rotating long-lived
+secrets.
 
 ## historian
 **In:** the exhaust of everything above — CI history, verdicts, eval reports, costs,

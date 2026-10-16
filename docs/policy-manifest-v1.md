@@ -296,7 +296,8 @@ three AGENTS.md blocks, and hard-fails `check-drift` inside the existing
 `sensors` job. G12 is the D-015 review floor (`stop: false`). It does **not**
 wire merge or release authority, and it does not change G6 or the other human
 stops. Runtime consumers remain later work. Any semantic change to G1–G16,
-tiers, or hard-fail controls is still Tier C with an owner decision.
+tiers, or hard-fail controls is still Tier C with an owner decision under the
+self-modification ratchet. That decision is not a Tier C merge gate.
 
 ## Tier and owner boundary
 

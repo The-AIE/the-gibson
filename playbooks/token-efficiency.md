@@ -217,7 +217,7 @@ does not, leave cost unknown.
 | Builder (Tier B) | S | Subscription (skilled) or flat-rate if clearing the bar | Two same-criterion fails after enrich; framework subtlety |
 | Builder / review (Tier C) | S build / **F review** | Strongest available *different* vendor for review | F fails twice → park (not more models) |
 | Test-engineer | G–S | Flat-rate first | Flaky contract design needs S |
-| Reviewer | S (B) / F (C) | Other vendor than author | Author and only-available reviewer same vendor → block or human gate |
+| Reviewer | S (B) / F (C) | Other vendor than author | Author and only-available reviewer same vendor → Tier C blocks pending E3 (a human gate is not an option). Other tiers: block or human gate. |
 | UX evaluator | S | Any that can drive Playwright | Sensor-blind visual judgment |
 | Security adversarial | F | Other vendor; never self | Missing reviewer CLI → fail closed (L-005) |
 | Release / delivery-control audit | G scripts + S judgment | Scripts first (`scripts/delivery-control/`, `gate.sh`) | Promote/harden always human-gated |
