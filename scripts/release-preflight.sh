@@ -38,10 +38,19 @@ WHAT IT DOES
        absent/null head fails closed.
     3. Required checks. Distinguishes a product red (a step failed) from GitHub
        Actions infrastructure (startup_failure / no steps / no runner), which
-       re-runs identically and is usually concurrent across open PRs.
+       re-runs identically and is usually concurrent across open PRs. That
+       split is not the Tier C success gate: Tier C allow-lists an explicit
+       success and re-reads the check snapshot for the head SHA.
     4. Tier. tier-c never gets an admin path. The G12 floor (D-015) is E3
-       (cross-vendor, exact-head) plus every required check green at that head;
-       otherwise BLOCKED. Admin/force merge stays forbidden.
+       (cross-vendor, exact-head) plus every required context an explicit
+       success at that head — check-run conclusion SUCCESS, or status state
+       success. NEUTRAL, SKIPPED, STALE, ACTION_REQUIRED, a missing token,
+       and any unknown token are not met. The evaluator's returned headSha
+       must equal this head, and the check snapshot is read for that SHA
+       after the evaluator returns. Otherwise BLOCKED. Admin/force merge
+       stays forbidden. Review-evidence fixtures are test-harness only
+       (--test-fixture). An inherited GIBSON_REVIEW_EVIDENCE_FIXTURE on any
+       other run is a blocker, never a silent ignore.
 
   Read-only. It never merges, never comments, never edits.
 
@@ -68,6 +77,10 @@ USAGE
                Also auto-detected from Related-only body or a partial marker.
   --launched   post-launch posture: no admin path on any red, ever (L-033)
   --json       machine-readable verdict for a driver
+  --test-fixture DIR
+               Test harness only. Honored only together with GIBSON_TEST_MODE=1,
+               a non-TTY stdout, and not a protected-branch CI run. Never read
+               from the environment. Production drivers must not pass this.
 
 EXIT
   0  READY — every gate passed
@@ -96,12 +109,21 @@ REPO_ARG=""
 PARTIAL=0
 LAUNCHED=0
 JSON=0
+TEST_FIXTURE_DIR=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) REPO_ARG="${2:-}"; shift ;;
     --partial) PARTIAL=1 ;;
     --launched) LAUNCHED=1 ;;
     --json) JSON=1 ;;
+    --test-fixture)
+      if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+        echo "release-preflight.sh: ERROR: --test-fixture requires a directory" >&2
+        exit 2
+      fi
+      TEST_FIXTURE_DIR="$2"
+      shift
+      ;;
     *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
   shift
@@ -116,6 +138,37 @@ if [[ -z "$REPO" ]]; then
   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
 fi
 [[ -n "$REPO" ]] || die "could not resolve repo — pass --repo owner/name"
+
+# Fixture transport is unreachable in production. --fixture is passed to the
+# evidence evaluator only when every one of these holds:
+#   1. --test-fixture DIR is on this process's argv (an env var cannot turn it on)
+#   2. GIBSON_TEST_MODE=1, which scripts/tests sets and release drivers do not
+#   3. stdout is not a TTY, so an operator at a terminal cannot load fixtures
+#   4. this is not CI on a protected branch (CI=true and GITHUB_REF is
+#      refs/heads/main, master, or release, or GITHUB_REF_PROTECTED=true)
+# CI=true alone is not a refusal: the gate suite runs under CI on pull_request
+# refs, and those are not protected-branch runs. Refusing every CI run would
+# make the harness unable to prove this rule.
+# GIBSON_REVIEW_EVIDENCE_FIXTURE is never a path. When it is set and the rule
+# above is not met, the verdict is BLOCKED (fail closed), never a silent ignore.
+TEST_FIXTURE_OK=0
+_protected_ci=0
+if [[ "${CI:-}" == "true" || "${CI:-}" == "1" ]]; then
+  case "${GITHUB_REF:-}" in
+    refs/heads/main|refs/heads/master|refs/heads/release) _protected_ci=1 ;;
+  esac
+  if [[ "${GITHUB_REF_PROTECTED:-}" == "true" ]]; then
+    _protected_ci=1
+  fi
+fi
+if [[ -n "$TEST_FIXTURE_DIR" && "${GIBSON_TEST_MODE:-}" == "1" && ! -t 1 && "$_protected_ci" -eq 0 ]]; then
+  if [[ ! -d "$TEST_FIXTURE_DIR" ]]; then
+    die "--test-fixture directory not found: $TEST_FIXTURE_DIR"
+  fi
+  TEST_FIXTURE_OK=1
+elif [[ -n "$TEST_FIXTURE_DIR" && -z "${GIBSON_REVIEW_EVIDENCE_FIXTURE:-}" ]]; then
+  die "refusing --test-fixture outside the test harness"
+fi
 
 PR_JSON=$(gh pr view "$PR" --repo "$REPO" \
   --json number,title,body,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments,headRefOid 2>/dev/null) ||
@@ -135,6 +188,12 @@ CLOSES=$(jqr '[.closingIssuesReferences[].number] | map("#"+(.|tostring)) | join
 BLOCKERS=()
 ADMIN_REASONS=()
 NOTES=()
+
+# Inherited fixture env is never transport. A non-test run that carries it
+# fails closed instead of evaluating fabricated evidence or ignoring the var.
+if [[ -n "${GIBSON_REVIEW_EVIDENCE_FIXTURE:-}" && "$TEST_FIXTURE_OK" -ne 1 ]]; then
+  BLOCKERS+=("test fixture transport present in a production run")
+fi
 
 # --- 1. close keywords (L-013 / L-025) ------------------------------------
 # Partial ships must not auto-close issues. Sources of "this is a partial":
@@ -489,7 +548,54 @@ else
   esac
 fi
 
+# Read check-runs and the combined commit status for HEAD_OID. Sets
+# CHECK_BOUND (payload SHA is this head, page complete) and CHECK_GREEN
+# (every check-run conclusion and every status state is the success token).
+# The two answers are independent: a success token on the wrong SHA is bound=0
+# green=1, so a head move cannot be laundered into "not green" or ignored.
+tier_c_read_checks() {
+  local runs_json="" status_json="" parsed="" head=""
+  head=$(printf '%s' "$HEAD_OID" | tr '[:upper:]' '[:lower:]')
+  runs_json=$(gh api "repos/${REPO}/commits/${HEAD_OID}/check-runs?per_page=100" 2>/dev/null) || runs_json=""
+  status_json=$(gh api "repos/${REPO}/commits/${HEAD_OID}/status" 2>/dev/null) || status_json=""
+  CHECK_BOUND=0
+  CHECK_GREEN=0
+  parsed=$(jq -nr --arg head "$head" --argjson runs "${runs_json:-null}" --argjson status "${status_json:-null}" '
+    def tok: if type == "string" then ascii_downcase else "" end;
+    def met: tok == "success";
+    def bound:
+      ((.status.sha | tok) == $head)
+      and (.runs.total_count == (.runs.check_runs | length))
+      and (.status.total_count == (.status.statuses | length))
+      and ([.runs.check_runs[]? | ((.head_sha | tok) == $head)] | all);
+    def green:
+      ([.runs.check_runs[]?.conclusion] | all(met))
+      and ([.status.statuses[]?.state] | all(met));
+    {runs: $runs, status: $status}
+    | if (.runs | type) != "object"
+        or (.runs.check_runs | type) != "array"
+        or (.runs.total_count | type) != "number"
+        or (.status | type) != "object"
+        or (.status.statuses | type) != "array"
+        or (.status.sha | type) != "string"
+        or (.status.total_count | type) != "number"
+      then "0 0"
+      else "\(if bound then 1 else 0 end) \(if green then 1 else 0 end)"
+      end
+  ' 2>/dev/null) || parsed=""
+  case "$parsed" in
+    "1 1") CHECK_BOUND=1; CHECK_GREEN=1 ;;
+    "1 0") CHECK_BOUND=1; CHECK_GREEN=0 ;;
+    "0 1") CHECK_BOUND=0; CHECK_GREEN=1 ;;
+    *) CHECK_BOUND=0; CHECK_GREEN=0 ;;
+  esac
+}
+
 # --- 3. required checks, product red vs GHA infra (L-033) ----------------
+# Deny-list below is the infra-vs-product split for every tier. It is not the
+# Tier C gate: NEUTRAL, SKIPPED, STALE, and ACTION_REQUIRED are none of the
+# failure tokens, so they must not count as green. Tier C allow-lists success
+# on a SHA-bound re-read after the evaluator returns.
 CHECK_SUMMARY=$(echo "$PR_JSON" | jq -r '
   [ .statusCheckRollup[]? | select(.__typename == "CheckRun" or .conclusion != null or .state != null) ]
   | map({name: (.name // .context // "check"),
@@ -526,10 +632,13 @@ if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
 fi
 
 # D-015 G12 floor: a Tier C head is mergeable only when (a) an E3 cross-vendor
-# review verdict is bound to the exact head and (b) every required check is
-# green at that head. Evidence comes from scripts/pr-review-evidence.mjs (the
-# same evaluator behind the review-evidence status) — reuse, do not reimplement.
-# Unreadable evidence fails closed. Admin/force merge stays forbidden.
+# review verdict is bound to the exact head — the caller compares the
+# evaluator's returned headSha to HEAD_OID, it does not trust the request —
+# and (b) every required context is an explicit success on a snapshot read
+# for that same SHA after the evaluator returns. Evidence comes from
+# scripts/pr-review-evidence.mjs — reuse, do not reimplement. Unreadable
+# evidence, a missing or mismatched headSha, a check payload for another
+# SHA, or any non-success token fails closed. Admin/force merge stays forbidden.
 if [[ "$TIER" == "tier-c" ]]; then
   _floor_parts=()
   _ev_state=""
@@ -558,12 +667,16 @@ if [[ "$TIER" == "tier-c" ]]; then
     elif [[ -f "$_review_cfg" ]]; then
       _ev_args+=(--config "$_review_cfg")
     fi
-    if [[ -n "${GIBSON_REVIEW_EVIDENCE_FIXTURE:-}" ]]; then
-      _ev_args+=(--fixture "$GIBSON_REVIEW_EVIDENCE_FIXTURE")
+    if [[ "$TEST_FIXTURE_OK" -eq 1 ]]; then
+      _ev_args+=(--fixture "$TEST_FIXTURE_DIR")
     fi
     _ev_out=$("${_ev_args[@]}" 2>/dev/null) || true
     _ev_state=$(printf '%s' "$_ev_out" | jq -r '.state // empty' 2>/dev/null) || _ev_state=""
     _ev_reason=$(printf '%s' "$_ev_out" | jq -r '.reason // empty' 2>/dev/null) || _ev_reason=""
+    _ev_head=$(printf '%s' "$_ev_out" | jq -r 'if (.headSha | type) == "string" then (.headSha | ascii_downcase) else "" end' 2>/dev/null) || _ev_head=""
+    if [[ "$_ev_head" != "$HEAD_OID" ]]; then
+      _floor_parts+=("evaluator headSha does not match this head")
+    fi
     if [[ -z "$_ev_state" || -z "$_ev_reason" ]]; then
       _floor_parts+=("evidence unreadable")
     elif [[ "$_ev_state" == "success" && "$_ev_reason" == "pass" ]]; then
@@ -578,8 +691,17 @@ if [[ "$TIER" == "tier-c" ]]; then
       _floor_parts+=("E3 not bound to this head ($_ev_reason)")
     fi
   fi
-  if [[ "$PENDING" -gt 0 || "$FAILED_N" -gt 0 ]]; then
-    _floor_parts+=("required checks not green")
+  # After the evaluator returns: re-read checks for HEAD_OID. The earlier
+  # pr-view rollup is not authority for this floor — a head move between the
+  # two reads must block, and only an explicit success token is met.
+  if [[ "$HEAD_OID" =~ ^[0-9a-f]{40}$ ]]; then
+    tier_c_read_checks
+    if [[ "$CHECK_BOUND" -ne 1 ]]; then
+      _floor_parts+=("required checks not bound to this head")
+    fi
+    if [[ "$CHECK_GREEN" -ne 1 ]]; then
+      _floor_parts+=("required checks not green")
+    fi
   fi
   if [[ ${#_floor_parts[@]} -gt 0 ]]; then
     _floor_msg=""

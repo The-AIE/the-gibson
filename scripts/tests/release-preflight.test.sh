@@ -27,17 +27,87 @@ lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-preflight-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
 mkdir -p "$ROOT/bin"
+# Inherited fixture env must not leak into a case that expects production.
+unset GIBSON_REVIEW_EVIDENCE_FIXTURE || true
 cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 # Fake gh: `repo view` names a repo, `pr view` replays $GH_FIXTURE.
-case "$1 $2" in
-  "repo view") echo "acme/app" ;;
-  "pr view") cat "$GH_FIXTURE" ;;
+# `api .../commits/<sha>/check-runs` and `.../status` project that fixture's
+# rollup onto the requested SHA, unless GH_CHECK_HEAD forces a different
+# snapshot SHA (the preflight must then refuse).
+set -u
+cmd="${1:-}"
+sub="${2:-}"
+case "$cmd" in
+  repo)
+    [[ "$sub" == "view" ]] && echo "acme/app" || exit 1
+    ;;
+  pr)
+    [[ "$sub" == "view" ]] && cat "$GH_FIXTURE" || exit 1
+    ;;
+  api)
+    path=""
+    for a in "$@"; do
+      case "$a" in
+        repos/*) path="${a%%\?*}" ;;
+      esac
+    done
+    if [[ -n "${GH_API_LOG:-}" ]]; then
+      printf '%s\n' "$path" >> "$GH_API_LOG"
+    fi
+    sha=""
+    kind=""
+    case "$path" in
+      */commits/*/*)
+        rest="${path#*/commits/}"
+        sha="${rest%%/*}"
+        tail="${rest#*/}"
+        case "$tail" in
+          check-runs) kind=runs ;;
+          status) kind=status ;;
+        esac
+        ;;
+    esac
+    if [[ -z "$kind" || ! "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      exit 1
+    fi
+    emit="$sha"
+    if [[ -n "${GH_CHECK_HEAD:-}" ]]; then
+      emit="$GH_CHECK_HEAD"
+    fi
+    if [[ "$kind" == "runs" ]]; then
+      jq -n --arg sha "$emit" --slurpfile pr "$GH_FIXTURE" '
+        [ $pr[0].statusCheckRollup[]?
+          | select(.__typename != "StatusContext")
+          | select((.context == null) or (.state == null) or .__typename == "CheckRun")
+          | {
+              name: (.name // .context // "check"),
+              head_sha: $sha,
+              conclusion: (if has("conclusion") then .conclusion else null end)
+            }
+        ] as $runs
+        | {total_count: ($runs | length), check_runs: $runs}
+      '
+    else
+      jq -n --arg sha "$emit" --slurpfile pr "$GH_FIXTURE" '
+        [ $pr[0].statusCheckRollup[]?
+          | select(.__typename == "StatusContext"
+              or ((.context != null) and (.state != null) and .__typename != "CheckRun"))
+          | {
+              context: (.context // .name // "status"),
+              state: (if has("state") then .state else null end)
+            }
+        ] as $statuses
+        | {sha: $sha, total_count: ($statuses | length), statuses: $statuses}
+      '
+    fi
+    ;;
   *) exit 1 ;;
 esac
 FAKE
 chmod +x "$ROOT/bin/gh"
 export PATH="$ROOT/bin:$PATH"
+REAL_NODE=$(command -v node)
 
 # $1 name, then overrides as jq assignments applied to the green baseline.
 fixture() {
@@ -106,12 +176,21 @@ dump("comments.json", [])
 PY
 }
 
+# Tier C evidence fixtures travel only by --test-fixture plus the harness
+# marker. Stdout is the command substitution (not a TTY). CI and protected-ref
+# vars are cleared so a parent shell cannot look like a protected-branch run.
 run_tierc() {
   local pr_json="$1" ev_dir="${2:-}"
   if [[ -n "$ev_dir" ]]; then
-    GIBSON_REVIEW_EVIDENCE_FIXTURE="$ev_dir" GH_FIXTURE="$pr_json" "$PREFLIGHT" 1 --repo acme/app 2>&1
+    env -u GIBSON_REVIEW_EVIDENCE_FIXTURE -u GH_CHECK_HEAD -u GH_API_LOG \
+      GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+      GH_FIXTURE="$pr_json" \
+      "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ev_dir" 2>&1
   else
-    env -u GIBSON_REVIEW_EVIDENCE_FIXTURE GH_FIXTURE="$pr_json" "$PREFLIGHT" 1 --repo acme/app 2>&1
+    env -u GIBSON_REVIEW_EVIDENCE_FIXTURE -u GH_CHECK_HEAD -u GH_API_LOG \
+      GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+      GH_FIXTURE="$pr_json" \
+      "$PREFLIGHT" 1 --repo acme/app 2>&1
   fi
 }
 
@@ -129,11 +208,16 @@ stage_mut() {
 run_mut() {
   local script="$1" pr_json="$2" ev_dir="${3:-}"
   if [[ -n "$ev_dir" ]]; then
-    env GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
-      GIBSON_REVIEW_EVIDENCE_FIXTURE="$ev_dir" GH_FIXTURE="$pr_json" \
-      bash "$script" 1 --repo acme/app 2>&1
+    env -u GIBSON_REVIEW_EVIDENCE_FIXTURE -u GH_CHECK_HEAD -u GH_API_LOG \
+      GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+      GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+      GH_FIXTURE="$pr_json" \
+      bash "$script" 1 --repo acme/app --test-fixture "$ev_dir" 2>&1
   else
-    env GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" GH_FIXTURE="$pr_json" \
+    env -u GIBSON_REVIEW_EVIDENCE_FIXTURE -u GH_CHECK_HEAD -u GH_API_LOG \
+      GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+      GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+      GH_FIXTURE="$pr_json" \
       bash "$script" 1 --repo acme/app 2>&1
   fi
 }
@@ -986,10 +1070,11 @@ python3 - "$mut_stale" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
-# Force the evaluator result to look like E3-at-head pass.
+# Force the evaluator result to look like E3-at-head pass, keeping headSha
+# so this mutation still proves the reason check (a missing headSha is its own blocker).
 needle = '    _ev_out=$("${_ev_args[@]}" 2>/dev/null) || true'
 repl = '''    _ev_out=$("${_ev_args[@]}" 2>/dev/null) || true
-    _ev_out='{"state":"success","reason":"pass"}'
+    _ev_out=$(printf '%s' "$_ev_out" | jq -c '.state = "success" | .reason = "pass"')
 '''
 if needle not in s:
     raise SystemExit("mutation anchor missing: evaluator capture")
@@ -1042,12 +1127,12 @@ python3 - "$mut_red" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding="utf-8").read()
-needle = '''  if [[ "$PENDING" -gt 0 || "$FAILED_N" -gt 0 ]]; then
-    _floor_parts+=("required checks not green")
-  fi'''
-repl = '''  if [[ "$PENDING" -gt 0 || "$FAILED_N" -gt 0 ]]; then
-    :
-  fi'''
+needle = '''    if [[ "$CHECK_GREEN" -ne 1 ]]; then
+      _floor_parts+=("required checks not green")
+    fi'''
+repl = '''    if [[ "$CHECK_GREEN" -ne 1 ]]; then
+      :
+    fi'''
 if needle not in s:
     raise SystemExit("mutation anchor missing: checks-green floor clause")
 open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
@@ -1089,6 +1174,313 @@ elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
 else
   bad "mutation unreadable unexpected (rc=$rc): $out"
 fi
+
+echo "D-015 · Tier C required checks are an allow-list of success, bound to HEAD"
+OTHER_SHA="cccccccccccccccccccccccccccccccccccccccc"
+f_tierc_neutral=$(fixture tierc_neutral '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": "NEUTRAL", "steps": [{"name": "s"}]}]')
+for tok in NEUTRAL SKIPPED STALE ACTION_REQUIRED UNKNOWN_TOKEN; do
+  f_tok=$(fixture "tierc_tok_${tok}" --arg t "$tok" '
+    .labels = [{"name": "tier-c"}]
+    | .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": $t, "steps": [{"name": "s"}]}]')
+  out=$(run_tierc "$f_tok" "$ROOT/ev-e3"); rc=$?
+  check "token $tok is not met" "$rc" "1"
+  contains "token $tok names the floor" "$out" "Tier C floor (G12, D-015) not met"
+  contains "token $tok names checks" "$out" "required checks not green"
+  lacks "token $tok is not READY" "$out" "— READY"
+done
+
+f_miss=$(fixture tierc_missing '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": null, "steps": []}]')
+out=$(run_tierc "$f_miss" "$ROOT/ev-e3"); rc=$?
+check "missing conclusion is not met" "$rc" "1"
+contains "missing conclusion names checks" "$out" "required checks not green"
+lacks "missing conclusion is not READY" "$out" "— READY"
+
+f_status_ok=$(fixture tierc_status_ok '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "StatusContext", "context": "ci/status", "state": "success"}]')
+out=$(run_tierc "$f_status_ok" "$ROOT/ev-e3"); rc=$?
+check "status state success is met" "$rc" "0"
+contains "status success verdict" "$out" "READY"
+
+f_status_bad=$(fixture tierc_status_bad '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "StatusContext", "context": "ci/status", "state": "EXPECTED"}]')
+out=$(run_tierc "$f_status_bad" "$ROOT/ev-e3"); rc=$?
+check "unknown status state is not met" "$rc" "1"
+contains "unknown status names checks" "$out" "required checks not green"
+lacks "unknown status is not READY" "$out" "— READY"
+
+f_mix=$(fixture tierc_mix '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [
+    {"__typename": "CheckRun", "name": "gate", "conclusion": "SUCCESS", "steps": [{"name": "s"}]},
+    {"__typename": "CheckRun", "name": "lint", "conclusion": "NEUTRAL", "steps": [{"name": "s"}]}
+  ]')
+out=$(run_tierc "$f_mix" "$ROOT/ev-e3"); rc=$?
+check "one non-success context blocks the whole set" "$rc" "1"
+contains "mixed set names checks" "$out" "required checks not green"
+
+mut_allow=$(stage_mut "$ROOT/mut-allow")
+python3 - "$mut_allow" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = 'def met: tok == "success";'
+repl = 'def met: true;'
+if needle not in s:
+    raise SystemExit("mutation anchor missing: success allow-list")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+out=$(run_mut "$mut_allow" "$f_tierc_neutral" "$ROOT/ev-e3"); rc=$?
+if echo "$out" | grep -F "required checks not green" >/dev/null; then
+  bad "mutation allow-list: NEUTRAL still failed the floor: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation allow-list: treating every token as success lets NEUTRAL READY"
+else
+  bad "mutation allow-list unexpected (rc=$rc): $out"
+fi
+
+echo "D-015 · fixture transport is test-harness only"
+out=$(env -u GIBSON_TEST_MODE \
+  GIBSON_REVIEW_EVIDENCE_FIXTURE="$ROOT/ev-e3" \
+  CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app 2>&1); rc=$?
+check "env fixture without --test-fixture is blocked" "$rc" "1"
+contains "env fixture names the production blocker" "$out" "test fixture transport present in a production run"
+lacks "env fixture is not READY" "$out" "— READY"
+
+mut_fix=$(stage_mut "$ROOT/mut-fix")
+python3 - "$mut_fix" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+n1 = '''if [[ -n "${GIBSON_REVIEW_EVIDENCE_FIXTURE:-}" && "$TEST_FIXTURE_OK" -ne 1 ]]; then
+  BLOCKERS+=("test fixture transport present in a production run")
+fi'''
+r1 = ''
+n2 = '''    if [[ "$TEST_FIXTURE_OK" -eq 1 ]]; then
+      _ev_args+=(--fixture "$TEST_FIXTURE_DIR")
+    fi'''
+r2 = '''    if [[ -n "${GIBSON_REVIEW_EVIDENCE_FIXTURE:-}" ]]; then
+      _ev_args+=(--fixture "$GIBSON_REVIEW_EVIDENCE_FIXTURE")
+    fi'''
+if n1 not in s or n2 not in s:
+    raise SystemExit("mutation anchor missing: fixture transport")
+open(p, "w", encoding="utf-8").write(s.replace(n1, r1, 1).replace(n2, r2, 1))
+PY
+out=$(env -u GIBSON_TEST_MODE \
+  GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+  GIBSON_REVIEW_EVIDENCE_FIXTURE="$ROOT/ev-e3" \
+  CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  bash "$mut_fix" 1 --repo acme/app 2>&1); rc=$?
+if echo "$out" | grep -F "test fixture transport present in a production run" >/dev/null; then
+  bad "mutation fixture: production blocker still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation fixture: honoring the env var lets fabricated evidence READY"
+else
+  bad "mutation fixture unexpected (rc=$rc): $out"
+fi
+
+out=$(env -u GIBSON_TEST_MODE -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+check "--test-fixture without the harness marker is refused" "$rc" "2"
+contains "flag without marker names the harness" "$out" "refusing --test-fixture outside the test harness"
+
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI=true GITHUB_REF=refs/heads/main GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+check "protected-branch CI refuses --test-fixture" "$rc" "2"
+contains "protected-branch refusal names the harness" "$out" "refusing --test-fixture outside the test harness"
+
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI=true GITHUB_REF=refs/pull/481/merge GITHUB_REF_PROTECTED=true \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+check "GITHUB_REF_PROTECTED refuses --test-fixture" "$rc" "2"
+
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI=true GITHUB_REF=refs/pull/481/merge GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+check "pull-request CI may use the harness fixture" "$rc" "0"
+contains "pull-request CI harness is READY" "$out" "READY"
+
+out=$(env GIBSON_REVIEW_EVIDENCE_FIXTURE="$ROOT/ev-e3" \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-stale" 2>&1); rc=$?
+check "harness uses --test-fixture, not the env var" "$rc" "1"
+contains "stale flag still names unbound head" "$out" "E3 not bound to this head"
+lacks "harness does not emit the production blocker" "$out" "test fixture transport present in a production run"
+
+python3 - "$PREFLIGHT" "$f_tierc_green" "$ROOT/ev-e3" "$ROOT/pty" <<'PY'
+import os, pty, select, subprocess, sys, time
+preflight, fixture, evdir, out_path = sys.argv[1:5]
+master, slave = pty.openpty()
+env = os.environ.copy()
+env["GIBSON_TEST_MODE"] = "1"
+env["GH_FIXTURE"] = fixture
+env.pop("GIBSON_REVIEW_EVIDENCE_FIXTURE", None)
+env["CI"] = ""
+env["GITHUB_REF"] = ""
+env["GITHUB_REF_PROTECTED"] = ""
+proc = subprocess.Popen(
+    [preflight, "1", "--repo", "acme/app", "--test-fixture", evdir],
+    stdin=subprocess.DEVNULL,
+    stdout=slave,
+    stderr=subprocess.STDOUT,
+    env=env,
+    close_fds=True,
+)
+os.close(slave)
+buf = b""
+deadline = time.time() + 20
+while time.time() < deadline:
+    ready, _, _ = select.select([master], [], [], 0.2)
+    if ready:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk
+    elif proc.poll() is not None:
+        break
+try:
+    rc = proc.wait(timeout=5)
+except subprocess.TimeoutExpired:
+    proc.kill()
+    rc = 99
+os.close(master)
+open(out_path, "wb").write(buf)
+open(out_path + ".rc", "w", encoding="utf-8").write(str(rc))
+PY
+pty_rc=$(cat "$ROOT/pty.rc")
+pty_text=$(cat "$ROOT/pty")
+check "TTY refuses --test-fixture" "$pty_rc" "2"
+contains "TTY refusal names the harness" "$pty_text" "refusing --test-fixture outside the test harness"
+
+echo "D-015 · evaluator headSha and check snapshot are bound to HEAD_OID"
+: > "$ROOT/gh-api.log"
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  GH_CHECK_HEAD="$OTHER_SHA" \
+  GH_API_LOG="$ROOT/gh-api.log" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+check "checks for a different SHA are blocked" "$rc" "1"
+contains "wrong check SHA names the binding" "$out" "required checks not bound to this head"
+lacks "wrong check SHA is not a conclusion failure" "$out" "required checks not green"
+lacks "wrong check SHA is not READY" "$out" "— READY"
+if grep -F "commits/${HEAD_SHA}/check-runs" "$ROOT/gh-api.log" >/dev/null \
+  && grep -F "commits/${HEAD_SHA}/status" "$ROOT/gh-api.log" >/dev/null; then
+  ok "checks were requested for HEAD_OID"
+else
+  bad "checks were not requested for HEAD_OID: $(cat "$ROOT/gh-api.log")"
+fi
+
+mut_bound=$(stage_mut "$ROOT/mut-bound")
+python3 - "$mut_bound" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = '''    if [[ "$CHECK_BOUND" -ne 1 ]]; then
+      _floor_parts+=("required checks not bound to this head")
+    fi'''
+repl = '''    if [[ "$CHECK_BOUND" -ne 1 ]]; then
+      :
+    fi'''
+if needle not in s:
+    raise SystemExit("mutation anchor missing: check SHA binding")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  GH_CHECK_HEAD="$OTHER_SHA" \
+  bash "$mut_bound" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+if echo "$out" | grep -F "required checks not bound to this head" >/dev/null; then
+  bad "mutation check-SHA: binding still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation check-SHA: ignoring payload SHA lets another head's checks READY"
+else
+  bad "mutation check-SHA unexpected (rc=$rc): $out"
+fi
+
+install_fake_node() {
+  printf '%s\n' "$1" > "$ROOT/fake-eval.json"
+  python3 - "$ROOT/bin/node" "$ROOT/fake-eval.json" "$REAL_NODE" <<'PY'
+import sys
+path, payload, real = sys.argv[1:4]
+script = """#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    *pr-review-evidence.mjs*)
+      cat "$PAYLOAD"
+      exit 0
+      ;;
+  esac
+done
+exec "$REAL_NODE" "$@"
+"""
+script = script.replace("$PAYLOAD", payload).replace("$REAL_NODE", real)
+open(path, "w", encoding="utf-8").write(script)
+PY
+  chmod +x "$ROOT/bin/node"
+}
+
+install_fake_node "{\"headSha\":\"${PREV_SHA}\",\"state\":\"success\",\"reason\":\"pass\"}"
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app 2>&1); rc=$?
+check "evaluator headSha mismatch is blocked" "$rc" "1"
+contains "head mismatch names the binding" "$out" "evaluator headSha does not match this head"
+lacks "head mismatch is not READY" "$out" "— READY"
+
+install_fake_node '{"state":"success","reason":"pass"}'
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app 2>&1); rc=$?
+check "missing evaluator headSha is blocked" "$rc" "1"
+contains "missing headSha names the binding" "$out" "evaluator headSha does not match this head"
+
+mut_head=$(stage_mut "$ROOT/mut-head")
+python3 - "$mut_head" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = '''    if [[ "$_ev_head" != "$HEAD_OID" ]]; then
+      _floor_parts+=("evaluator headSha does not match this head")
+    fi'''
+repl = '''    if [[ "$_ev_head" != "$HEAD_OID" ]]; then
+      :
+    fi'''
+if needle not in s:
+    raise SystemExit("mutation anchor missing: evaluator headSha")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+install_fake_node "{\"headSha\":\"${PREV_SHA}\",\"state\":\"success\",\"reason\":\"pass\"}"
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  bash "$mut_head" 1 --repo acme/app 2>&1); rc=$?
+if echo "$out" | grep -F "evaluator headSha does not match this head" >/dev/null; then
+  bad "mutation headSha: binding still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation headSha: ignoring returned headSha lets a different head READY"
+else
+  bad "mutation headSha unexpected (rc=$rc): $out"
+fi
+rm -f "$ROOT/bin/node"
 
 echo "hygiene · drafts and conflicts block"
 f_draft=$(fixture draft '.isDraft = true | .mergeable = "CONFLICTING"')
