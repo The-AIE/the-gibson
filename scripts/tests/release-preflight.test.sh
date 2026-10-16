@@ -22,21 +22,162 @@ ok()  { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
 contains() { if echo "$2" | grep -F -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-preflight-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
 mkdir -p "$ROOT/bin"
+# Inherited fixture env must not leak into a case that expects production.
+unset GIBSON_REVIEW_EVIDENCE_FIXTURE || true
 cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 # Fake gh: `repo view` names a repo, `pr view` replays $GH_FIXTURE.
-case "$1 $2" in
-  "repo view") echo "acme/app" ;;
-  "pr view") cat "$GH_FIXTURE" ;;
+# `api .../commits/<sha>/check-runs` and `.../status` project that fixture's
+# rollup onto the requested SHA, unless GH_CHECK_HEAD forces a different
+# snapshot SHA (the preflight must then refuse).
+# Protection + rulesets: GH_REQUIRED_MODE=derive (default, from the rollup),
+# empty, unreadable, rules-fail, or files (GH_REQUIRED_PROTECTION / _RULES).
+# A head move after the check-run read: set GH_HEAD_MOVED_FLAG to a path that
+# does not exist yet and GH_HEAD_REREAD to the new oid. The flag is created
+# when check-runs are fetched (after the evaluator); only a later pr view
+# returns the new oid.
+set -u
+cmd="${1:-}"
+sub="${2:-}"
+serve_required() {
+  local path="$1" kind mode
+  case "$path" in
+    */protection/required_status_checks) kind=protection ;;
+    */rules/branches/*) kind=rules ;;
+    *) exit 1 ;;
+  esac
+  mode="${GH_REQUIRED_MODE:-derive}"
+  case "$mode" in
+    unreadable) exit 1 ;;
+    rules-fail)
+      [[ "$kind" == "rules" ]] && exit 1
+      mode=derive
+      ;;
+    empty)
+      if [[ "$kind" == "protection" ]]; then
+        printf '%s\n' '{"strict":false,"contexts":[],"checks":[]}'
+      else
+        printf '%s\n' '[]'
+      fi
+      return
+      ;;
+    files)
+      if [[ "$kind" == "protection" ]]; then
+        cat "${GH_REQUIRED_PROTECTION:?}"
+      else
+        cat "${GH_REQUIRED_RULES:?}"
+      fi
+      return
+      ;;
+  esac
+  if [[ "$kind" == "rules" ]]; then
+    printf '%s\n' '[]'
+    return
+  fi
+  jq -n --slurpfile pr "$GH_FIXTURE" '
+    [ $pr[0].statusCheckRollup[]?
+      | if .__typename == "StatusContext"
+          or ((.context != null) and (.state != null) and .__typename != "CheckRun")
+        then {context: (.context // .name // "status"), app_id: null}
+        else {context: (.name // .context // "check"), app_id: (.app_id // .app.id // null)}
+        end
+    ] as $checks
+    | {strict: false, contexts: [$checks[].context], checks: $checks}
+  '
+}
+case "$cmd" in
+  repo)
+    [[ "$sub" == "view" ]] && echo "acme/app" || exit 1
+    ;;
+  pr)
+    if [[ "$sub" != "view" ]]; then
+      exit 1
+    fi
+    if [[ -n "${GH_HEAD_REREAD:-}" && -n "${GH_HEAD_MOVED_FLAG:-}" && -f "$GH_HEAD_MOVED_FLAG" ]]; then
+      jq --arg h "$GH_HEAD_REREAD" '.headRefOid = $h' "$GH_FIXTURE"
+    else
+      cat "$GH_FIXTURE"
+    fi
+    ;;
+  api)
+    path=""
+    for a in "$@"; do
+      case "$a" in
+        repos/*) path="${a%%\?*}" ;;
+      esac
+    done
+    if [[ -n "${GH_API_LOG:-}" ]]; then
+      printf '%s\n' "$path" >> "$GH_API_LOG"
+    fi
+    case "$path" in
+      */protection/required_status_checks|*/rules/branches/*)
+        serve_required "$path"
+        exit $?
+        ;;
+    esac
+    sha=""
+    kind=""
+    case "$path" in
+      */commits/*/*)
+        rest="${path#*/commits/}"
+        sha="${rest%%/*}"
+        tail="${rest#*/}"
+        case "$tail" in
+          check-runs) kind=runs ;;
+          status) kind=status ;;
+        esac
+        ;;
+    esac
+    if [[ -z "$kind" || ! "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+      exit 1
+    fi
+    if [[ "$kind" == "runs" && -n "${GH_HEAD_MOVED_FLAG:-}" ]]; then
+      : > "$GH_HEAD_MOVED_FLAG"
+    fi
+    emit="$sha"
+    if [[ -n "${GH_CHECK_HEAD:-}" ]]; then
+      emit="$GH_CHECK_HEAD"
+    fi
+    if [[ "$kind" == "runs" ]]; then
+      jq -n --arg sha "$emit" --slurpfile pr "$GH_FIXTURE" '
+        [ $pr[0].statusCheckRollup[]?
+          | select(.__typename != "StatusContext")
+          | select((.context == null) or (.state == null) or .__typename == "CheckRun")
+          | {
+              name: (.name // .context // "check"),
+              head_sha: $sha,
+              conclusion: (if has("conclusion") then .conclusion else null end),
+              app: (if (.app.id // .app_id) == null then null
+                    else {id: (.app.id // .app_id)} end)
+            }
+        ] as $runs
+        | {total_count: ($runs | length), check_runs: $runs}
+      '
+    else
+      jq -n --arg sha "$emit" --slurpfile pr "$GH_FIXTURE" '
+        [ $pr[0].statusCheckRollup[]?
+          | select(.__typename == "StatusContext"
+              or ((.context != null) and (.state != null) and .__typename != "CheckRun"))
+          | {
+              context: (.context // .name // "status"),
+              state: (if has("state") then .state else null end)
+            }
+        ] as $statuses
+        | {sha: $sha, total_count: ($statuses | length), statuses: $statuses}
+      '
+    fi
+    ;;
   *) exit 1 ;;
 esac
 FAKE
 chmod +x "$ROOT/bin/gh"
 export PATH="$ROOT/bin:$PATH"
+REAL_NODE=$(command -v node)
 
 # $1 name, then overrides as jq assignments applied to the green baseline.
 fixture() {
@@ -48,6 +189,7 @@ fixture() {
   "body": "Closes #28",
   "author": {"login": "builder-bot"}, "reviewDecision": "APPROVED",
   "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "baseRefName": "main",
   "labels": [{"name": "tier-b"}], "closingIssuesReferences": [{"number": 28}],
   "statusCheckRollup": [
     {"__typename": "CheckRun", "name": "gate", "conclusion": "SUCCESS", "steps": [{"name": "lint"}]}
@@ -59,6 +201,105 @@ BASE
 }
 
 run() { GH_FIXTURE="$1" "$PREFLIGHT" 1 --repo acme/app ${2:-} 2>&1; }
+
+REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
+EVIDENCE_CFG="$REPO_ROOT/config/review-evidence.v1.json"
+HEAD_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+PREV_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+GROK_BOT='aie-agent-lanes-grok[bot]'
+DEVIN_BOT='devin-ai-integration[bot]'
+
+# pr-review-evidence --fixture dir. $1 dest, $2 kind: e3-head | e3-stale | same-vendor
+write_evidence_fixture() {
+  local dest="$1" kind="$2"
+  mkdir -p "$dest"
+  python3 - "$dest" "$kind" "$HEAD_SHA" "$PREV_SHA" "$GROK_BOT" "$DEVIN_BOT" <<'PY'
+import json, os, sys
+dest, kind, head, prev, grok, devin = sys.argv[1:7]
+review_sha = prev if kind == "e3-stale" else head
+reviewer = grok if kind == "same-vendor" else devin
+commit = {
+    "sha": head,
+    "author": {"login": grok},
+    "committer": {"login": grok},
+    "commit": {
+        "verification": {"verified": True, "reason": "fixture"},
+        "author": {"email": "x@example.invalid"},
+        "committer": {"email": "x@example.invalid"},
+    },
+}
+review = {
+    "id": 1,
+    "user": {"login": reviewer, "type": "Bot"},
+    "state": "APPROVED",
+    "commit_id": review_sha,
+    "submitted_at": "2026-09-04T10:00:00Z",
+    "performed_via_github_app": None,
+}
+pull = {"number": 1, "state": "open", "commits": 1, "head": {"sha": head}, "user": {"login": "builder-bot"}}
+def dump(name, obj):
+    with open(os.path.join(dest, name), "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+dump("pull.json", pull)
+dump("commits.json", [commit])
+dump("reviews.json", [review])
+dump("comments.json", [])
+PY
+}
+
+# Tier C evidence fixtures travel only by --test-fixture plus the harness
+# marker. Stdout is the command substitution (not a TTY). CI and protected-ref
+# vars are cleared so a parent shell cannot look like a protected-branch run.
+run_tierc() {
+  local pr_json="$1" ev_dir="${2:-}"
+  if [[ -n "$ev_dir" ]]; then
+    env -u GIBSON_REVIEW_EVIDENCE_FIXTURE -u GH_CHECK_HEAD -u GH_API_LOG \
+      -u GH_REQUIRED_MODE -u GH_REQUIRED_PROTECTION -u GH_REQUIRED_RULES \
+      -u GH_HEAD_REREAD -u GH_HEAD_MOVED_FLAG \
+      GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+      GH_FIXTURE="$pr_json" \
+      "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ev_dir" 2>&1
+  else
+    env -u GIBSON_REVIEW_EVIDENCE_FIXTURE -u GH_CHECK_HEAD -u GH_API_LOG \
+      -u GH_REQUIRED_MODE -u GH_REQUIRED_PROTECTION -u GH_REQUIRED_RULES \
+      -u GH_HEAD_REREAD -u GH_HEAD_MOVED_FLAG \
+      GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+      GH_FIXTURE="$pr_json" \
+      "$PREFLIGHT" 1 --repo acme/app 2>&1
+  fi
+}
+
+# Copy production script + evaluator into $1. A symlink breaks the evaluator's
+# `import.meta.url === argv[1]` main-guard (Node sees the link path), so the
+# copy is a byte-identical file; --fixture still swaps only transport.
+stage_mut() {
+  local dest="$1"
+  mkdir -p "$dest"
+  cp "$PREFLIGHT" "$dest/release-preflight.sh"
+  cp "$SCRIPT_DIR/../pr-review-evidence.mjs" "$dest/pr-review-evidence.mjs"
+  echo "$dest/release-preflight.sh"
+}
+
+run_mut() {
+  local script="$1" pr_json="$2" ev_dir="${3:-}"
+  if [[ -n "$ev_dir" ]]; then
+    env -u GIBSON_REVIEW_EVIDENCE_FIXTURE -u GH_CHECK_HEAD -u GH_API_LOG \
+      -u GH_REQUIRED_MODE -u GH_REQUIRED_PROTECTION -u GH_REQUIRED_RULES \
+      -u GH_HEAD_REREAD -u GH_HEAD_MOVED_FLAG \
+      GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+      GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+      GH_FIXTURE="$pr_json" \
+      bash "$script" 1 --repo acme/app --test-fixture "$ev_dir" 2>&1
+  else
+    env -u GIBSON_REVIEW_EVIDENCE_FIXTURE -u GH_CHECK_HEAD -u GH_API_LOG \
+      -u GH_REQUIRED_MODE -u GH_REQUIRED_PROTECTION -u GH_REQUIRED_RULES \
+      -u GH_HEAD_REREAD -u GH_HEAD_MOVED_FLAG \
+      GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+      GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+      GH_FIXTURE="$pr_json" \
+      bash "$script" 1 --repo acme/app 2>&1
+  fi
+}
 
 echo "baseline · a green, approved, tier-B PR is READY"
 f=$(fixture green '.')
@@ -847,13 +1088,819 @@ check "pending checks block" "$rc" "1"
 echo "Law 7 / posture · no admin path for Tier C or post-launch"
 f_tierc=$(fixture tierc '.labels = [{"name": "tier-c"}] |
   .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": "STARTUP_FAILURE", "steps": []}]')
-out=$(run "$f_tierc"); rc=$?
+out=$(run_tierc "$f_tierc"); rc=$?
 check "tier-c downgrades ADMIN-CANDIDATE to BLOCKED" "$rc" "1"
-contains "cites the human gate" "$out" "human merge gate"
+contains "names the G12 floor" "$out" "Tier C floor (G12, D-015) not met"
+lacks "does not cite the retired human merge gate" "$out" "human merge gate"
+contains "no admin path remains" "$out" "no admin path"
 
 out=$(run "$f_infra" --launched); rc=$?
 check "--launched removes the admin path" "$rc" "1"
 contains "says escalate" "$out" "escalate to the owner"
+
+echo "D-015 G12 floor · Tier C mergeable only on E3 at exact head + green checks"
+write_evidence_fixture "$ROOT/ev-e3" e3-head
+write_evidence_fixture "$ROOT/ev-stale" e3-stale
+write_evidence_fixture "$ROOT/ev-same" same-vendor
+
+f_tierc_green=$(fixture tierc_green '.labels = [{"name": "tier-c"}]')
+out=$(run_tierc "$f_tierc_green" "$ROOT/ev-e3"); rc=$?
+check "Tier C + E3 at head + checks green is READY" "$rc" "0"
+contains "green floor verdict READY" "$out" "READY"
+lacks "green floor has no G12 blocker" "$out" "Tier C floor (G12, D-015) not met"
+
+# Mutation: restore the retired unconditional human-gate blocker → green case BLOCKED.
+mut_green=$(stage_mut "$ROOT/mut-green")
+python3 - "$mut_green" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = '''  if [[ ${#_floor_parts[@]} -gt 0 ]]; then
+    _floor_msg=""
+    for _p in "${_floor_parts[@]}"; do
+      if [[ -z "$_floor_msg" ]]; then
+        _floor_msg="$_p"
+      else
+        _floor_msg="$_floor_msg; $_p"
+      fi
+    done
+    BLOCKERS+=("Tier C floor (G12, D-015) not met: $_floor_msg")
+  fi'''
+new = old + '\n  BLOCKERS+=("Tier C is a human merge gate (Law 7) — no admin path, whatever the CI is doing")'
+if old not in s:
+    raise SystemExit("mutation anchor missing: floor_parts block")
+open(p, "w", encoding="utf-8").write(s.replace(old, new, 1))
+PY
+out=$(run_mut "$mut_green" "$f_tierc_green" "$ROOT/ev-e3"); rc=$?
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F "human merge gate" >/dev/null; then
+  ok "mutation green: injecting retired human-gate blocker BLOCKS a floor-passing head"
+else
+  bad "mutation green did not block (rc=$rc): $out"
+fi
+
+f_tierc_stale=$(fixture tierc_stale '.labels = [{"name": "tier-c"}]')
+out=$(run_tierc "$f_tierc_stale" "$ROOT/ev-stale"); rc=$?
+check "E3 at an older head is BLOCKED" "$rc" "1"
+contains "stale E3 names the floor" "$out" "Tier C floor (G12, D-015) not met"
+contains "stale E3 names unbound head" "$out" "E3 not bound to this head"
+
+mut_stale=$(stage_mut "$ROOT/mut-stale")
+python3 - "$mut_stale" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+# Force the evaluator result to look like E3-at-head pass, keeping headSha
+# so this mutation still proves the reason check (a missing headSha is its own blocker).
+needle = '    _ev_out=$("${_ev_args[@]}" 2>/dev/null) || true'
+repl = '''    _ev_out=$("${_ev_args[@]}" 2>/dev/null) || true
+    _ev_out=$(printf '%s' "$_ev_out" | jq -c '.state = "success" | .reason = "pass"')
+'''
+if needle not in s:
+    raise SystemExit("mutation anchor missing: evaluator capture")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+out=$(run_mut "$mut_stale" "$f_tierc_stale" "$ROOT/ev-stale"); rc=$?
+if echo "$out" | grep -F "E3 not bound to this head" >/dev/null; then
+  bad "mutation stale: forcing pass still reported unbound head: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation stale: ignoring evaluator reason lets an older-head E3 READY"
+else
+  bad "mutation stale unexpected (rc=$rc): $out"
+fi
+
+f_tierc_same=$(fixture tierc_same '.labels = [{"name": "tier-c"}]')
+out=$(run_tierc "$f_tierc_same" "$ROOT/ev-same"); rc=$?
+check "same-vendor review is BLOCKED" "$rc" "1"
+contains "same-vendor names the floor" "$out" "Tier C floor (G12, D-015) not met"
+contains "same-vendor names the part" "$out" "same-vendor review"
+
+mut_same=$(stage_mut "$ROOT/mut-same")
+python3 - "$mut_same" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = '    elif [[ "$_ev_reason" == "same-vendor-reviewer" ]]; then\n      _floor_parts+=("same-vendor review")'
+repl = '    elif [[ "$_ev_reason" == "same-vendor-reviewer" ]]; then\n      :'
+if needle not in s:
+    raise SystemExit("mutation anchor missing: same-vendor clause")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+out=$(run_mut "$mut_same" "$f_tierc_same" "$ROOT/ev-same"); rc=$?
+if echo "$out" | grep -F "same-vendor review" >/dev/null; then
+  bad "mutation same-vendor: clause still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation same-vendor: dropping the same-vendor floor clause lets it READY"
+else
+  bad "mutation same-vendor unexpected (rc=$rc): $out"
+fi
+
+f_tierc_red=$(fixture tierc_red '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": "FAILURE", "steps": [{"name": "test"}]}]')
+out=$(run_tierc "$f_tierc_red" "$ROOT/ev-e3"); rc=$?
+check "checks red is BLOCKED" "$rc" "1"
+contains "red checks name the floor" "$out" "Tier C floor (G12, D-015) not met"
+contains "red checks name the part" "$out" "required checks not green"
+
+mut_red=$(stage_mut "$ROOT/mut-red")
+python3 - "$mut_red" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = '''    if [[ "$CHECK_GREEN" -ne 1 ]]; then
+      _floor_parts+=("required checks not green")
+    fi'''
+repl = '''    if [[ "$CHECK_GREEN" -ne 1 ]]; then
+      :
+    fi'''
+if needle not in s:
+    raise SystemExit("mutation anchor missing: checks-green floor clause")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+out=$(run_mut "$mut_red" "$f_tierc_red" "$ROOT/ev-e3"); rc=$?
+if echo "$out" | grep -F "required checks not green" >/dev/null; then
+  bad "mutation checks-red: floor still named required checks: $out"
+elif echo "$out" | grep -F "fix the code" >/dev/null && [[ "$rc" -eq 1 ]]; then
+  ok "mutation checks-red: dropping the floor checks clause loses that part (product-red still blocks)"
+else
+  bad "mutation checks-red unexpected (rc=$rc): $out"
+fi
+
+f_tierc_unread=$(fixture tierc_unread '.labels = [{"name": "tier-c"}]')
+out=$(run_tierc "$f_tierc_unread"); rc=$?
+check "evidence unreadable is BLOCKED" "$rc" "1"
+contains "unreadable names the floor" "$out" "Tier C floor (G12, D-015) not met"
+contains "unreadable names the part" "$out" "evidence unreadable"
+
+mut_unread=$(stage_mut "$ROOT/mut-unread")
+python3 - "$mut_unread" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+n1 = '    if [[ -z "$_ev_state" || -z "$_ev_reason" ]]; then\n      _floor_parts+=("evidence unreadable")'
+r1 = '    if [[ -z "$_ev_state" || -z "$_ev_reason" ]]; then\n      :'
+n2 = '    elif [[ "$_ev_reason" == "api-error" || "$_ev_reason" == "config-error" ]]; then\n      _floor_parts+=("evidence unreadable")'
+r2 = '    elif [[ "$_ev_reason" == "api-error" || "$_ev_reason" == "config-error" ]]; then\n      :'
+if n1 not in s or n2 not in s:
+    raise SystemExit("mutation anchor missing: unreadable clauses")
+s = s.replace(n1, r1, 1).replace(n2, r2, 1)
+open(p, "w", encoding="utf-8").write(s)
+PY
+out=$(run_mut "$mut_unread" "$f_tierc_unread"); rc=$?
+if echo "$out" | grep -F "evidence unreadable" >/dev/null; then
+  bad "mutation unreadable: clause still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation unreadable: dropping fail-closed unreadable lets missing evidence READY"
+else
+  bad "mutation unreadable unexpected (rc=$rc): $out"
+fi
+
+echo "D-015 · Tier C required checks are an allow-list of success, bound to HEAD"
+OTHER_SHA="cccccccccccccccccccccccccccccccccccccccc"
+f_tierc_neutral=$(fixture tierc_neutral '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": "NEUTRAL", "steps": [{"name": "s"}]}]')
+for tok in NEUTRAL SKIPPED STALE ACTION_REQUIRED UNKNOWN_TOKEN; do
+  f_tok=$(fixture "tierc_tok_${tok}" --arg t "$tok" '
+    .labels = [{"name": "tier-c"}]
+    | .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": $t, "steps": [{"name": "s"}]}]')
+  out=$(run_tierc "$f_tok" "$ROOT/ev-e3"); rc=$?
+  check "token $tok is not met" "$rc" "1"
+  contains "token $tok names the floor" "$out" "Tier C floor (G12, D-015) not met"
+  contains "token $tok names checks" "$out" "required checks not green"
+  lacks "token $tok is not READY" "$out" "— READY"
+done
+
+f_miss=$(fixture tierc_missing '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": null, "steps": []}]')
+out=$(run_tierc "$f_miss" "$ROOT/ev-e3"); rc=$?
+check "missing conclusion is not met" "$rc" "1"
+contains "missing conclusion names checks" "$out" "required checks not green"
+lacks "missing conclusion is not READY" "$out" "— READY"
+
+f_status_ok=$(fixture tierc_status_ok '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "StatusContext", "context": "ci/status", "state": "success"}]')
+out=$(run_tierc "$f_status_ok" "$ROOT/ev-e3"); rc=$?
+check "status state success is met" "$rc" "0"
+contains "status success verdict" "$out" "READY"
+
+f_status_bad=$(fixture tierc_status_bad '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "StatusContext", "context": "ci/status", "state": "EXPECTED"}]')
+out=$(run_tierc "$f_status_bad" "$ROOT/ev-e3"); rc=$?
+check "unknown status state is not met" "$rc" "1"
+contains "unknown status names checks" "$out" "required checks not green"
+lacks "unknown status is not READY" "$out" "— READY"
+
+f_mix=$(fixture tierc_mix '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [
+    {"__typename": "CheckRun", "name": "gate", "conclusion": "SUCCESS", "steps": [{"name": "s"}]},
+    {"__typename": "CheckRun", "name": "lint", "conclusion": "NEUTRAL", "steps": [{"name": "s"}]}
+  ]')
+out=$(run_tierc "$f_mix" "$ROOT/ev-e3"); rc=$?
+check "one non-success context blocks the whole set" "$rc" "1"
+contains "mixed set names checks" "$out" "required checks not green"
+
+mut_allow=$(stage_mut "$ROOT/mut-allow")
+python3 - "$mut_allow" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = 'def met: tok == "success";'
+repl = 'def met: true;'
+if needle not in s:
+    raise SystemExit("mutation anchor missing: success allow-list")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+out=$(run_mut "$mut_allow" "$f_tierc_neutral" "$ROOT/ev-e3"); rc=$?
+if echo "$out" | grep -F "required checks not green" >/dev/null; then
+  bad "mutation allow-list: NEUTRAL still failed the floor: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation allow-list: treating every token as success lets NEUTRAL READY"
+else
+  bad "mutation allow-list unexpected (rc=$rc): $out"
+fi
+
+echo "D-015 · fixture transport is test-harness only"
+out=$(env -u GIBSON_TEST_MODE \
+  GIBSON_REVIEW_EVIDENCE_FIXTURE="$ROOT/ev-e3" \
+  CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app 2>&1); rc=$?
+check "env fixture without --test-fixture is blocked" "$rc" "1"
+contains "env fixture names the production blocker" "$out" "test fixture transport present in a production run"
+lacks "env fixture is not READY" "$out" "— READY"
+
+mut_fix=$(stage_mut "$ROOT/mut-fix")
+python3 - "$mut_fix" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+n1 = '''if [[ -n "${GIBSON_REVIEW_EVIDENCE_FIXTURE:-}" && "$TEST_FIXTURE_OK" -ne 1 ]]; then
+  BLOCKERS+=("test fixture transport present in a production run")
+fi'''
+r1 = ''
+n2 = '''    if [[ "$TEST_FIXTURE_OK" -eq 1 ]]; then
+      _ev_args+=(--fixture "$TEST_FIXTURE_DIR")
+    fi'''
+r2 = '''    if [[ -n "${GIBSON_REVIEW_EVIDENCE_FIXTURE:-}" ]]; then
+      _ev_args+=(--fixture "$GIBSON_REVIEW_EVIDENCE_FIXTURE")
+    fi'''
+if n1 not in s or n2 not in s:
+    raise SystemExit("mutation anchor missing: fixture transport")
+open(p, "w", encoding="utf-8").write(s.replace(n1, r1, 1).replace(n2, r2, 1))
+PY
+out=$(env -u GIBSON_TEST_MODE \
+  GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+  GIBSON_REVIEW_EVIDENCE_FIXTURE="$ROOT/ev-e3" \
+  CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  bash "$mut_fix" 1 --repo acme/app 2>&1); rc=$?
+if echo "$out" | grep -F "test fixture transport present in a production run" >/dev/null; then
+  bad "mutation fixture: production blocker still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation fixture: honoring the env var lets fabricated evidence READY"
+else
+  bad "mutation fixture unexpected (rc=$rc): $out"
+fi
+
+out=$(env -u GIBSON_TEST_MODE -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+check "--test-fixture without the harness marker is refused" "$rc" "2"
+contains "flag without marker names the harness" "$out" "refusing --test-fixture outside the test harness"
+
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI=true GITHUB_REF=refs/heads/main GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+check "protected-branch CI refuses --test-fixture" "$rc" "2"
+contains "protected-branch refusal names the harness" "$out" "refusing --test-fixture outside the test harness"
+
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI=true GITHUB_REF=refs/pull/481/merge GITHUB_REF_PROTECTED=true \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+check "GITHUB_REF_PROTECTED refuses --test-fixture" "$rc" "2"
+
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI=true GITHUB_REF=refs/pull/481/merge GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+check "pull-request CI may use the harness fixture" "$rc" "0"
+contains "pull-request CI harness is READY" "$out" "READY"
+
+out=$(env GIBSON_REVIEW_EVIDENCE_FIXTURE="$ROOT/ev-e3" \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-stale" 2>&1); rc=$?
+check "harness uses --test-fixture, not the env var" "$rc" "1"
+contains "stale flag still names unbound head" "$out" "E3 not bound to this head"
+lacks "harness does not emit the production blocker" "$out" "test fixture transport present in a production run"
+
+python3 - "$PREFLIGHT" "$f_tierc_green" "$ROOT/ev-e3" "$ROOT/pty" <<'PY'
+import os, pty, select, subprocess, sys, time
+preflight, fixture, evdir, out_path = sys.argv[1:5]
+master, slave = pty.openpty()
+env = os.environ.copy()
+env["GIBSON_TEST_MODE"] = "1"
+env["GH_FIXTURE"] = fixture
+env.pop("GIBSON_REVIEW_EVIDENCE_FIXTURE", None)
+env["CI"] = ""
+env["GITHUB_REF"] = ""
+env["GITHUB_REF_PROTECTED"] = ""
+proc = subprocess.Popen(
+    [preflight, "1", "--repo", "acme/app", "--test-fixture", evdir],
+    stdin=subprocess.DEVNULL,
+    stdout=slave,
+    stderr=subprocess.STDOUT,
+    env=env,
+    close_fds=True,
+)
+os.close(slave)
+buf = b""
+deadline = time.time() + 20
+while time.time() < deadline:
+    ready, _, _ = select.select([master], [], [], 0.2)
+    if ready:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk
+    elif proc.poll() is not None:
+        break
+try:
+    rc = proc.wait(timeout=5)
+except subprocess.TimeoutExpired:
+    proc.kill()
+    rc = 99
+os.close(master)
+open(out_path, "wb").write(buf)
+open(out_path + ".rc", "w", encoding="utf-8").write(str(rc))
+PY
+pty_rc=$(cat "$ROOT/pty.rc")
+pty_text=$(cat "$ROOT/pty")
+check "TTY refuses --test-fixture" "$pty_rc" "2"
+contains "TTY refusal names the harness" "$pty_text" "refusing --test-fixture outside the test harness"
+
+echo "D-015 · evaluator headSha and check snapshot are bound to HEAD_OID"
+: > "$ROOT/gh-api.log"
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  GH_CHECK_HEAD="$OTHER_SHA" \
+  GH_API_LOG="$ROOT/gh-api.log" \
+  "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+check "checks for a different SHA are blocked" "$rc" "1"
+contains "wrong check SHA names the binding" "$out" "required checks not bound to this head"
+lacks "wrong check SHA is not a conclusion failure" "$out" "required checks not green"
+lacks "wrong check SHA is not READY" "$out" "— READY"
+if grep -F "commits/${HEAD_SHA}/check-runs" "$ROOT/gh-api.log" >/dev/null \
+  && grep -F "commits/${HEAD_SHA}/status" "$ROOT/gh-api.log" >/dev/null; then
+  ok "checks were requested for HEAD_OID"
+else
+  bad "checks were not requested for HEAD_OID: $(cat "$ROOT/gh-api.log")"
+fi
+
+mut_bound=$(stage_mut "$ROOT/mut-bound")
+python3 - "$mut_bound" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = '''    if [[ "$CHECK_BOUND" -ne 1 ]]; then
+      _floor_parts+=("required checks not bound to this head")
+    fi'''
+repl = '''    if [[ "$CHECK_BOUND" -ne 1 ]]; then
+      :
+    fi'''
+if needle not in s:
+    raise SystemExit("mutation anchor missing: check SHA binding")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  GH_CHECK_HEAD="$OTHER_SHA" \
+  bash "$mut_bound" 1 --repo acme/app --test-fixture "$ROOT/ev-e3" 2>&1); rc=$?
+if echo "$out" | grep -F "required checks not bound to this head" >/dev/null; then
+  bad "mutation check-SHA: binding still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation check-SHA: ignoring payload SHA lets another head's checks READY"
+else
+  bad "mutation check-SHA unexpected (rc=$rc): $out"
+fi
+
+install_fake_node() {
+  printf '%s\n' "$1" > "$ROOT/fake-eval.json"
+  python3 - "$ROOT/bin/node" "$ROOT/fake-eval.json" "$REAL_NODE" <<'PY'
+import sys
+path, payload, real = sys.argv[1:4]
+script = """#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    *pr-review-evidence.mjs*)
+      cat "$PAYLOAD"
+      exit 0
+      ;;
+  esac
+done
+exec "$REAL_NODE" "$@"
+"""
+script = script.replace("$PAYLOAD", payload).replace("$REAL_NODE", real)
+open(path, "w", encoding="utf-8").write(script)
+PY
+  chmod +x "$ROOT/bin/node"
+}
+
+install_fake_node "{\"headSha\":\"${PREV_SHA}\",\"state\":\"success\",\"reason\":\"pass\"}"
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app 2>&1); rc=$?
+check "evaluator headSha mismatch is blocked" "$rc" "1"
+contains "head mismatch names the binding" "$out" "evaluator headSha does not match this head"
+lacks "head mismatch is not READY" "$out" "— READY"
+
+install_fake_node '{"state":"success","reason":"pass"}'
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  "$PREFLIGHT" 1 --repo acme/app 2>&1); rc=$?
+check "missing evaluator headSha is blocked" "$rc" "1"
+contains "missing headSha names the binding" "$out" "evaluator headSha does not match this head"
+
+mut_head=$(stage_mut "$ROOT/mut-head")
+python3 - "$mut_head" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = '''    if [[ "$_ev_head" != "$HEAD_OID" ]]; then
+      _floor_parts+=("evaluator headSha does not match this head")
+    fi'''
+repl = '''    if [[ "$_ev_head" != "$HEAD_OID" ]]; then
+      :
+    fi'''
+if needle not in s:
+    raise SystemExit("mutation anchor missing: evaluator headSha")
+open(p, "w", encoding="utf-8").write(s.replace(needle, repl, 1))
+PY
+install_fake_node "{\"headSha\":\"${PREV_SHA}\",\"state\":\"success\",\"reason\":\"pass\"}"
+out=$(env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+  GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+  GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+  GH_FIXTURE="$f_tierc_green" \
+  bash "$mut_head" 1 --repo acme/app 2>&1); rc=$?
+if echo "$out" | grep -F "evaluator headSha does not match this head" >/dev/null; then
+  bad "mutation headSha: binding still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation headSha: ignoring returned headSha lets a different head READY"
+else
+  bad "mutation headSha unexpected (rc=$rc): $out"
+fi
+rm -f "$ROOT/bin/node"
+
+echo "D-015 · required contexts come from protection + rulesets, fail closed"
+run_req() {
+  local pr_json="$1" ev_dir="$2"
+  shift 2
+  env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+    GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+    GH_FIXTURE="$pr_json" \
+    "$@" \
+    "$PREFLIGHT" 1 --repo acme/app --test-fixture "$ev_dir" 2>&1
+}
+run_req_mut() {
+  local script="$1" pr_json="$2" ev_dir="$3"
+  shift 3
+  env -u GIBSON_REVIEW_EVIDENCE_FIXTURE \
+    GIBSON_REVIEW_EVIDENCE_CONFIG="$EVIDENCE_CFG" \
+    GIBSON_TEST_MODE=1 CI= GITHUB_REF= GITHUB_REF_PROTECTED= \
+    GH_FIXTURE="$pr_json" \
+    "$@" \
+    bash "$script" 1 --repo acme/app --test-fixture "$ev_dir" 2>&1
+}
+write_required_files() {
+  local dest="$1"
+  mkdir -p "$dest"
+  printf '%s\n' "$2" > "$dest/protection.json"
+  printf '%s\n' "$3" > "$dest/rules.json"
+}
+
+f_zero=$(fixture tierc_zero '.labels = [{"name": "tier-c"}] | .statusCheckRollup = []')
+write_required_files "$ROOT/req-zero" \
+  '{"strict":true,"contexts":[],"checks":[{"context":"gate","app_id":null}]}' \
+  '[]'
+out=$(run_req "$f_zero" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-zero/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-zero/rules.json"); rc=$?
+check "zero contexts reported is blocked" "$rc" "1"
+contains "zero contexts names the missing context" "$out" "required context missing: gate"
+lacks "zero contexts is not a token failure" "$out" "required checks not green"
+lacks "zero contexts is not READY" "$out" "— READY"
+
+mut_missing=$(stage_mut "$ROOT/mut-missing")
+python3 - "$mut_missing" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = '_floor_parts+=("required context missing: $ctx")'
+if old not in s:
+    raise SystemExit("mutation anchor missing: required context missing")
+open(p, "w", encoding="utf-8").write(s.replace(old, ":", 1))
+PY
+out=$(run_req_mut "$mut_missing" "$f_zero" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-zero/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-zero/rules.json"); rc=$?
+if echo "$out" | grep -F "required context missing:" >/dev/null; then
+  bad "mutation zero-contexts: missing clause still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation zero-contexts: dropping the missing-context clause lets an empty snapshot READY"
+else
+  bad "mutation zero-contexts unexpected (rc=$rc): $out"
+fi
+
+out=$(run_req "$f_tierc_green" "$ROOT/ev-e3" GH_REQUIRED_MODE=empty); rc=$?
+check "required list empty is blocked" "$rc" "1"
+contains "empty list names itself" "$out" "required check list empty"
+lacks "empty list is not a missing context" "$out" "required context missing:"
+lacks "empty list is not READY" "$out" "— READY"
+
+mut_empty=$(stage_mut "$ROOT/mut-empty")
+python3 - "$mut_empty" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = '_floor_parts+=("required check list empty")'
+if old not in s:
+    raise SystemExit("mutation anchor missing: required list empty")
+open(p, "w", encoding="utf-8").write(s.replace(old, ":", 1))
+PY
+out=$(run_req_mut "$mut_empty" "$f_tierc_green" "$ROOT/ev-e3" GH_REQUIRED_MODE=empty); rc=$?
+if echo "$out" | grep -F "required check list empty" >/dev/null; then
+  bad "mutation empty-list: clause still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation empty-list: treating an empty required list as met lets it READY"
+else
+  bad "mutation empty-list unexpected (rc=$rc): $out"
+fi
+
+out=$(run_req "$f_tierc_green" "$ROOT/ev-e3" GH_REQUIRED_MODE=unreadable); rc=$?
+check "required list unreadable is blocked" "$rc" "1"
+contains "unreadable list names itself" "$out" "required check list unreadable"
+lacks "unreadable list is not READY" "$out" "— READY"
+
+out=$(run_req "$f_tierc_green" "$ROOT/ev-e3" GH_REQUIRED_MODE=rules-fail); rc=$?
+check "ruleset read failure is blocked even when protection is readable" "$rc" "1"
+contains "one-sided failure names unreadable" "$out" "required check list unreadable"
+lacks "one-sided failure is not READY" "$out" "— READY"
+
+mut_unread_list=$(stage_mut "$ROOT/mut-unread-list")
+python3 - "$mut_unread_list" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = '_floor_parts+=("required check list unreadable")'
+n = s.count(old)
+if n != 2:
+    raise SystemExit("mutation anchor missing: unreadable list (%s)" % n)
+open(p, "w", encoding="utf-8").write(s.replace(old, ":"))
+PY
+out=$(run_req_mut "$mut_unread_list" "$f_tierc_green" "$ROOT/ev-e3" GH_REQUIRED_MODE=rules-fail); rc=$?
+if echo "$out" | grep -F "required check list unreadable" >/dev/null; then
+  bad "mutation unreadable-list: clause still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation unreadable-list: ignoring an unreadable ruleset lets protection-only green READY"
+else
+  bad "mutation unreadable-list unexpected (rc=$rc): $out"
+fi
+
+f_unrelated=$(fixture tierc_unrelated '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [{"__typename": "CheckRun", "name": "lint", "conclusion": "SUCCESS", "steps": [{"name": "s"}]}]')
+write_required_files "$ROOT/req-unrelated" \
+  '{"strict":true,"contexts":[],"checks":[{"context":"security","app_id":null}]}' \
+  '[]'
+out=$(run_req "$f_unrelated" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-unrelated/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-unrelated/rules.json"); rc=$?
+check "missing required context is blocked beside an unrelated success" "$rc" "1"
+contains "unrelated success names the missing context" "$out" "required context missing: security"
+lacks "unrelated success is not a token failure" "$out" "required checks not green"
+lacks "unrelated success is not READY" "$out" "— READY"
+
+out=$(run_req_mut "$mut_missing" "$f_unrelated" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-unrelated/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-unrelated/rules.json"); rc=$?
+if echo "$out" | grep -F "required context missing:" >/dev/null; then
+  bad "mutation unrelated: missing clause still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation unrelated: dropping the missing-context clause lets an unrelated success READY"
+else
+  bad "mutation unrelated unexpected (rc=$rc): $out"
+fi
+
+write_required_files "$ROOT/req-rules" \
+  '{"strict":true,"contexts":[],"checks":[{"context":"gate","app_id":null}]}' \
+  '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"security","integration_id":null}]}}]'
+out=$(run_req "$f_tierc_green" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-rules/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-rules/rules.json"); rc=$?
+check "a ruleset-only required context is blocked when it did not run" "$rc" "1"
+contains "ruleset context is named" "$out" "required context missing: security"
+lacks "ruleset-only miss is not READY" "$out" "— READY"
+
+mut_norules=$(stage_mut "$ROOT/mut-norules")
+python3 - "$mut_norules" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = "(prot_list + rules_list)"
+new = "(prot_list + [])"
+if old not in s:
+    raise SystemExit("mutation anchor missing: ruleset union")
+open(p, "w", encoding="utf-8").write(s.replace(old, new, 1))
+PY
+out=$(run_req_mut "$mut_norules" "$f_tierc_green" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-rules/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-rules/rules.json"); rc=$?
+if echo "$out" | grep -F "required context missing:" >/dev/null; then
+  bad "mutation ruleset-union: rules still required: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation ruleset-union: ignoring rulesets lets a ruleset-only context go unmet and READY"
+else
+  bad "mutation ruleset-union unexpected (rc=$rc): $out"
+fi
+
+write_required_files "$ROOT/req-prot" \
+  '{"strict":true,"contexts":[],"checks":[{"context":"security","app_id":null}]}' \
+  '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"gate","integration_id":null}]}}]'
+out=$(run_req "$f_tierc_green" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-prot/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-prot/rules.json"); rc=$?
+check "a protection-only required context is blocked when it did not run" "$rc" "1"
+contains "protection context is named" "$out" "required context missing: security"
+
+mut_noprot=$(stage_mut "$ROOT/mut-noprot")
+python3 - "$mut_noprot" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = "(prot_list + rules_list)"
+new = "([] + rules_list)"
+if old not in s:
+    raise SystemExit("mutation anchor missing: protection union")
+open(p, "w", encoding="utf-8").write(s.replace(old, new, 1))
+PY
+out=$(run_req_mut "$mut_noprot" "$f_tierc_green" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-prot/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-prot/rules.json"); rc=$?
+if echo "$out" | grep -F "required context missing:" >/dev/null; then
+  bad "mutation protection-union: protection still required: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation protection-union: ignoring classic protection lets a protection-only context go unmet and READY"
+else
+  bad "mutation protection-union unexpected (rc=$rc): $out"
+fi
+
+f_app=$(fixture tierc_app '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [
+    {"__typename": "CheckRun", "name": "gate", "conclusion": "SUCCESS", "steps": [{"name": "s"}]},
+    {"__typename": "CheckRun", "name": "lint", "conclusion": "SUCCESS", "app_id": 9, "steps": [{"name": "s"}]}
+  ]')
+write_required_files "$ROOT/req-app" \
+  '{"strict":true,"contexts":[],"checks":[{"context":"gate","app_id":null}]}' \
+  '[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"lint","integration_id":5}]}}]'
+out=$(run_req "$f_app" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-app/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-app/rules.json"); rc=$?
+check "wrong app_id does not satisfy the required context" "$rc" "1"
+contains "wrong app names the context and app" "$out" "required context missing: lint (app_id 5)"
+lacks "wrong app is not READY" "$out" "— READY"
+
+mut_app=$(stage_mut "$ROOT/mut-app")
+python3 - "$mut_app" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = "and ($req.app_id == null or ((.app.id // .app_id) == $req.app_id))"
+new = "and ($req.app_id == null or true)"
+if old not in s:
+    raise SystemExit("mutation anchor missing: app_id match")
+open(p, "w", encoding="utf-8").write(s.replace(old, new, 1))
+PY
+out=$(run_req_mut "$mut_app" "$f_app" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-app/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-app/rules.json"); rc=$?
+if echo "$out" | grep -F "required context missing:" >/dev/null; then
+  bad "mutation app_id: wrong app still missed: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation app_id: ignoring app_id lets another app's success READY"
+else
+  bad "mutation app_id unexpected (rc=$rc): $out"
+fi
+
+f_dup=$(fixture tierc_dup '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [
+    {"__typename": "CheckRun", "name": "gate", "conclusion": "SUCCESS", "steps": [{"name": "s"}]},
+    {"__typename": "CheckRun", "name": "gate", "conclusion": "SUCCESS", "steps": [{"name": "s"}]}
+  ]')
+out=$(run_req "$f_dup" "$ROOT/ev-e3"); rc=$?
+check "two matches for one required context are blocked" "$rc" "1"
+contains "duplicate context names exactly one" "$out" "required context not exactly one: gate"
+lacks "duplicate context is not READY" "$out" "— READY"
+
+mut_exact=$(stage_mut "$ROOT/mut-exact")
+python3 - "$mut_exact" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = '_floor_parts+=("required context not exactly one: $ctx")'
+if old not in s:
+    raise SystemExit("mutation anchor missing: exactly one")
+open(p, "w", encoding="utf-8").write(s.replace(old, ":", 1))
+PY
+out=$(run_req_mut "$mut_exact" "$f_dup" "$ROOT/ev-e3"); rc=$?
+if echo "$out" | grep -F "required context not exactly one:" >/dev/null; then
+  bad "mutation exactly-one: clause still fired: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation exactly-one: accepting two successes for one context lets it READY"
+else
+  bad "mutation exactly-one unexpected (rc=$rc): $out"
+fi
+
+rm -f "$ROOT/head-moved"
+out=$(run_req "$f_tierc_green" "$ROOT/ev-e3" \
+  GH_HEAD_REREAD="$PREV_SHA" \
+  GH_HEAD_MOVED_FLAG="$ROOT/head-moved"); rc=$?
+check "head move after the evaluator is blocked" "$rc" "1"
+contains "head move names itself" "$out" "head moved during preflight"
+lacks "head move is not a floor failure" "$out" "Tier C floor (G12, D-015) not met"
+lacks "head move is not READY" "$out" "— READY"
+
+mut_moved=$(stage_mut "$ROOT/mut-moved")
+python3 - "$mut_moved" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+old = '''  if [[ "$_head_now" != "$_head_was" ]]; then
+    BLOCKERS+=("head moved during preflight")
+    VERDICT=BLOCKED
+    CODE=1
+  fi'''
+new = '''  if [[ "$_head_now" != "$_head_was" ]]; then
+    :
+  fi'''
+if old not in s:
+    raise SystemExit("mutation anchor missing: head re-read")
+open(p, "w", encoding="utf-8").write(s.replace(old, new, 1))
+PY
+rm -f "$ROOT/head-moved"
+out=$(run_req_mut "$mut_moved" "$f_tierc_green" "$ROOT/ev-e3" \
+  GH_HEAD_REREAD="$PREV_SHA" \
+  GH_HEAD_MOVED_FLAG="$ROOT/head-moved"); rc=$?
+if echo "$out" | grep -F "head moved during preflight" >/dev/null; then
+  bad "mutation head-move: re-read still blocked: $out"
+elif [[ "$rc" -eq 0 ]] && echo "$out" | grep -F "READY" >/dev/null; then
+  ok "mutation head-move: skipping the final head re-read lets a moved head READY"
+else
+  bad "mutation head-move unexpected (rc=$rc): $out"
+fi
+
+f_happy=$(fixture tierc_happy '.labels = [{"name": "tier-c"}] |
+  .statusCheckRollup = [
+    {"__typename": "CheckRun", "name": "gate", "conclusion": "SUCCESS", "app_id": 42, "steps": [{"name": "s"}]},
+    {"__typename": "CheckRun", "name": "lint", "conclusion": "SUCCESS", "steps": [{"name": "s"}]}
+  ]')
+write_required_files "$ROOT/req-happy" \
+  '{"strict":true,"contexts":[],"checks":[{"context":"gate","app_id":42}]}' \
+  '[{"type":"pull_request","parameters":{}},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"lint","integration_id":null}]}}]'
+: > "$ROOT/gh-api-happy.log"
+out=$(run_req "$f_happy" "$ROOT/ev-e3" \
+  GH_REQUIRED_MODE=files \
+  GH_REQUIRED_PROTECTION="$ROOT/req-happy/protection.json" \
+  GH_REQUIRED_RULES="$ROOT/req-happy/rules.json" \
+  GH_API_LOG="$ROOT/gh-api-happy.log"); rc=$?
+check "happy path with protection app_id and ruleset context is READY" "$rc" "0"
+contains "happy path verdict" "$out" "READY"
+lacks "happy path has no floor blocker" "$out" "Tier C floor (G12, D-015) not met"
+lacks "happy path head did not move" "$out" "head moved during preflight"
+if grep -F "branches/main/protection/required_status_checks" "$ROOT/gh-api-happy.log" >/dev/null \
+  && grep -F "rules/branches/main" "$ROOT/gh-api-happy.log" >/dev/null; then
+  ok "happy path read protection and rulesets for the base branch"
+else
+  bad "happy path did not read both required-list endpoints: $(cat "$ROOT/gh-api-happy.log")"
+fi
 
 echo "hygiene · drafts and conflicts block"
 f_draft=$(fixture draft '.isDraft = true | .mergeable = "CONFLICTING"')

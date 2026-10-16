@@ -72,21 +72,21 @@ check "no-args exits 2" "$rc" "2"
 echo
 echo "=== stable id + idempotent retry ==="
 L="$ROOT/l1.jsonl"
-id1=$(add_ok "$L" --repo acme/app --gate G12 --source-type pr --source-id 42 --source-sha "$SHA_A" 2>/dev/null)
-id2=$(add_ok "$L" --repo acme/app --gate G12 --source-type pr --source-id 42 --source-sha "$SHA_A" 2>/dev/null)
+id1=$(add_ok "$L" --repo acme/app --gate G6 --source-type pr --source-id 42 --source-sha "$SHA_A" 2>/dev/null)
+id2=$(add_ok "$L" --repo acme/app --gate G6 --source-type pr --source-id 42 --source-sha "$SHA_A" 2>/dev/null)
 check "stable id length 64" "${#id1}" "64"
 check "retry same id" "$id1" "$id2"
 lines=$(wc -l < "$L" | tr -d '[:space:]')
 check "one line after retry" "$lines" "1"
 # deterministic: recompute expected via second ledger
 L2="$ROOT/l1b.jsonl"
-id3=$(add_ok "$L2" --repo acme/app --gate G12 --source-type pr --source-id 42 --source-sha "$SHA_A" 2>/dev/null)
+id3=$(add_ok "$L2" --repo acme/app --gate G6 --source-type pr --source-id 42 --source-sha "$SHA_A" 2>/dev/null)
 check "id deterministic across ledgers" "$id1" "$id3"
 
 echo
 echo "=== conflicting duplicate refusal ==="
 rc=0
-ADD_NO_CARD=1 add_ok "$L" --repo acme/app --gate G12 --source-type pr --source-id 42 --source-sha "$SHA_A" \
+ADD_NO_CARD=1 add_ok "$L" --repo acme/app --gate G6 --source-type pr --source-id 42 --source-sha "$SHA_A" \
   --what "DIFFERENT decision text" \
   --why-you "Login and security changes always need the owner." \
   --risk-level medium --risk-consequence "A bug could lock people out" \
@@ -99,13 +99,21 @@ lines=$(wc -l < "$L" | tr -d '[:space:]')
 check "conflict leaves one line" "$lines" "1"
 
 echo
-echo "=== all gates G1-G16 accepted; G0/G17/case rejected ==="
+echo "=== all gates G1-G16 accepted except G12 create (D-015); G0/G17/case rejected ==="
 LG="$ROOT/gates.jsonl"
 for g in $(seq 1 16); do
   rc=0
-  add_ok "$LG" --repo acme/app --gate "G$g" --source-type manual --source-id "g$g" --source-sha "$SHA_A" \
-    >/dev/null 2>&1 || rc=$?
-  if [[ "$rc" -eq 0 ]]; then ok "G$g accepted"; else bad "G$g rejected (rc=$rc)"; fi
+  err=$(add_ok "$LG" --repo acme/app --gate "G$g" --source-type manual --source-id "g$g" --source-sha "$SHA_A" \
+    2>&1 >/dev/null) || rc=$?
+  if [[ "$g" -eq 12 ]]; then
+    if [[ "$rc" -eq 2 ]] && echo "$err" | grep -F "D-015" >/dev/null; then
+      ok "G12 create refused (D-015)"
+    else
+      bad "G12 create want rc=2 naming D-015 (rc=$rc err=$err)"
+    fi
+  else
+    if [[ "$rc" -eq 0 ]]; then ok "G$g accepted"; else bad "G$g rejected (rc=$rc)"; fi
+  fi
 done
 for badg in G0 G17 g12 G01 GX G; do
   rc=0
@@ -113,6 +121,108 @@ for badg in G0 G17 g12 G01 GX G; do
     >/dev/null 2>&1 || rc=$?
   if [[ "$rc" -eq 2 ]]; then ok "gate $badg rejected (2)"; else bad "gate $badg rc=$rc want 2"; fi
 done
+
+echo
+echo "=== historical G12 records still parse; mutation of the create-block ==="
+seed_historical_g12() {
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
+import hashlib, json, sys
+path, repo, sid, sha, what, created = sys.argv[1:7]
+gate, stype = "G12", "pr"
+canonical = (
+    "decision-ledger:v1\n"
+    f"repo={repo}\n"
+    f"gate={gate}\n"
+    f"source_type={stype}\n"
+    f"source_id={sid}\n"
+    f"source_sha={sha}\n"
+)
+eid = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+event = {
+    "card": {
+        "if_you_wait": "The change stays off the live site. Other work continues.",
+        "recommend": "Approve",
+        "recommend_rationale": "Tests and two reviewers signed off",
+        "risk_consequence": "A bug could lock people out",
+        "risk_level": "medium",
+        "risk_undo": "Roll back the deploy in about a minute",
+        "source_ref": "PR #42 at tip",
+        "what": what,
+        "why_you": "Login and security changes always need the owner.",
+    },
+    "created_at": created,
+    "gate": gate,
+    "id": eid,
+    "repo": repo,
+    "schema": "decision-ledger:v1",
+    "source_id": sid,
+    "source_sha": sha,
+    "source_type": stype,
+    "status": "PENDING",
+}
+line = json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+with open(path, "a", encoding="utf-8") as f:
+    f.write(line + "\n")
+sys.stdout.write(eid)
+PY
+}
+HG="$ROOT/hist-g12.jsonl"
+: > "$HG"
+hid=$(seed_historical_g12 "$HG" "acme/app" "42" "$SHA_A" "Ready to accept a change that touches sign-in." "$NOW")
+out=$("$TOOL" list --ledger "$HG" --format json 2>/dev/null) || true
+python3 - "$hid" "$out" <<'PY' && ok "historical G12 still lists" || bad "historical G12 list failed"
+import json, sys
+hid, raw = sys.argv[1], sys.argv[2]
+obj = json.loads(raw)
+events = obj if isinstance(obj, list) else obj.get("events") or obj.get("decisions") or []
+if not events and isinstance(obj, dict) and obj.get("id") == hid:
+    events = [obj]
+ids = [e.get("id") for e in events] if isinstance(events, list) else []
+assert hid in ids, (hid, raw[:400])
+assert any(e.get("gate") == "G12" for e in events), raw[:400]
+print("ok")
+PY
+show=$("$TOOL" show --id "$hid" --ledger "$HG" 2>/dev/null) || true
+echo "$show" | grep -F "G12" >/dev/null && ok "historical G12 show names G12" || bad "historical G12 show missed G12: $show"
+
+rc=0
+err=$(add_ok "$ROOT/g12-new.jsonl" --repo acme/app --gate G12 --source-type pr --source-id 99 --source-sha "$SHA_A" \
+  2>&1 >/dev/null) || rc=$?
+if [[ "$rc" -eq 2 ]] && echo "$err" | grep -F "D-015" >/dev/null && echo "$err" | grep -F "G12" >/dev/null; then
+  ok "add --gate G12 errors naming D-015"
+else
+  bad "add G12 want rc=2 D-015 (rc=$rc err=$err)"
+fi
+
+mut_dl="$ROOT/mut-decision-ledger.sh"
+cp "$TOOL" "$mut_dl"
+python3 - "$mut_dl" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+needle = '''  if [[ "$GATE" == "G12" ]]; then
+    die_valid "refusing to create a G12 decision card: D-015 retired G12 as an owner/human gate (Tier C floor is E3 at the exact head plus required checks). Existing G12 records still parse."
+  fi
+'''
+if needle not in s:
+    raise SystemExit("mutation anchor missing: G12 create refuse")
+open(p, "w", encoding="utf-8").write(s.replace(needle, "", 1))
+PY
+rc=0
+ADD_NO_CARD=1 "$mut_dl" add --ledger "$ROOT/mut-g12.jsonl" --created-at "$NOW" \
+  --repo acme/app --gate G12 --source-type pr --source-id 99 --source-sha "$SHA_A" \
+  --what "Ready to accept a change that touches sign-in." \
+  --why-you "Login and security changes always need the owner." \
+  --risk-level medium --risk-consequence "A bug could lock people out" \
+  --risk-undo "Roll back the deploy in about a minute" \
+  --recommend Approve --recommend-rationale "Tests and two reviewers signed off" \
+  --if-you-wait "The change stays off the live site. Other work continues." \
+  --source-ref "PR #99" >/dev/null 2>&1 || rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation: stripping D-015 G12 refuse lets add --gate G12 succeed"
+else
+  bad "mutation G12 create still refused (rc=$rc)"
+fi
 
 echo
 echo "=== repo / source / SHA / time validation ==="

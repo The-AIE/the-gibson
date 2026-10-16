@@ -455,7 +455,9 @@ with open(ledger_path, "r", encoding="utf-8") as f:
             continue
         events.append(e)
 # Gate is G1..G16 — sort numerically so G6 precedes G12 (string sort would not).
-# Sort for display only — never persisted.
+# G12 is a historical id (D-015): existing records still parse and render;
+# new G12 cards are refused by decision-ledger.sh. Sort for display only —
+# never persisted.
 events.sort(key=lambda e: (e["repo"], int(e["gate"][1:]), e["id"]))
 
 def load_optional_json(raw, label, status):

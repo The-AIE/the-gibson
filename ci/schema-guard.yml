@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:bf875a6a2901bbd781b9e861e54c60f113565392918fc5e20b2ae31671280e49
+# gibson-template-version: sha256:f865f6b38f982c6c1ce5060b6adbc4936099740502dfa700454e8fa80b965750
 # The Gibson — schema change without migration file fails (docs/12, L-002)
 # Install as .github/workflows/schema-guard.yml when the repo has Prisma (or
 # adapt paths for Drizzle/SQL migrations).
@@ -102,12 +102,12 @@ jobs:
           if [ "$schema_hit" -eq 1 ] && [ "$migration_hit" -eq 0 ]; then
             echo "::error::Schema changed without a migration file (L-002 / docs/12)."
             echo "Schema edits must ship with a replayable migration in the same PR."
-            echo "Additive-only; human gate on merge; one schema claimant fleet-wide."
+            echo "Additive-only; Tier C G12 review floor on merge (D-015); one schema claimant fleet-wide."
             exit 1
           fi
 
           if [ "$schema_hit" -eq 1 ]; then
-            echo "Schema + migration both present — OK (still subject to human merge gate)."
+            echo "Schema + migration both present — OK (still subject to the Tier C G12 review floor: E3 at exact head + required checks)."
           else
             echo "No schema model change detected in path filter hit — OK"
           fi

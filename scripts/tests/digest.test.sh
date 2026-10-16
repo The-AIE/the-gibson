@@ -44,6 +44,50 @@ PERIOD="2026-07-27T12:00:00Z"
 
 seed_decision() {
   local ledger="$1" repo="$2" gate="$3" sid="$4" sha="$5" what="$6"
+  if [[ "$gate" == "G12" ]]; then
+    # D-015: ledger add refuses new G12 cards. Historical rows are written
+    # as already-valid JSONL so digest can still parse them.
+    python3 - "$ledger" "$repo" "$sid" "$sha" "$what" <<'PY'
+import hashlib, json, sys
+path, repo, sid, sha, what = sys.argv[1:6]
+gate, stype, created = "G12", "pr", "2026-08-01T00:00:00Z"
+canonical = (
+    "decision-ledger:v1\n"
+    f"repo={repo}\n"
+    f"gate={gate}\n"
+    f"source_type={stype}\n"
+    f"source_id={sid}\n"
+    f"source_sha={sha}\n"
+)
+eid = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+event = {
+    "card": {
+        "if_you_wait": "Other work continues; nothing auto-approves",
+        "recommend": "Approve",
+        "recommend_rationale": "Fleet recommends this",
+        "risk_consequence": "Something could go wrong",
+        "risk_level": "medium",
+        "risk_undo": "Roll back",
+        "source_ref": f"PR #{sid}",
+        "what": what,
+        "why_you": "Owner decision required by doctrine",
+    },
+    "created_at": created,
+    "gate": gate,
+    "id": eid,
+    "repo": repo,
+    "schema": "decision-ledger:v1",
+    "source_id": sid,
+    "source_sha": sha,
+    "source_type": stype,
+    "status": "PENDING",
+}
+line = json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+with open(path, "a", encoding="utf-8") as f:
+    f.write(line + "\n")
+PY
+    return
+  fi
   "$LEDGER_TOOL" add --ledger "$ledger" --created-at "2026-08-01T00:00:00Z" \
     --repo "$repo" --gate "$gate" --source-type pr --source-id "$sid" --source-sha "$sha" \
     --what "$what" \
@@ -90,6 +134,15 @@ print("ok")
 PY
 contains "injected period start" "$out" "$PERIOD"
 contains "injected now" "$out" "$NOW"
+contains "historical G12 still renders" "$out" "G12 · zebra/app"
+rc=0
+"$LEDGER_TOOL" add --ledger "$ROOT/no-g12.jsonl" --created-at "2026-08-01T00:00:00Z" \
+  --repo acme/app --gate G12 --source-type pr --source-id 9 --source-sha "$SHA_A" \
+  --what "x" --why-you "y" --risk-level low --risk-consequence "c" --risk-undo "u" \
+  --recommend Wait --recommend-rationale "r" --if-you-wait "i" --source-ref "s" \
+  >/dev/null 2>"$ROOT/g12.err" || rc=$?
+check "ledger add G12 exits 2 (D-015)" "$rc" "2"
+contains "create error names D-015" "$(cat "$ROOT/g12.err")" "D-015"
 
 echo
 echo "=== quiet active week with zero ships ==="
