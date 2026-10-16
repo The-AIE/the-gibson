@@ -183,6 +183,46 @@ compare against a stale baseline.
   the `updated:` clock is no-progress — exit-code budgets alone cannot see it.
   Sensor: `scripts/silent-noop.sh` (`silent_noop_progressed`), wired into
   `scripts/loop.sh`.
+- **Session budget (issue #409 / L-003):** a loop that never fails still stops.
+  Defaults are **50 iterations**, **480 minutes** of wall clock, and **USD 20**
+  of measured ledger cost (`--max-iterations`, `--max-wall-min`,
+  `--max-cost-usd`, or `GIBSON_MAX_ITERATIONS` / `GIBSON_MAX_WALL_MIN` /
+  `GIBSON_MAX_COST_USD`). A flag wins over the env var. `0` on one dimension,
+  or `--unbounded` for all three, is an explicit opt-out and is journaled.
+  Invalid values use the same positive-safe-integer rule as `--stale-budget`
+  (no leading zeros, no fractions); `0` is the only extra accepted value.
+  Checks run only at iteration boundaries. The session budget never kills a
+  runner. Per-iteration kills stay with `--runner-timeout`. Wall time can
+  therefore overshoot the cap by the remainder of the last iteration.
+  When several caps are exhausted at the same boundary, the diagnosis is
+  `budget: iterations`, then `budget: wall`, then `budget: cost`. Halt,
+  state-corrupt, error-budget, and stale-budget still exit through their own
+  paths first.
+  Cost is an exact sum of JSON-string `cost_usd` values on `gibson.cost.v1`
+  ledger lines whose `session_id` is this allowance. Tokens, ACUs, and
+  `flat_rate` are never converted into dollars. No matching `cost_usd` means
+  the receipt says `cost: not measured` (not $0), and that session does not
+  stop on the cost cap. Iterations and wall clock still bound it. A measured
+  subset that does not cover every completed iteration, or any cost line with
+  no iteration id, stays `cost: partial <amount>`. One `cost_usd` line does
+  not establish complete session spend. A partial or complete sum that reaches
+  the cap does stop.
+  The allowance is `gibson/session-budget.json` (session id, lane, repo, start
+  time, limits, consumed starts, completed iterations). Ordinary relaunch
+  resumes it. Only `--reset-session-budget` creates a fresh one, and that is
+  journaled. An interrupted start stays consumed. A different lane id or repo
+  slug refuses the launch rather than charging this allowance to someone else.
+  A stop writes one `gibson.session-budget.v1` receipt to the journal
+  (iterations, wall time, cost, PRs merged, reason) and an atomic latch
+  (`gibson/session-budget-latch`) so a launchd KeepAlive relaunch does not
+  start another runner or append another receipt. The latch does not unload
+  the job. `loop-fleet.sh --status` prints one rollup line per lane.
+  PRs merged are counted only when a ledger line for this session carries
+  boolean `merged` and an integer `pr`. The #74 append path does not write
+  those fields, so a normal receipt says `prs_merged: not measured`.
+  `--dry-run` and `--print-prompt` do not create or reset an allowance.
+  The allowance file is writable by the same user and by the runner. It is
+  not a security boundary. The smallest wall cap is one minute.
 - **Kill switch:** checked at the top of every iteration (and before any
   supervisor handoff). Three layers, all read-only:
   1. **Local (always):** the `gibson/HALT` file, or `GIBSON_HALT=1` in the

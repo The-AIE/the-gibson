@@ -21,6 +21,7 @@ copy_fleet_tree() {
   mkdir -p "$dest/lib"
   cp "$FLEET" "$dest/loop-fleet.sh"
   cp "$WALL_TIMEOUT_LIB" "$dest/lib/wall-timeout.sh"
+  cp "$REPO_ROOT/scripts/lib/session-budget.sh" "$dest/lib/session-budget.sh"
   chmod +x "$dest/loop-fleet.sh"
   printf '%s\n' "$dest/loop-fleet.sh"
 }
