@@ -57,6 +57,11 @@
     "defaultBranch": { "$ref": "#/$defs/refOrNull" },
     "paginationExhausted": { "type": "boolean" },
     "commentEditors": { "$ref": "#/$defs/commentEditors" },
+    "postMerge": {
+      "type": "array",
+      "description": "Rows whose timestamp is after merged_at. They stay visible and do not decide disposition. Omitted on receipts projected before this note existed.",
+      "items": { "$ref": "#/$defs/postMergeNote" }
+    },
     "disposition": {
       "type": "string",
       "enum": ["delivered", "parked", "blocked", "failed", "rolled_back", "incomplete"]
@@ -145,7 +150,29 @@
             { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
             { "type": "null" }
           ]
+        },
+        "kind": { "type": "string", "enum": ["check", "status"] },
+        "creatorLogin": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.\\[\\]-]*$" },
+            { "type": "null" }
+          ]
         }
+      }
+    },
+    "postMergeNote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "conclusion", "at", "appId"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": { "type": "string", "enum": ["check", "status"] },
+        "conclusion": {
+          "type": "string",
+          "enum": ["success", "failure", "neutral", "cancelled", "timed_out", "action_required", "skipped", "stale", "startup_failure", "unknown"]
+        },
+        "at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
+        "appId": { "type": ["integer", "null"], "minimum": 0 }
       }
     },
     "requiredEntry": {
