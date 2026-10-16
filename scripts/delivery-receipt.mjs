@@ -3,22 +3,23 @@
  * delivery-receipt.mjs — report-only delivery receipt for one pull request (#160).
  *
  * WHAT IT DOES
- *   `project` turns a frozen evidence bundle into a byte-stable
+ *   `collect` is the only networked step: it shells `gh api` (or an injected
+ *   runner), allowlists fields, re-serializes markers, and writes a frozen
+ *   evidence bundle. `project` turns that bundle into a byte-stable
  *   `gibson.delivery.v1` receipt. `verify` fails closed when the receipt
  *   disagrees with its digest, its bundle, or the rules below.
- *   `collect` is not in this build: it prints a fixed line and exits 2.
  *   Nothing here merges, deploys, or authorizes.
  *
  * WHY
  *   #160 asked for one read model over the facts that already decide a change.
  *   D-014 / D-015 removed owner attestation. G12 for Tier C is E3 at the exact
  *   head plus required checks (memory/DECISIONS.md). Anything this slice cannot
- *   source is `unknown`. The networked collector is a #160 follow-up.
+ *   source is `unknown`.
  *
  * RISKS
  *   A receipt proves it is consistent with the bundle it names. It does not
- *   prove the bundle still matches GitHub. `evaluate()` in
- *   pr-review-evidence.mjs is an open-PR predicate: a merged PR is not open,
+ *   prove the bundle still matches GitHub. Re-collect to re-check. `evaluate()`
+ *   in pr-review-evidence.mjs is an open-PR predicate: a merged PR is not open,
  *   so a second call is made only when the bundle shows no other open PR on
  *   that head and the pulls-for-head source is present and exhausted. A
  *   marker keeps only the fields pr-review-evidence reads. Cost, deploy,
@@ -26,14 +27,16 @@
  *   `rolled_back` is reserved and never emitted.
  *
  * USAGE
+ *   node scripts/delivery-receipt.mjs collect --repo OWNER/REPO --pr N --out FILE [--ledger PATH] [--config PATH]
  *   node scripts/delivery-receipt.mjs project --bundle FILE
  *   node scripts/delivery-receipt.mjs verify --receipt FILE [--bundle FILE]
- *   Exit 0 pass, 1 verify/project fail, 2 usage or I/O. `collect` exits 2.
+ *   Exit 0 pass, 1 verify/project fail, 2 usage or I/O.
  */
 
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { appendFileSync, existsSync, lstatSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { evaluate, MARKER_FIELDS, parseBlock, resolveAuthors, trailerVendors, validateConfig } from "./pr-review-evidence.mjs";
 
@@ -50,6 +53,17 @@ const DISPOSITIONS = new Set(["delivered", "parked", "blocked", "failed", "rolle
 const TIERS = new Set(["A", "B", "C", "unknown"]);
 const SAFE_REASON = /^[a-z0-9][a-z0-9_.:/@+-]{0,119}$/;
 const MARKER_RE = /<!--\s*(review-evidence:v1|owner-review-attestation:v1|owner-attested-review:v1)\b[\s\S]*?-->/g;
+const TRAILER_LINE = /^Agent-Vendor:[ \t]*[A-Za-z0-9_-]+[ \t]*$/i;
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_CONFIG = join(SCRIPT_DIR, "..", "config", "review-evidence.v1.json");
+const HOST_PATH_RE = /\/Users\/|\/home\/|\/private\/var\/|[A-Za-z]:\\/;
+
+/** Injected gh runner for tests. Production uses spawnSync("gh") unless GIBSON_DELIVERY_GH_FIXTURE is set. */
+let injectedGhRunner = null;
+
+export function setGhRunner(fn) {
+  injectedGhRunner = typeof fn === "function" ? fn : null;
+}
 
 function usage(msg) {
   process.stderr.write(`delivery-receipt.mjs: ${msg}\nusage: node scripts/delivery-receipt.mjs <collect|project|verify> [flags]\n`);
@@ -60,20 +74,21 @@ function help() {
   process.stdout.write(`delivery-receipt.mjs — report-only gibson.delivery.v1 receipt (#160)
 
 WHAT IT DOES
+  collect  shells gh api once per source, allowlists fields, writes a bundle
   project  pure: bundle file → canonical receipt on stdout
   verify   fails closed; one reason line per incomplete or contradictory field
-  collect  not available in this build; see #160 follow-up
 
 WHY
-  One deterministic read model over a frozen bundle for a single pull request.
+  One deterministic read model over GitHub facts for a single pull request.
   Unknown stays unknown. The receipt grants no merge or deploy authority.
 
 RISKS
   Consistency with the bundle is not proof the bundle still matches GitHub.
-  Cost, deployment, cleanup, and lessons are unknown placeholders in this slice
-  and do not block delivered. rolled_back is reserved.
+  Re-collect to re-check. Cost, deployment, cleanup, and lessons are unknown
+  placeholders in this slice and do not block delivered. rolled_back is reserved.
 
 USAGE
+  node scripts/delivery-receipt.mjs collect --repo OWNER/REPO --pr N --out FILE [--ledger PATH] [--config PATH]
   node scripts/delivery-receipt.mjs project --bundle FILE
   node scripts/delivery-receipt.mjs verify --receipt FILE [--bundle FILE]
 EXIT
@@ -207,6 +222,119 @@ function unsafePath(p) {
   return false;
 }
 
+function assertNoHostLeak(text) {
+  if (HOST_PATH_RE.test(text)) {
+    throw new Error("redaction:absolute-path");
+  }
+}
+
+const STAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+/** UTC stamp with no fractional seconds. Null when the value is not that shape. */
+function stamp(value) {
+  if (typeof value !== "string") return null;
+  const s = value.replace(/\.\d+Z$/, "Z");
+  return STAMP_RE.test(s) ? s : null;
+}
+
+export function allowlistPull(p) {
+  const labels = [];
+  if (Array.isArray(p?.labels)) {
+    for (const l of p.labels) {
+      const name = typeof l === "string" ? l : l?.name;
+      if (typeof name === "string" && /^tier-[abc]$/.test(name)) labels.push({ name });
+    }
+  }
+  return {
+    number: Number.isInteger(p?.number) ? p.number : null,
+    state: typeof p?.state === "string" ? p.state : null,
+    merged: p?.merged === true,
+    merged_at: stamp(p?.merged_at),
+    merge_commit_sha: typeof p?.merge_commit_sha === "string" ? p.merge_commit_sha : null,
+    commits: Number.isInteger(p?.commits) ? p.commits : null,
+    head: { sha: typeof p?.head?.sha === "string" ? p.head.sha : null },
+    base: {
+      sha: typeof p?.base?.sha === "string" ? p.base.sha : null,
+      ref: typeof p?.base?.ref === "string" ? p.base.ref : null,
+    },
+    labels,
+  };
+}
+
+export function allowlistCommit(c) {
+  const raw = typeof c?.commit?.message === "string" ? c.commit.message : "";
+  assertNoHostLeak(raw);
+  const message = raw.split(/\r?\n/).filter((line) => TRAILER_LINE.test(line)).join("\n");
+  const login = (side) => (typeof c?.[side]?.login === "string" ? c[side].login : null);
+  return {
+    sha: typeof c?.sha === "string" ? c.sha : null,
+    author: { login: login("author") },
+    committer: { login: login("committer") },
+    commit: {
+      message,
+      verification: { verified: c?.commit?.verification?.verified === true },
+    },
+  };
+}
+
+export function allowlistReview(r) {
+  return {
+    id: typeof r?.id === "number" ? r.id : null,
+    user: {
+      login: typeof r?.user?.login === "string" ? r.user.login : null,
+      type: typeof r?.user?.type === "string" ? r.user.type : null,
+    },
+    state: typeof r?.state === "string" ? r.state : null,
+    commit_id: typeof r?.commit_id === "string" ? r.commit_id : null,
+    submitted_at: typeof r?.submitted_at === "string" ? r.submitted_at : null,
+  };
+}
+
+export function allowlistComment(c) {
+  const app = c?.performed_via_github_app;
+  const editorLogin = c?.editor?.login ?? (typeof c?.editor === "string" ? c.editor : null);
+  const out = {
+    id: typeof c?.id === "number" ? c.id : null,
+    user: {
+      login: typeof c?.user?.login === "string" ? c.user.login : null,
+      type: typeof c?.user?.type === "string" ? c.user.type : null,
+    },
+    author_association: typeof c?.author_association === "string" ? c.author_association : null,
+    performed_via_github_app: app && typeof app === "object"
+      ? { slug: typeof app.slug === "string" ? app.slug : null, id: typeof app.id === "number" ? app.id : null }
+      : null,
+    created_at: typeof c?.created_at === "string" ? c.created_at : null,
+    body: markerOnly(c?.body),
+  };
+  if (c?.edited === true) out.edited = true;
+  if (typeof editorLogin === "string" && editorLogin) out.editor = { login: editorLogin };
+  return out;
+}
+
+export function allowlistFile(f) {
+  const filename = typeof f?.filename === "string" ? f.filename : null;
+  const previous = typeof f?.previous_filename === "string" ? f.previous_filename : null;
+  if (unsafePath(filename) || unsafePath(previous)) return null;
+  const out = { filename };
+  if (previous) out.previous_filename = previous;
+  return out;
+}
+
+export function allowlistTimeline(ev) {
+  return {
+    event: typeof ev?.event === "string" ? ev.event : null,
+    created_at: typeof ev?.created_at === "string" ? ev.created_at : null,
+  };
+}
+
+export function allowlistPullRef(p) {
+  return {
+    number: Number.isInteger(p?.number) ? p.number : null,
+    state: typeof p?.state === "string" ? p.state : null,
+    head: { sha: typeof p?.head?.sha === "string" ? p.head.sha : null },
+  };
+}
+
 function mapConclusion(raw) {
   if (raw === "error") return "failure";
   if (raw === "pending" || raw === null || raw === undefined || raw === "") return "unknown";
@@ -227,6 +355,17 @@ function tierOf(labels) {
 }
 
 function appMatches(req, run) {
+  // A commit status matches on context. When the requirement names an app id,
+  // an app id GitHub supplied on the status has to be that app. A creator with
+  // no app id does not prove the app, so it does not match. A status that
+  // supplies neither still matches on context: the combined-status payload
+  // often has no creator field.
+  if (run?.kind === "status") {
+    if (req.appId == null) return true;
+    if (run.appId != null && run.appId !== req.appId) return false; // MUTATION_ANCHOR_STATUS_APP
+    if (run.appId == null && run.creatorLogin) return false;
+    return true;
+  }
   if (req.appId != null && run.appId !== req.appId) return false; // MUTATION_ANCHOR_APP_ID
   return true;
 }
@@ -247,7 +386,7 @@ export function matchChecks(required, gates, headSha) {
       continue;
     }
     const hit = hits[0];
-    if (typeof hit.appSlug !== "string" || hit.appSlug.length === 0) {
+    if (hit.kind !== "status" && (typeof hit.appSlug !== "string" || hit.appSlug.length === 0)) {
       reasons.push("required-check-no-app-slug");
       continue;
     }
@@ -441,6 +580,14 @@ function vendorOfLogin(config, login) {
   return asVendor(id?.vendor);
 }
 
+/** Vendor evaluate() stored on one evidence identity. Not a login-table lookup. */
+function attestedVendor(result, login) {
+  const rows = Array.isArray(result?.evidenceRows) ? result.evidenceRows : [];
+  const hits = rows.filter((r) => r && r.login === login && r.result === "pass");
+  if (hits.length !== 1) return "unknown";
+  return asVendor(hits[0].vendor);
+}
+
 function paginationOk(sources) {
   if (!Array.isArray(sources) || sources.length === 0) return false;
   for (const s of sources) {
@@ -461,6 +608,7 @@ export const REQUIRED_SOURCE_TEMPLATES = [
   "repos/{repository}/pulls/{pr}/files",
   "repos/{repository}/commits/{head}/check-runs",
   "repos/{repository}/commits/{head}/statuses",
+  "repos/{repository}/commits/{head}/status",
   "repos/{repository}/branches/{branch}/protection/required_status_checks",
   "repos/{repository}/rules/branches/{branch}",
   "graphql:closing-issues",
@@ -468,6 +616,7 @@ export const REQUIRED_SOURCE_TEMPLATES = [
 ];
 
 const PULLS_FOR_HEAD_TEMPLATE = "repos/{repository}/commits/{head}/pulls";
+const COMBINED_STATUS_TEMPLATE = "repos/{repository}/commits/{head}/status";
 
 function sourceRecordOk(s) {
   if (!s || typeof s.endpoint !== "string") return false;
@@ -635,8 +784,14 @@ export function projectBundle(bundle) {
   const ev = evaluateBundle({ ...inputs, config, pullsForHeadStatus: sourceGate.pullsForHeadStatus }, pr);
   const shaped = reviewFromEvaluation(ev, inputs.reviews);
   if (shaped.passLogins.length === 1) {
-    shaped.reviewerLogin = shaped.passLogins[0];
-    shaped.review.reviewerVendor = vendorOfLogin(config, shaped.passLogins[0]);
+    const login = shaped.passLogins[0];
+    shaped.reviewerLogin = login;
+    const listed = vendorOfLogin(config, login);
+    // A listed login keeps the identity-table vendor. owner-attested-review is
+    // not a row: its vendor is the one evaluate() already accepted on that
+    // evidence identity. Unknown stays unknown. The login is not a vendor.
+    if (listed !== "unknown") shaped.review.reviewerVendor = listed;
+    else shaped.review.reviewerVendor = attestedVendor(ev.result, login); // MUTATION_ANCHOR_ATTESTED_VENDOR
   } else {
     shaped.reviewerLogin = "unknown";
     shaped.review.reviewerVendor = "unknown";
@@ -659,16 +814,31 @@ export function projectBundle(bundle) {
     if (typeof c?.author?.login === "string") builderLogins.add(c.author.login);
   }
   const builderLogin = builderLogins.size === 1 ? [...builderLogins][0] : "unknown";
-  const requiredChecks = normalizeRequired(inputs.requiredChecks);
-  const gates = normalizeGates(inputs.checkRuns, head);
+  const state = typeof pull?.state === "string" ? pull.state : "";
+  const mergedAt = stamp(pull?.merged_at);
+  const merged = state === "closed" && pull?.merged === true && mergeSha != null;
+  let requiredChecks = normalizeRequired(inputs.requiredChecks);
+  // An unreadable combined-status source is unknown. Check runs must not
+  // satisfy the required set while that source is missing. Old bundles that
+  // never recorded the field fail closed the same way.
+  if (inputs.combinedStatus !== "known") requiredChecks = { status: "unknown", entries: [] }; // MUTATION_ANCHOR_STATUS_UNKNOWN
+  // Open PRs keep the combined status. A merged PR is judged at merged_at.
+  // No merged_at means the pre-merge row cannot be picked, so the set is unknown.
+  let gates = normalizeGates(inputs.checkRuns, head);
+  let postMerge = [];
+  const mode = gateMode(merged);
+  if (mode === "as-of" && mergedAt) {
+    const picked = asOfGates(inputs.checkRuns, inputs.statusHistory, head, mergedAt);
+    gates = picked.gates;
+    postMerge = picked.postMerge;
+  }
+  if (mode === "as-of" && mergedAt == null) requiredChecks = { status: "unknown", entries: [] }; // MUTATION_ANCHOR_MERGED_AT
   const cost = joinCost(inputs.costEvents, pr);
   const baseRef = safeRef(pull?.base?.ref);
   const defaultBranch = safeRef(inputs.repository?.defaultBranch);
   const paginationExhausted = sourceGate.paginationExhausted;
   const commentEditors = inputs.commentEditors?.status === "known" ? { status: "known" } : { status: "unknown" };
   const contradictory = pull?.merged === true && pull?.state === "open";
-  const state = typeof pull?.state === "string" ? pull.state : "";
-  const merged = state === "closed" && pull?.merged === true && mergeSha != null;
   const closedUnmerged = state === "closed" && !merged;
   const open = state === "open";
   const parts = {
@@ -724,6 +894,7 @@ export function projectBundle(bundle) {
     defaultBranch,
     paginationExhausted,
     commentEditors,
+    postMerge,
     disposition: decision.disposition,
     reasons,
     bundleDigest: digestHex(bundle, false),
@@ -766,6 +937,12 @@ function normalizeGates(runs, head) {
     const appId = r?.appId == null ? null : normalizeAppId(r.appId);
     const appSlug = typeof r?.appSlug === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(r.appSlug) ? r.appSlug : null;
     const completedAt = typeof r?.completedAt === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(r.completedAt) ? r.completedAt : null;
+    const kind = r?.kind === "status" ? "status" : "check";
+    let creatorLogin = null;
+    if (r?.creatorLogin != null) {
+      if (typeof r.creatorLogin !== "string" || safeLogin(r.creatorLogin) !== r.creatorLogin) continue;
+      creatorLogin = r.creatorLogin;
+    }
     gates.push({
       name,
       conclusion: mapConclusion(r?.conclusion),
@@ -773,10 +950,126 @@ function normalizeGates(runs, head) {
       appId,
       headSha: sha,
       completedAt,
+      kind,
+      creatorLogin,
     });
   }
   gates.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : (a.appId ?? -1) - (b.appId ?? -1)));
   return gates;
+}
+
+/** Open PRs use the latest combined status. Merged PRs are judged at merged_at. */
+function gateMode(merged) {
+  if (!merged) return "latest"; // MUTATION_ANCHOR_OPEN_LATEST
+  return "as-of";
+}
+
+function timeOf(row) {
+  if (!row) return null;
+  if (row.kind === "status") return stamp(row.createdAt);
+  return stamp(row.completedAt);
+}
+
+function splitAtMerge(rows, mergedAt) {
+  const before = [];
+  const after = [];
+  for (const row of rows) {
+    const at = timeOf(row);
+    if (at == null) continue;
+    if (at > mergedAt) { after.push(row); continue; } // MUTATION_ANCHOR_AS_OF_MERGE
+    before.push(row);
+  }
+  return { before, after };
+}
+
+/** Every row that shares the newest stamp. A tie is not one row. */
+function selectLatest(rows) {
+  const byName = new Map();
+  for (const row of rows) {
+    const list = byName.get(row.name) ?? [];
+    list.push(row);
+    byName.set(row.name, list);
+  }
+  const selected = [];
+  for (const list of byName.values()) {
+    let max = "";
+    for (const row of list) {
+      const at = timeOf(row);
+      if (at > max) max = at;
+    }
+    for (const row of list) if (timeOf(row) === max) selected.push(row);
+  }
+  return selected;
+}
+
+function normalizeHistory(rows, head) {
+  if (!Array.isArray(rows)) return [];
+  const out = [];
+  for (const r of rows) {
+    const name = typeof r?.name === "string" ? r.name : (typeof r?.context === "string" ? r.context : "");
+    if (!name || name.length > 200 || unsafePath(name)) continue;
+    const sha = typeof r?.headSha === "string" ? r.headSha.toLowerCase() : "";
+    if (sha !== head) continue;
+    const appId = r?.appId == null ? null : normalizeAppId(r.appId);
+    let creatorLogin = null;
+    if (r?.creatorLogin != null) {
+      if (typeof r.creatorLogin !== "string" || safeLogin(r.creatorLogin) !== r.creatorLogin) continue;
+      creatorLogin = r.creatorLogin;
+    }
+    out.push({
+      name,
+      conclusion: mapConclusion(r?.conclusion ?? r?.state),
+      appSlug: null,
+      appId,
+      headSha: sha,
+      createdAt: stamp(r?.createdAt),
+      kind: "status",
+      creatorLogin,
+    });
+  }
+  return out;
+}
+
+function asGate(row) {
+  const completedAt = row.kind === "status" ? (row.createdAt ?? null) : (row.completedAt ?? null);
+  return {
+    name: row.name,
+    conclusion: row.conclusion,
+    appSlug: row.appSlug ?? null,
+    appId: row.appId ?? null,
+    headSha: row.headSha,
+    completedAt,
+    kind: row.kind === "status" ? "status" : "check",
+    creatorLogin: row.creatorLogin ?? null,
+  };
+}
+
+function toNote(row) {
+  const at = row.kind === "status" ? row.createdAt : row.completedAt;
+  if (typeof at !== "string") return null;
+  return {
+    name: row.name,
+    kind: row.kind === "status" ? "status" : "check",
+    conclusion: row.conclusion,
+    at,
+    appId: row.appId ?? null,
+  };
+}
+
+/**
+ * Check runs by completed_at, statuses by created_at. The combined status is
+ * not a merged-PR source. Rows after merged_at are a note, not a verdict.
+ */
+function asOfGates(checkRuns, statusHistory, head, mergedAt) {
+  const checks = normalizeGates(checkRuns, head).filter((g) => g.kind !== "status");
+  const statuses = normalizeHistory(statusHistory, head);
+  const checkSplit = splitAtMerge(checks, mergedAt);
+  const statusSplit = splitAtMerge(statuses, mergedAt);
+  const gates = [...selectLatest(checkSplit.before), ...selectLatest(statusSplit.before)].map(asGate);
+  gates.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : (a.appId ?? -1) - (b.appId ?? -1)));
+  const postMerge = [...checkSplit.after, ...statusSplit.after].map(toNote).filter(Boolean);
+  postMerge.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : (a.appId ?? -1) - (b.appId ?? -1)));
+  return { gates, postMerge };
 }
 
 function factsFromReceipt(receipt) {
@@ -906,8 +1199,11 @@ function assertReceiptShape(r) {
   if (!r || typeof r !== "object" || Array.isArray(r)) fail("not-an-object");
   const keys = new Set(Object.keys(r));
   const need = ["schema", "schemaVersion", "authority", "subject", "actors", "review", "gates", "requiredChecks", "tier", "g12", "policyManifestDigest", "cost", "deployment", "cleanup", "lessons", "baseRef", "defaultBranch", "paginationExhausted", "commentEditors", "disposition", "reasons", "bundleDigest", "digest"];
+  // postMerge is optional so a receipt projected before the note still verifies.
+  // A new projection always sets it.
+  const optional = ["postMerge"];
   for (const k of need) if (!keys.has(k)) fail(`missing:${k}`);
-  for (const k of keys) if (!need.includes(k)) fail(`unknown-key:${k}`);
+  for (const k of keys) if (!need.includes(k) && !optional.includes(k)) fail(`unknown-key:${k}`);
   if (r.schema !== SCHEMA) fail("schema");
   if (r.schemaVersion !== "1.0.0") fail("schemaVersion");
   if (r.authority !== "report-only") fail("authority");
@@ -929,6 +1225,7 @@ function assertReceiptShape(r) {
   assertCost(r.cost);
   for (const k of ["deployment", "cleanup", "lessons"]) assertUnknownStatus(r[k], k);
   assertCommentEditors(r.commentEditors);
+  if (keys.has("postMerge")) assertPostMerge(r.postMerge);
   if (!Array.isArray(r.reasons)) fail("reasons");
   for (const reason of r.reasons) if (!reasonCode(reason)) fail("reasons");
 }
@@ -984,13 +1281,33 @@ function assertGate(g) {
   const need = ["name", "conclusion", "appSlug", "appId", "headSha", "completedAt"];
   const keys = Object.keys(g);
   for (const k of need) if (!keys.includes(k)) fail(`missing:${k}`);
-  for (const k of keys) if (!need.includes(k)) fail(`unknown-key:${k}`);
+  for (const k of keys) if (!need.includes(k) && k !== "kind" && k !== "creatorLogin") fail(`unknown-key:${k}`);
   if (typeof g.name !== "string" || g.name.length < 1 || g.name.length > 200 || unsafePath(g.name)) fail("name");
   if (!CONCLUSIONS.has(g.conclusion)) fail("conclusion");
   if (!(g.appSlug === null || (typeof g.appSlug === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(g.appSlug)))) fail("appSlug");
   if (!(g.appId === null || (Number.isInteger(g.appId) && g.appId >= 0))) fail("appId");
   if (!isSha(g.headSha)) fail("headSha");
   if (!(g.completedAt === null || (typeof g.completedAt === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(g.completedAt)))) fail("completedAt");
+  // kind and creatorLogin are optional so a receipt written before commit
+  // statuses were a match source still verifies. A new projection always sets both.
+  if ("kind" in g && g.kind !== "check" && g.kind !== "status") fail("kind");
+  if ("creatorLogin" in g && !(g.creatorLogin === null || (typeof g.creatorLogin === "string" && safeLogin(g.creatorLogin) === g.creatorLogin))) fail("creatorLogin");
+}
+
+function assertPostMerge(notes) {
+  const fail = (d) => { throw new Error(`postMerge:${d}`); };
+  if (!Array.isArray(notes)) fail("type");
+  for (const n of notes) {
+    if (!n || typeof n !== "object" || Array.isArray(n)) fail("note");
+    const nk = Object.keys(n);
+    for (const k of ["name", "kind", "conclusion", "at", "appId"]) if (!nk.includes(k)) fail(`missing:${k}`);
+    for (const k of nk) if (!["name", "kind", "conclusion", "at", "appId"].includes(k)) fail(`unknown-key:${k}`);
+    if (typeof n.name !== "string" || n.name.length < 1 || n.name.length > 200 || unsafePath(n.name)) fail("name");
+    if (n.kind !== "check" && n.kind !== "status") fail("kind");
+    if (!CONCLUSIONS.has(n.conclusion)) fail("conclusion");
+    if (stamp(n.at) !== n.at) fail("at");
+    if (!(n.appId === null || (Number.isInteger(n.appId) && n.appId >= 0))) fail("appId");
+  }
 }
 
 function assertRequired(req) {
@@ -1108,12 +1425,6 @@ function parseArgs(argv) {
   return args;
 }
 
-function assertNoHostLeak(text) {
-  if (/\/Users\/|\/home\/|\/private\/var\/|[A-Za-z]:\\/.test(text)) {
-    throw new Error("redaction:absolute-path");
-  }
-}
-
 function assertMarkersRedacted(body) {
   if (typeof body !== "string" || !body.includes("<!--")) return;
   MARKER_RE.lastIndex = 0;
@@ -1133,9 +1444,508 @@ function assertBundleRedacted(bundle) {
   }
 }
 
-function collect() {
-  process.stderr.write("not available in this build; see #160 follow-up\n");
-  process.exit(2);
+function ghEnv() {
+  // gh colorizes JSON when FORCE_COLOR is set, even with stdout redirected.
+  // Colored bytes are not evidence. Drop the force flags for this child only.
+  const env = { ...process.env };
+  delete env.FORCE_COLOR;
+  delete env.CLICOLOR_FORCE;
+  env.NO_COLOR = "1";
+  env.CLICOLOR = "0";
+  env.GH_FORCE_TTY = "0";
+  return env;
+}
+
+export function ghCallKey(args) {
+  if (!Array.isArray(args) || args[0] !== "api") return `cmd:${(args ?? []).join(" ")}`.slice(0, 200);
+  if (args.includes("graphql")) {
+    const joined = args.join("\n");
+    if (joined.includes("closingIssuesReferences")) return "graphql:closing-issues";
+    if (joined.includes("lastEditedAt") || joined.includes("editor{login}")) return "graphql:comment-editors";
+    return "graphql:unknown";
+  }
+  if (args.includes("-i")) return "headers";
+  return String(args[args.length - 1] ?? "");
+}
+
+function recordGhCall(args) {
+  const log = process.env.GIBSON_DELIVERY_GH_LOG;
+  if (typeof log !== "string" || log.length === 0) return;
+  appendFileSync(log, `${JSON.stringify(args)}\n`, { encoding: "utf8" });
+}
+
+function fixtureGhSpawn(dir, args) {
+  let map;
+  try {
+    const st = lstatSync(dir);
+    if (!st.isDirectory() || st.isSymbolicLink()) {
+      return { status: 1, stdout: "", stderr: "HTTP 500 fixture-dir", error: null };
+    }
+    map = JSON.parse(readFileSync(join(dir, "map.json"), "utf8"));
+  } catch {
+    return { status: 1, stdout: "", stderr: "HTTP 500 fixture-unreadable", error: null };
+  }
+  const key = ghCallKey(args);
+  const row = map && typeof map === "object" && !Array.isArray(map) ? map[key] : null;
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return { status: 1, stdout: "", stderr: `HTTP 404 missing-fixture ${key}`, error: null };
+  }
+  if (row.ok === false) {
+    return {
+      status: Number.isInteger(row.status) ? row.status : 1,
+      stdout: "",
+      stderr: String(row.stderr ?? "HTTP 404"),
+      error: null,
+    };
+  }
+  if (typeof row.stdout === "string") {
+    return { status: 0, stdout: row.stdout, stderr: "", error: null };
+  }
+  try {
+    return { status: 0, stdout: `${JSON.stringify(row.body)}\n`, stderr: "", error: null };
+  } catch {
+    return { status: 1, stdout: "", stderr: "HTTP 500 fixture-body", error: null };
+  }
+}
+
+function ghSpawn(args) {
+  recordGhCall(args);
+  if (injectedGhRunner) return injectedGhRunner(args);
+  const fixtureDir = process.env.GIBSON_DELIVERY_GH_FIXTURE;
+  if (typeof fixtureDir === "string" && fixtureDir.length > 0) return fixtureGhSpawn(fixtureDir, args);
+  return spawnSync("gh", args, {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 120_000,
+    env: ghEnv(),
+  });
+}
+
+function httpClass(stderr) {
+  const m = String(stderr ?? "").match(/HTTP\s+(\d{3})/);
+  return m ? `http-${m[1]}` : "unreadable";
+}
+
+function sha256Text(text) {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/**
+ * Paginated gh api. Returns {ok, pages, bodies, sha256, error}.
+ * `bodies` is the slurped page array. Raw stderr is not returned.
+ */
+function ghPages(endpoint) {
+  const res = ghSpawn(["api", "--paginate", "--slurp", endpoint]);
+  if (res.error || res.status !== 0) {
+    return { ok: false, error: httpClass(res.stderr), pages: 0 };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(res.stdout);
+  } catch {
+    return { ok: false, error: "unreadable", pages: 0 };
+  }
+  if (!Array.isArray(parsed) || parsed.length < 1) return { ok: false, error: "unreadable", pages: 0 };
+  return { ok: true, pages: parsed.length, bodies: parsed, sha256: sha256Text(res.stdout) };
+}
+
+function flattenPages(pageResult, pick) {
+  const items = [];
+  for (const page of pageResult.bodies ?? []) {
+    const chunk = pick(page);
+    if (!Array.isArray(chunk)) return { ok: false, items: [] };
+    items.push(...chunk);
+  }
+  return { ok: true, items };
+}
+
+function source(endpoint, pageResult, exhausted) {
+  const ok = pageResult.ok === true;
+  return {
+    endpoint,
+    pages: pageResult.pages,
+    exhausted: exhausted === undefined ? ok : exhausted === true,
+    sha256: ok ? pageResult.sha256 : sha256Text(pageResult.error ?? "unreadable"),
+  };
+}
+
+function loadLedger(path) {
+  if (!path) return [];
+  let text;
+  try {
+    const st = lstatSync(path);
+    if (!st.isFile() || st.isSymbolicLink()) return null;
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const events = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let ev;
+    try {
+      ev = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    if (!ev || ev.schema !== "gibson.cost.v1") return null;
+    const allow = { schema: ev.schema, ts: ev.ts };
+    if (typeof ev.runner === "string") allow.runner = ev.runner;
+    if (typeof ev.provider === "string") allow.provider = ev.provider;
+    if (ev.pr != null) allow.pr = ev.pr;
+    if (typeof ev.join_key === "string") allow.join_key = ev.join_key;
+    if (typeof ev.repo === "string") allow.repo = ev.repo;
+    events.push(allow);
+  }
+  return events;
+}
+
+function unionChecks(protectionBody, rulesBody) {
+  const entries = [];
+  const seen = new Set();
+  const push = (context, appId) => {
+    if (typeof context !== "string" || !context) return;
+    const id = appId == null ? null : normalizeAppId(appId);
+    const key = `${context}\0${id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({ context, appId: id });
+  };
+  if (protectionBody && Array.isArray(protectionBody.checks)) {
+    for (const c of protectionBody.checks) push(c?.context, c?.app_id);
+  } else if (protectionBody && Array.isArray(protectionBody.contexts)) {
+    for (const name of protectionBody.contexts) push(name, null);
+  }
+  const rules = Array.isArray(rulesBody) ? rulesBody : [];
+  for (const rule of rules) {
+    if (rule?.type !== "required_status_checks") continue;
+    const list = rule?.parameters?.required_status_checks;
+    if (!Array.isArray(list)) continue;
+    for (const c of list) push(c?.context, c?.app_id ?? c?.integration_id);
+  }
+  return entries;
+}
+
+/** App id GitHub puts in a combined-status avatar when the status object has no app field. */
+function appIdFromStatusAvatar(url) {
+  if (typeof url !== "string") return null;
+  const m = url.match(/^https:\/\/avatars\.githubusercontent\.com\/in\/([0-9]+)(?:[/?#].*)?$/);
+  if (!m) return null;
+  return normalizeAppId(Number(m[1]));
+}
+
+/**
+ * Combined status (`GET .../commits/{sha}/status`) is one latest row per context.
+ * `gh api --paginate --slurp` returns one object per page. A short read, a
+ * disagreeing app id, or an unreadable creator is not a match set.
+ */
+function readCombinedStatuses(call, head) {
+  if (!call?.ok) return { ok: false, items: [] };
+  const items = [];
+  let total = null;
+  for (const page of call.bodies ?? []) {
+    if (!page || typeof page !== "object" || Array.isArray(page) || !Array.isArray(page.statuses)) return { ok: false, items: [] };
+    if (!Number.isInteger(page.total_count) || page.total_count < 0) return { ok: false, items: [] };
+    if (total == null) total = page.total_count;
+    else if (total !== page.total_count) return { ok: false, items: [] };
+    for (const s of page.statuses) {
+      const explicit = normalizeAppId(s?.app?.id ?? s?.app_id);
+      const avatar = appIdFromStatusAvatar(s?.avatar_url);
+      if (explicit != null && avatar != null && explicit !== avatar) return { ok: false, items: [] };
+      const rawCreator = s?.creator?.login;
+      let creatorLogin = null;
+      if (rawCreator != null) {
+        if (typeof rawCreator !== "string" || safeLogin(rawCreator) !== rawCreator) return { ok: false, items: [] };
+        creatorLogin = rawCreator;
+      }
+      const completed = typeof s?.updated_at === "string" ? s.updated_at : (typeof s?.created_at === "string" ? s.created_at : null);
+      items.push({
+        name: typeof s?.context === "string" ? s.context : null,
+        conclusion: s?.state ?? null,
+        appSlug: null,
+        appId: explicit != null ? explicit : avatar,
+        headSha: head,
+        completedAt: typeof completed === "string" ? completed.replace(/\.\d+Z$/, "Z") : null,
+        kind: "status",
+        creatorLogin,
+      });
+    }
+  }
+  if (total == null || items.length !== total) return { ok: false, items: [] };
+  return { ok: true, items };
+}
+
+/** Every `/statuses` stamp. created_at is the clock. A bad app id fails the page. */
+function readStatusHistory(call, head) {
+  if (!call?.ok) return { ok: false, items: [] };
+  const flat = flattenPages(call, (p) => (Array.isArray(p) ? p : null));
+  if (!flat.ok) return { ok: false, items: [] };
+  const items = [];
+  for (const s of flat.items) {
+    const explicit = normalizeAppId(s?.app?.id ?? s?.app_id);
+    const avatar = appIdFromStatusAvatar(s?.avatar_url);
+    if (explicit != null && avatar != null && explicit !== avatar) return { ok: false, items: [] };
+    const rawCreator = s?.creator?.login;
+    let creatorLogin = null;
+    if (rawCreator != null) {
+      if (typeof rawCreator !== "string" || safeLogin(rawCreator) !== rawCreator) return { ok: false, items: [] };
+      creatorLogin = rawCreator;
+    }
+    items.push({
+      name: typeof s?.context === "string" ? s.context : null,
+      conclusion: s?.state ?? null,
+      appId: explicit != null ? explicit : avatar,
+      headSha: head,
+      createdAt: stamp(s?.created_at),
+      kind: "status",
+      creatorLogin,
+    });
+  }
+  return { ok: true, items };
+}
+
+function collectIssueNumber(repo, pr) {
+  const [owner, name] = repo.split("/");
+  const q = "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){closingIssuesReferences(first:10){nodes{number}}}}}";
+  const res = ghSpawn(["api", "graphql", "-f", `query=${q}`, "-F", `o=${owner}`, "-F", `r=${name}`, "-F", `n=${pr}`]);
+  if (res.status !== 0) return { issue: null, source: source("graphql:closing-issues", { ok: false, pages: 0, error: httpClass(res.stderr) }) };
+  let parsed;
+  try {
+    parsed = JSON.parse(res.stdout);
+  } catch {
+    return { issue: null, source: source("graphql:closing-issues", { ok: false, pages: 0, error: "unreadable" }) };
+  }
+  const nodes = parsed?.data?.repository?.pullRequest?.closingIssuesReferences?.nodes;
+  let issue = null;
+  if (Array.isArray(nodes) && nodes.length === 1 && Number.isInteger(nodes[0]?.number)) issue = nodes[0].number;
+  return {
+    issue,
+    source: { endpoint: "graphql:closing-issues", pages: 1, exhausted: true, sha256: sha256Text(res.stdout) },
+  };
+}
+
+function collectEditors(repo, pr, comments) {
+  const [owner, name] = repo.split("/");
+  const edits = new Map();
+  let cursor = null;
+  let pages = 0;
+  const raws = [];
+  for (let page = 0; page < 20; page += 1) {
+    const q = "query($o:String!,$r:String!,$n:Int!,$c:String){repository(owner:$o,name:$r){pullRequest(number:$n){comments(first:100,after:$c){nodes{databaseId lastEditedAt editor{login}} pageInfo{hasNextPage endCursor}}}}}";
+    const args = ["api", "graphql", "-f", `query=${q}`, "-F", `o=${owner}`, "-F", `r=${name}`, "-F", `n=${pr}`];
+    if (cursor) args.push("-F", `c=${cursor}`);
+    const res = ghSpawn(args);
+    pages += 1;
+    if (res.status !== 0) return { ok: false, pages, comments };
+    raws.push(res.stdout);
+    let parsed;
+    try {
+      parsed = JSON.parse(res.stdout);
+    } catch {
+      return { ok: false, pages, comments };
+    }
+    const conn = parsed?.data?.repository?.pullRequest?.comments;
+    if (!conn || !Array.isArray(conn.nodes)) return { ok: false, pages, comments };
+    for (const n of conn.nodes) if (n?.lastEditedAt) edits.set(Number(n.databaseId), { editor: n?.editor?.login ?? null });
+    if (!conn.pageInfo?.hasNextPage) {
+      const next = comments.map((c) => {
+        const e = edits.get(Number(c?.id));
+        if (!e) return c;
+        return { ...c, edited: true, editor: e.editor ? { login: e.editor } : undefined };
+      });
+      return { ok: true, pages, comments: next, sha256: sha256Text(raws.join("\n")) };
+    }
+    cursor = conn.pageInfo.endCursor;
+  }
+  return { ok: false, pages, comments };
+}
+
+function writeBundle(path, bundle) {
+  const text = `${canonicalJson(bundle, false)}\n`;
+  assertNoHostLeak(text);
+  const abs = resolve(path);
+  if (existsSync(abs)) {
+    process.stderr.write("delivery-receipt.mjs: --out already exists\n");
+    process.exit(2);
+  }
+  const dir = dirname(abs);
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch {
+    usage("--out directory missing");
+  }
+  if (!st.isDirectory() || st.isSymbolicLink()) usage("--out directory is not a real directory");
+  const tmp = join(dir, `.delivery-receipt-${process.pid}.tmp`);
+  writeFileSync(tmp, text, { encoding: "utf8", flag: "wx" });
+  try {
+    renameSync(tmp, abs);
+  } catch (e) {
+    try { unlinkSync(tmp); } catch { /* ignore */ }
+    usage("cannot write --out");
+  }
+}
+
+function collect(args) {
+  if (!args.repo || !REPO.test(args.repo)) usage("--repo must be OWNER/REPO");
+  if (!args.pr || !/^[1-9][0-9]*$/.test(args.pr)) usage("--pr must be a positive integer");
+  if (!args.out) usage("--out is required");
+  if (existsSync(resolve(args.out))) usage("--out already exists"); // MUTATION_ANCHOR_OUT_BEFORE_GH
+  const ledger = loadLedger(args.ledger);
+  if (ledger == null) usage("--ledger is unreadable"); // MUTATION_ANCHOR_LEDGER_BEFORE_GH
+  const pr = Number(args.pr);
+  const base = `repos/${args.repo}`;
+  let config;
+  try {
+    const cfgPath = args.config ?? DEFAULT_CONFIG;
+    const st = lstatSync(cfgPath);
+    if (!st.isFile() || st.isSymbolicLink()) usage("--config is not a regular file");
+    config = validateConfig(JSON.parse(readFileSync(cfgPath, "utf8")));
+  } catch (e) {
+    usage(`config: ${String(e.message ?? e).slice(0, 120)}`);
+  }
+  const repoCall = ghPages(`${base}`);
+  if (!repoCall.ok) usage(`cannot read repository (${repoCall.error})`);
+  const repoBody = repoCall.bodies[0];
+  const defaultBranch = safeRef(repoBody?.default_branch);
+  const versionRes = ghSpawn(["api", "-i", base]);
+  let ghApiVersion = "unknown";
+  if (versionRes.status === 0) {
+    const m = String(versionRes.stdout).match(/^x-github-api-version:\s*(\S+)/im);
+    if (m && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(m[1])) ghApiVersion = m[1];
+  }
+  const pullCall = ghPages(`${base}/pulls/${pr}`);
+  if (!pullCall.ok) usage(`cannot read pull request (${pullCall.error})`);
+  const pull = allowlistPull(pullCall.bodies[0]);
+  if (!isSha(typeof pull.head.sha === "string" ? pull.head.sha.toLowerCase() : "")) usage("pull request head is missing");
+  pull.head.sha = pull.head.sha.toLowerCase();
+  if (typeof pull.base.sha === "string") pull.base.sha = pull.base.sha.toLowerCase();
+  if (typeof pull.merge_commit_sha === "string") pull.merge_commit_sha = pull.merge_commit_sha.toLowerCase();
+  const head = pull.head.sha;
+  const commitsCall = ghPages(`${base}/pulls/${pr}/commits?per_page=100`);
+  const reviewsCall = ghPages(`${base}/pulls/${pr}/reviews?per_page=100`);
+  const commentsCall = ghPages(`${base}/issues/${pr}/comments?per_page=100`);
+  const pullsForHeadCall = ghPages(`${base}/commits/${head}/pulls?per_page=100`);
+  const timelineCall = ghPages(`${base}/issues/${pr}/timeline?per_page=100`);
+  const filesCall = ghPages(`${base}/pulls/${pr}/files?per_page=100`);
+  const checkRunsCall = ghPages(`${base}/commits/${head}/check-runs?per_page=100`);
+  const statusesCall = ghPages(`${base}/commits/${head}/statuses?per_page=100`);
+  const combinedCall = ghPages(`${base}/commits/${head}/status?per_page=100`);
+  const rawBranch = typeof pull.base.ref === "string" ? pull.base.ref : "";
+  const endpoints = requiredSourceEndpoints({ repository: args.repo, pr, head, branch: rawBranch });
+  if (!endpoints) usage("cannot name required sources");
+  const ep = (template) => endpoints[REQUIRED_SOURCE_TEMPLATES.indexOf(template)];
+  const protectionCall = ghPages(ep("repos/{repository}/branches/{branch}/protection/required_status_checks"));
+  const rulesCall = ghPages(ep("repos/{repository}/rules/branches/{branch}"));
+  const must = [commitsCall, reviewsCall, commentsCall, pullsForHeadCall, timelineCall, filesCall];
+  for (const call of must) if (!call.ok) usage(`required source unreadable (${call.error})`);
+  const commitsFlat = flattenPages(commitsCall, (p) => (Array.isArray(p) ? p : null));
+  const reviewsFlat = flattenPages(reviewsCall, (p) => (Array.isArray(p) ? p : null));
+  const commentsFlat = flattenPages(commentsCall, (p) => (Array.isArray(p) ? p : null));
+  const headFlat = flattenPages(pullsForHeadCall, (p) => (Array.isArray(p) ? p : null));
+  const timeFlat = flattenPages(timelineCall, (p) => (Array.isArray(p) ? p : null));
+  const filesFlat = flattenPages(filesCall, (p) => (Array.isArray(p) ? p : null));
+  if (![commitsFlat, reviewsFlat, commentsFlat, headFlat, timeFlat, filesFlat].every((x) => x.ok)) usage("paginated source was not an array");
+  let comments = commentsFlat.items.map(allowlistComment);
+  const editors = collectEditors(args.repo, pr, comments);
+  const commentEditors = editors.ok ? { status: "known" } : { status: "unknown" };
+  if (!editors.ok) comments = comments.map((c) => ({ ...c, body: "" }));
+  else comments = editors.comments.map(allowlistComment);
+  let files = filesFlat.items.map(allowlistFile);
+  if (files.some((f) => f == null)) files = null;
+  else files = files.filter(Boolean);
+  const checkRuns = [];
+  let checkRunsExhausted = checkRunsCall.ok === true;
+  if (checkRunsCall.ok) {
+    const flat = flattenPages(checkRunsCall, (p) => (Array.isArray(p?.check_runs) ? p.check_runs : null));
+    const total = checkRunsCall.bodies.reduce((n, p) => Math.max(n, Number(p?.total_count ?? 0)), 0);
+    // A short page is not a complete set. Drop the runs and record the source
+    // as not exhausted so a missing page cannot look like a green check.
+    if (!flat.ok || flat.items.length < total) checkRunsExhausted = false;
+    else {
+      for (const cr of flat.items) {
+        checkRuns.push({
+          name: cr?.name ?? null,
+          conclusion: cr?.conclusion ?? null,
+          appSlug: cr?.app?.slug ?? null,
+          appId: typeof cr?.app?.id === "number" ? cr.app.id : null,
+          headSha: typeof cr?.head_sha === "string" ? cr.head_sha.toLowerCase() : null,
+          completedAt: typeof cr?.completed_at === "string" ? cr.completed_at.replace(/\.\d+Z$/, "Z") : null,
+        });
+      }
+    }
+  }
+  // `/statuses` is every stamp. Open PRs match the combined status. A merged
+  // PR matches the latest row at or before merged_at. History stays out of
+  // checkRuns: folding it in made one context look like several runs.
+  let statusesExhausted = statusesCall.ok === true;
+  let statusHistory = [];
+  if (statusesCall.ok) {
+    const history = readStatusHistory(statusesCall, head);
+    if (!history.ok) statusesExhausted = false;
+    else statusHistory = history.items;
+  }
+  const combined = readCombinedStatuses(combinedCall, head);
+  const combinedKnown = combined.ok === true;
+  if (combinedKnown) {
+    for (const s of combined.items) checkRuns.push(s);
+  }
+  let requiredChecks;
+  if (!protectionCall.ok || !rulesCall.ok || !combinedKnown) requiredChecks = { status: "unknown", entries: [] };
+  else {
+    const protection = protectionCall.bodies.length === 1 ? protectionCall.bodies[0] : null;
+    const rules = rulesCall.bodies.flatMap((p) => (Array.isArray(p) ? p : []));
+    requiredChecks = { status: "known", entries: unionChecks(protection, rules) };
+  }
+  const issueInfo = collectIssueNumber(args.repo, pr);
+  const costEvents = ledger;
+  const sources = [
+    source(ep("repos/{repository}"), repoCall),
+    source(ep("repos/{repository}/pulls/{pr}"), pullCall),
+    source(ep("repos/{repository}/pulls/{pr}/commits"), commitsCall),
+    source(ep("repos/{repository}/pulls/{pr}/reviews"), reviewsCall),
+    source(ep("repos/{repository}/issues/{pr}/comments"), commentsCall),
+    source(ep(PULLS_FOR_HEAD_TEMPLATE), pullsForHeadCall),
+    source(ep("repos/{repository}/issues/{pr}/timeline"), timelineCall),
+    source(ep("repos/{repository}/pulls/{pr}/files"), filesCall),
+    source(ep("repos/{repository}/commits/{head}/check-runs"), checkRunsCall.ok ? checkRunsCall : { ok: false, pages: 0, error: checkRunsCall.error }, checkRunsExhausted),
+    source(ep("repos/{repository}/commits/{head}/statuses"), statusesCall.ok ? statusesCall : { ok: false, pages: 0, error: statusesCall.error }, statusesExhausted),
+    source(ep(COMBINED_STATUS_TEMPLATE), combinedCall.ok ? combinedCall : { ok: false, pages: 0, error: combinedCall.error }, combinedKnown),
+    source(ep("repos/{repository}/branches/{branch}/protection/required_status_checks"), protectionCall.ok ? protectionCall : { ok: false, pages: 0, error: protectionCall.error }),
+    source(ep("repos/{repository}/rules/branches/{branch}"), rulesCall.ok ? rulesCall : { ok: false, pages: 0, error: rulesCall.error }),
+    issueInfo.source,
+    { endpoint: ep("graphql:comment-editors"), pages: editors.pages || 0, exhausted: editors.ok === true, sha256: editors.ok ? editors.sha256 : sha256Text("unreadable") },
+  ];
+  // A failed optional source is recorded exhausted:false. project will not
+  // call that delivered. Required PR inputs already exited above.
+  const bundle = {
+    schema: BUNDLE_SCHEMA,
+    repository: args.repo,
+    pr,
+    collectedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    ghApiVersion,
+    sources,
+    inputs: {
+      pull,
+      pullsForHead: headFlat.items.map(allowlistPullRef),
+      pullsForHeadStatus: "known",
+      commits: commitsFlat.items.map(allowlistCommit),
+      reviews: reviewsFlat.items.map(allowlistReview),
+      comments,
+      timeline: timeFlat.items.map(allowlistTimeline),
+      files,
+      config,
+      repository: { defaultBranch },
+      requiredChecks,
+      combinedStatus: combinedKnown ? "known" : "unknown",
+      checkRuns,
+      statusHistory,
+      costEvents,
+      commentEditors,
+      issue: issueInfo.issue,
+    },
+  };
+  writeBundle(args.out, bundle);
 }
 
 function main(argv) {
