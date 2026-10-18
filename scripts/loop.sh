@@ -109,6 +109,9 @@ OPTIONS
                       GIBSON_MAX_COST_USD). Stops only when the #74 ledger has
                       cost_usd data for this session. 0 opts out. Runners
                       with no cost_usd are "cost: not measured", not $0.
+                      A ledger that cannot be evaluated refuses the launch
+                      only while this cap is in force. With 0 or --unbounded
+                      the receipt stays "cost: not measured".
   --unbounded         opt out of all three session budgets. Explicit, and
                       journaled. Cannot be combined with the three flags
                       above; pass 0 on a single dimension instead.
