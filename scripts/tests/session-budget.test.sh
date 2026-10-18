@@ -927,6 +927,104 @@ check_rc "readable ledger after the latch exits 0" 0
 check_eq "readable ledger after the latch starts a runner" "$(runner_count)" 1
 [[ -f "$ALLOW" ]] && ok "recovery creates a fresh allowance" || bad "recovery created no allowance"
 
+echo "a cost opt-out recovers an unreadable latch that a positive cap created"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/ledger-optout-recover.jsonl"
+printf '{not json\n' > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/unread-optout-1.err" --once --max-cost-usd 1 --max-iterations 2
+check_rc "positive cap seeds the unreadable latch" 1
+check_eq "positive cap seed starts no runner" "$(runner_count)" 0
+[[ -e "$ALLOW" ]] && bad "positive cap seed granted an allowance" || ok "positive cap seed grants no allowance"
+[[ -f "$LATCH" ]] && ok "positive cap seed writes the unreadable latch" || bad "positive cap seed wrote no latch"
+check_has "positive cap seed records kind" "$LATCH" "kind=unreadable"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/unread-optout-still.err" --once --max-cost-usd 1 --max-iterations 2
+check_rc "positive cap still refuses the unreadable latch" 1
+check_eq "positive cap still starts no runner" "$(runner_count)" 0
+[[ -f "$LATCH" ]] && ok "positive cap leaves the unreadable latch" || bad "positive cap cleared the unreadable latch"
+check_eq "positive cap adds no second diagnosis" "$(count_in "$JOURNAL" 'diagnosis: budget: cost-ledger-unreadable')" 1
+: > "$CALLS/runner.count"
+run_loop "$ROOT/unread-optout-2.err" --once --max-cost-usd 0 --max-iterations 2
+check_rc "cost opt-out recovers the unreadable latch" 0
+check_eq "cost opt-out recovery starts one runner" "$(runner_count)" 1
+[[ -f "$LATCH" ]] && bad "cost opt-out recovery left the latch" || ok "cost opt-out recovery clears the latch"
+[[ -f "$ALLOW" ]] && ok "cost opt-out recovery creates an allowance" || bad "cost opt-out recovery created no allowance"
+check_eq "cost opt-out recovery adds no unreadable diagnosis" "$(count_in "$JOURNAL" 'diagnosis: budget: cost-ledger-unreadable')" 1
+
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/ledger-unbounded-recover.jsonl"
+echo '{}' > "$ROOT/ledger-unbounded-target.jsonl"
+ln -s "$ROOT/ledger-unbounded-target.jsonl" "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/unread-unb-1.err" --once --max-cost-usd 1 --max-iterations 2
+check_rc "positive cap symlink seeds the unreadable latch" 1
+check_eq "positive cap symlink seed starts no runner" "$(runner_count)" 0
+[[ -e "$ALLOW" ]] && bad "positive cap symlink seed granted an allowance" || ok "positive cap symlink seed grants no allowance"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/unread-unb-2.err" --once --unbounded
+check_rc "unbounded recovers the unreadable latch" 0
+check_eq "unbounded recovery starts one runner" "$(runner_count)" 1
+[[ -f "$LATCH" ]] && bad "unbounded recovery left the latch" || ok "unbounded recovery clears the latch"
+[[ -f "$ALLOW" ]] && ok "unbounded recovery creates an allowance" || bad "unbounded recovery created no allowance"
+
+echo "a persisted cost opt-out clears an unreadable latch; a positive allowance does not"
+clear_hooks
+setup_repo
+mkdir -p "$REPO/gibson"
+printf '# Gibson loop journal\n' > "$JOURNAL"
+USE_LEDGER="$ROOT/ledger-doc-optout.jsonl"
+printf '{not json\n' > "$USE_LEDGER"
+write_seed_allowance max_cost_usd=0 consumed_starts=1 completed_iterations=1
+backdate_minutes 0
+SID=$(allow_field session_id)
+cat > "$LATCH" <<EOF
+schema=gibson.session-budget.latch.v1
+kind=unreadable
+reason=cost-ledger-unreadable
+session_id=$SID
+journaled=1
+lane_id=solo
+repo=acme/app
+EOF
+echo progress > "$CALLS/mode"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/doc-optout.err" --once --max-cost-usd 0
+check_rc "persisted cost opt-out recovers the unreadable latch" 0
+check_eq "persisted cost opt-out starts one runner" "$(runner_count)" 1
+check_eq "persisted cost opt-out keeps the session" "$(allow_field session_id)" "$SID"
+[[ -f "$LATCH" ]] && bad "persisted cost opt-out left the latch" || ok "persisted cost opt-out clears the latch"
+
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/ledger-doc-positive.jsonl"
+: > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/doc-positive-seed.err" --once --max-cost-usd 1 --max-iterations 5
+check_rc "positive allowance seed exits 0" 0
+SID=$(allow_field session_id)
+printf '{not json\n' > "$USE_LEDGER"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/doc-positive-latch.err" --once --max-cost-usd 1 --max-iterations 5
+check_rc "positive allowance latches the unreadable ledger" 1
+check_eq "positive allowance latch starts no runner" "$(runner_count)" 0
+[[ -f "$LATCH" ]] && ok "positive allowance writes the unreadable latch" || bad "positive allowance wrote no latch"
+check_eq "positive allowance latch keeps the session" "$(allow_field session_id)" "$SID"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/doc-positive-again.err" --once --max-cost-usd 1 --max-iterations 5
+check_rc "positive allowance still refuses the unreadable latch" 1
+check_eq "positive allowance still starts no runner" "$(runner_count)" 0
+[[ -f "$LATCH" ]] && ok "positive allowance leaves the unreadable latch" || bad "positive allowance cleared the unreadable latch"
+: > "$CALLS/runner.count"
+run_loop "$ROOT/doc-positive-optout.err" --once --max-cost-usd 0 --max-iterations 5
+check_rc "cost opt-out does not bypass a persisted positive cap" 1
+check_eq "cost opt-out against a positive allowance starts no runner" "$(runner_count)" 0
+check_has "cost opt-out against a positive allowance names the limits" "$ROOT/doc-positive-optout.err" "differ from the persisted"
+[[ -f "$LATCH" ]] && ok "cost opt-out against a positive allowance leaves the latch" || bad "cost opt-out against a positive allowance cleared the latch"
+check_eq "cost opt-out against a positive allowance keeps the session" "$(allow_field session_id)" "$SID"
+
 echo "fleet rollup"
 clear_hooks
 FLEET_REPO="$ROOT/fleet-repo"
@@ -1742,8 +1840,9 @@ else
   bad "reset during a live loop deleted the allowance"
 fi
 : > "$CALLS/runner.release"
-wait "$pause_pid" || true
-pause_rc=$?
+# `wait || true` then `$?` is always 0. Keep the child status so a failed loop fails this check.
+pause_rc=0
+wait "$pause_pid" || pause_rc=$?
 check_eq "live loop finishes after the refused reset" "$pause_rc" 0
 check_eq "live loop completed the reserved start" "$(allow_field completed_iterations)" 1
 if python3 - "$ALLOW" <<'PY'

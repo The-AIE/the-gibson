@@ -73,9 +73,11 @@
 #   budget) and journal every such launch; KeepAlive can repeat that journal
 #   until the operator resets or fixes the invocation. While the cost cap is
 #   in force, an unreadable ledger latches a distinct blocked state, exits
-#   nonzero, and does not grant a new allowance; the next launch rechecks and
-#   stays quiet while it is still unreadable. A cost cap of 0 or --unbounded
-#   does not take that latch.
+#   nonzero, and does not grant a new allowance; the next launch with that
+#   cap still in force rechecks and stays quiet while the ledger cannot be
+#   evaluated. A cost cap of 0 or --unbounded does not take that latch. The
+#   same opt-out clears one a positive cap already took when this launch is
+#   not resuming a persisted positive-cap allowance.
 #   runner_pid is loop.sh's pid, stored when a start is reserved and removed
 #   when that start completes. Reset consults it only when it is a non-boolean
 #   integer and kill(pid, 0) succeeds. A missing pid, any other JSON type, or
@@ -1087,20 +1089,25 @@ try:
 
     if latch and latch.get("kind") == "unreadable" and op == "startup":
         # The latch names the lane and repo that blocked. A different lane
-        # must not clear it. scan_ledger fatals if the ledger is still
-        # unreadable. The first stop does not grant an allowance. Recovery
-        # clears the latch only after that identity check and only once the
-        # ledger is a regular file again.
+        # must not clear it. While a cost cap is in force, scan_ledger
+        # fatals if the ledger still cannot be evaluated and the latch
+        # stays. No allowance means this launch's limits decide that. An
+        # allowance decides only after check_identity, so --max-cost-usd 0
+        # or --unbounded cannot opt out of a persisted positive cap. A
+        # launch with no cost decision does not refuse the ledger and may
+        # clear the latch. The first stop grants no allowance.
         check_latch_identity(latch, want)
         doc = load_allowance()
         if doc is None:
-            scan_ledger("sb-00000000T000000Z-00000000")
+            enforce = not (want["unbounded"] or want["max_cost_usd"] == "0")
+            scan_ledger("sb-00000000T000000Z-00000000", enforce)
             if os.path.lexists(latch_path) and not os.path.islink(latch_path):
                 os.remove(latch_path)
             setf("status", "ok")
             finish()
         check_identity(doc, want)
-        scan_ledger(doc["session_id"])
+        enforce = not (doc["unbounded"] or doc["max_cost_usd"] == "0")
+        scan_ledger(doc["session_id"], enforce)
         if os.path.lexists(latch_path) and not os.path.islink(latch_path):
             os.remove(latch_path)
         latch = None
