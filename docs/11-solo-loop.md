@@ -213,6 +213,12 @@ compare against a stale baseline.
   One `cost_usd` line does not establish complete session spend, and neither
   does a line on every completed iteration. `cost_status: complete` is not
   emitted. A partial sum that reaches the cap does stop.
+  While the cost cap is in force, a ledger that cannot be evaluated (not a
+  regular file, unreadable, malformed JSON, or a non-decimal `cost_usd` on
+  this session) latches `budget: cost-ledger-unreadable`, exits nonzero, and
+  grants no allowance. When the cost cap is `0` or the launch is
+  `--unbounded`, that same ledger does not refuse the launch. The receipt
+  says `cost: not measured`, not $0. A positive cap still refuses.
   The allowance is `gibson/session-budget.json` (session id, lane, repo, start
   time, limits, consumed starts, completed iterations, and the loop pid while
   a start is reserved). Ordinary relaunch

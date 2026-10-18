@@ -658,6 +658,68 @@ check_eq "numeric cost_usd does not start a runner" "$(runner_count)" 0
 check_has "numeric cost_usd names the type" "$ROOT/bad-cost.err" "cost_usd must be a decimal string"
 check_lacks "numeric cost_usd is not a clean once" "$ROOT/bad-cost.err" "--once done"
 
+echo "cost opt-out does not refuse a ledger that cannot be evaluated"
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-optout-bad.jsonl"
+printf '{not json\n' > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/optout-bad.err" --once --max-cost-usd 0 --max-iterations 1
+check_rc "cost opt-out with malformed ledger exits 0" 0
+check_eq "cost opt-out with malformed ledger starts a runner" "$(runner_count)" 1
+check_lacks "cost opt-out with malformed ledger does not latch unreadable" "$JOURNAL" "diagnosis: budget: cost-ledger-unreadable"
+check_has "cost opt-out with malformed ledger journals the cost dimension" "$JOURNAL" "dimensions: cost"
+check_has "cost opt-out with malformed ledger stops on iterations" "$JOURNAL" "diagnosis: budget: iterations"
+check_has "cost opt-out with malformed ledger stays not measured" "$JOURNAL" "cost: not measured"
+check_lacks "cost opt-out with malformed ledger does not invent zero" "$JOURNAL" "cost: partial 0"
+
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-enforce-bad.jsonl"
+printf '{not json\n' > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/enforce-bad.err" --once --max-cost-usd 1 --max-iterations 5
+check_rc "positive cost cap with malformed ledger exits 1" 1
+check_eq "positive cost cap with malformed ledger starts no runner" "$(runner_count)" 0
+check_has "positive cost cap with malformed ledger latches unreadable" "$JOURNAL" "diagnosis: budget: cost-ledger-unreadable"
+if [[ -e "$ALLOW" ]]; then
+  bad "positive cost cap with malformed ledger granted an allowance"
+else
+  ok "positive cost cap with malformed ledger grants no allowance"
+fi
+
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-unbounded-bad.jsonl"
+printf '{not json\n' > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/unbounded-bad.err" --once --unbounded
+check_rc "unbounded with malformed ledger exits 0" 0
+check_eq "unbounded with malformed ledger starts a runner" "$(runner_count)" 1
+check_lacks "unbounded with malformed ledger does not latch unreadable" "$JOURNAL" "diagnosis: budget: cost-ledger-unreadable"
+check_has "unbounded with malformed ledger journals the opt-out" "$JOURNAL" "dimensions: all"
+
+clear_hooks
+setup_repo
+USE_LEDGER="$ROOT/cost-optout-numeric.jsonl"
+: > "$USE_LEDGER"
+echo progress > "$CALLS/mode"
+run_loop "$ROOT/optout-numeric-seed.err" --once --max-cost-usd 0 --max-iterations 5
+check_rc "cost opt-out seed before numeric cost_usd exits 0" 0
+SID=$(allow_field session_id)
+python3 - "$USE_LEDGER" "$SID" <<'PY'
+import json, sys
+path, sid = sys.argv[1], sys.argv[2]
+ev = {"schema": "gibson.cost.v1", "session_id": sid, "cost_usd": 1.5, "iteration": 1}
+open(path, "a", encoding="utf-8").write(json.dumps(ev) + "\n")
+PY
+: > "$CALLS/runner.count"
+run_loop "$ROOT/optout-numeric.err" --once --max-cost-usd 0 --max-iterations 5
+check_rc "cost opt-out with numeric cost_usd exits 0" 0
+check_eq "cost opt-out with numeric cost_usd starts a runner" "$(runner_count)" 1
+check_lacks "cost opt-out with numeric cost_usd does not latch unreadable" "$JOURNAL" "diagnosis: budget: cost-ledger-unreadable"
+check_eq "cost opt-out with numeric cost_usd keeps the session" "$(allow_field session_id)" "$SID"
+
 echo "cross-lane and limit mismatch refuse without a fresh allowance"
 clear_hooks
 setup_repo

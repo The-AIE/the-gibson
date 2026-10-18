@@ -56,7 +56,12 @@
 #   establish complete session spend, and cost_status complete is not emitted.
 #   The partial receipt names the summed amount and says "not every iteration
 #   measured". A partial sum that reaches the cap stops; an unmeasured session
-#   does not stop on cost. A metered runner records a line itself. The loop
+#   does not stop on cost. While the cost cap is in force (a positive cap, and
+#   not --unbounded), a ledger that cannot be evaluated latches
+#   budget: cost-ledger-unreadable, exits nonzero, and grants no allowance.
+#   A cost cap of 0 or --unbounded does not make that decision: the same
+#   ledger does not refuse the launch, and the receipt says "cost: not
+#   measured", not $0. A metered runner records a line itself. The loop
 #   exports GIBSON_SESSION_ID and GIBSON_SESSION_ITERATION before the runner
 #   starts.
 #
@@ -66,10 +71,11 @@
 #   is clamped to zero elapsed so it does not instantly exhaust the wall cap.
 #   Identity mismatch and a corrupt allowance refuse the launch (no fresh
 #   budget) and journal every such launch; KeepAlive can repeat that journal
-#   until the operator resets or fixes the invocation. An unreadable ledger
-#   latches a distinct blocked state, exits nonzero, and does not grant a new
-#   allowance; the next launch rechecks and stays quiet while it is still
-#   unreadable.
+#   until the operator resets or fixes the invocation. While the cost cap is
+#   in force, an unreadable ledger latches a distinct blocked state, exits
+#   nonzero, and does not grant a new allowance; the next launch rechecks and
+#   stays quiet while it is still unreadable. A cost cap of 0 or --unbounded
+#   does not take that latch.
 #   runner_pid is loop.sh's pid, stored when a start is reserved and removed
 #   when that start completes. Reset consults it only when it is a non-boolean
 #   integer and kill(pid, 0) succeeds. A missing pid, any other JSON type, or
@@ -216,6 +222,16 @@ def fatal(message):
     setf("message", message)
     finish()
 
+class LedgerRefuse(Exception):
+    pass
+
+def refuse_ledger(message, enforce):
+    # In force, a ledger that cannot be evaluated is a stop. Opted out, there
+    # is no cost decision, so the scan reports not measured instead of $0.
+    if enforce:
+        fatal(message)
+    raise LedgerRefuse(message)
+
 # Canonical non-negative decimal: no exponent, no leading zeros, at most 18
 # integer digits and 12 fractional digits. Inside that grammar the sum is
 # exact Decimal. Outside it, fail closed — do not infer a value and do not
@@ -224,11 +240,11 @@ DEC_RE = re.compile(r"^(0|[1-9][0-9]{0,17})(\.[0-9]{1,12})?$")
 LANE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 SID_RE = re.compile(r"^sb-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 
-def parse_cost_string(value, where):
+def parse_cost_string(value, where, enforce=True):
     if isinstance(value, bool) or not isinstance(value, str):
-        fatal(where + ": cost_usd must be a decimal string, not " + type(value).__name__)
+        refuse_ledger(where + ": cost_usd must be a decimal string, not " + type(value).__name__, enforce)
     if not DEC_RE.match(value):
-        fatal(where + ": cost_usd is not an exact non-negative decimal string")
+        refuse_ledger(where + ": cost_usd is not an exact non-negative decimal string", enforce)
     return Decimal(value)
 
 def dec_str(value):
@@ -765,7 +781,7 @@ def check_identity(doc, want):
             )
         )
 
-def scan_ledger(session_id):
+def _scan_ledger(session_id, enforce):
     ledger = os.environ.get("SB_LEDGER", "")
     if ledger == "":
         return "not_measured", None, ("not_measured", None), "no-ledger"
@@ -774,11 +790,11 @@ def scan_ledger(session_id):
     if not os.path.lexists(ledger):
         return "not_measured", None, ("not_measured", None), "missing-ledger"
     if os.path.islink(ledger) or not os.path.isfile(ledger):
-        fatal("cost ledger is not a regular file; refusing to treat cost as zero")
+        refuse_ledger("cost ledger is not a regular file; refusing to treat cost as zero", enforce)
     try:
         lines = open(ledger, "r", encoding="utf-8").read().splitlines()
     except OSError as exc:
-        fatal("cost ledger unreadable; refusing to treat cost as zero: " + exc.strerror)
+        refuse_ledger("cost ledger unreadable; refusing to treat cost as zero: " + exc.strerror, enforce)
     measured = []
     merge_seen = False
     merged_prs = set()
@@ -788,12 +804,12 @@ def scan_ledger(session_id):
         try:
             ev = json.loads(line)
         except json.JSONDecodeError:
-            fatal("cost ledger line %d is not JSON; refusing to treat cost as zero" % idx)
+            refuse_ledger("cost ledger line %d is not JSON; refusing to treat cost as zero" % idx, enforce)
         if not isinstance(ev, dict):
-            fatal("cost ledger line %d is not an object" % idx)
+            refuse_ledger("cost ledger line %d is not an object" % idx, enforce)
         schema = ev.get("schema")
         if schema is None:
-            fatal("cost ledger line %d is missing schema; refusing to treat cost as zero" % idx)
+            refuse_ledger("cost ledger line %d is missing schema; refusing to treat cost as zero" % idx, enforce)
         if schema != "gibson.cost.v1":
             continue
         where = "cost ledger line %d" % idx
@@ -801,24 +817,26 @@ def scan_ledger(session_id):
         if sid is None:
             continue
         if not isinstance(sid, str):
-            fatal(where + ": session_id must be a string")
+            refuse_ledger(where + ": session_id must be a string", enforce)
         if sid != session_id:
             continue
         # Another session's row was skipped above. A malformed cost_usd on
-        # this session still fails closed. A malformed cost_usd on a
-        # different session is not this allowance's telemetry.
+        # this session still fails closed while the cost cap is in force.
+        # A malformed cost_usd on a different session is not this allowance's
+        # telemetry. When the cost cap is opted out, refuse_ledger raises
+        # and the wrapper reports not measured instead of $0.
         if "cost_usd" in ev:
-            amount = parse_cost_string(ev.get("cost_usd"), where)
+            amount = parse_cost_string(ev.get("cost_usd"), where, enforce)
         else:
             amount = None
         iteration = ev.get("iteration", None)
         if iteration is not None:
             if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 1:
-                fatal(where + ": iteration must be a positive integer")
+                refuse_ledger(where + ": iteration must be a positive integer", enforce)
         if "merged" in ev:
             merged = ev.get("merged")
             if not isinstance(merged, bool):
-                fatal(where + ": merged must be a boolean")
+                refuse_ledger(where + ": merged must be a boolean", enforce)
             pr = ev.get("pr")
             # Docs: a row counts only when it carries boolean merged AND an
             # integer pr. A merged flag alone is not telemetry, so it must
@@ -836,6 +854,14 @@ def scan_ledger(session_id):
     prs = ("counted", len(merged_prs)) if merge_seen else ("not_measured", None)
     return "measured", (total, measured), prs, "ok"
 
+def scan_ledger(session_id, enforce=True):
+    try:
+        return _scan_ledger(session_id, enforce)
+    except LedgerRefuse:
+        # One line that cannot be evaluated abandons the scan. Do not
+        # partial-sum the rest of the file and do not report $0.
+        return "not_measured", None, ("not_measured", None), "unevaluable"
+
 def cost_view(doc):
     # Completeness check, exactly:
     # scripts/cost-ledger.sh appends gibson.cost.v1 rows with schema, ts,
@@ -849,7 +875,11 @@ def cost_view(doc):
     # and matching iteration numbers do not create one. No matching
     # cost_usd → not_measured. One or more → partial. complete is not
     # returned.
-    kind, payload, prs, _how = scan_ledger(doc["session_id"])
+    # 0 or --unbounded means this launch has no cost decision. A ledger that
+    # cannot be evaluated stays "cost: not measured". A positive cap still
+    # refuses that ledger inside scan_ledger.
+    enforce = not (doc["unbounded"] or doc["max_cost_usd"] == "0")
+    kind, payload, prs, _how = scan_ledger(doc["session_id"], enforce)
     prs_status, prs_count = prs
     if kind == "not_measured":
         return "not_measured", None, "cost: not measured", prs_status, prs_count

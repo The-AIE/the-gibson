@@ -117,6 +117,7 @@ Operational budgets (`--error-budget`, `--stale-budget`, `--escalate-after`,
 and the token-efficiency playbook — not as magic numbers re-derived per prompt.
 The session defaults are finite (50 iterations, 480 minutes, USD 20 of measured
 `cost_usd`). Missing cost data stays "not measured"; it is never stored as $0.
+A ledger that cannot be evaluated refuses the launch only while that cost cap is in force.
 
 De-escalation is equally mandatory: the historian's quarterly review moves task
 classes *down* a grade when a cheaper pool's success rate on that class exceeds 90%
