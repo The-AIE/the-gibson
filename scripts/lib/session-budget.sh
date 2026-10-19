@@ -8,10 +8,10 @@
 #   start time, and consumed starts. Defaults are 50 iterations, 480 minutes,
 #   and USD 20. 0 on a dimension, or --unbounded, is an explicit opt-out and is
 #   journaled. If that line cannot be written, the launch is refused and the
-#   allowance created for it is removed. That removal is outside the engine
-#   lock: a second launch that already resumed the file can lose it, and the
-#   next reserve can start a fresh session. Ordinary relaunch resumes the
-#   same allowance. Only
+#   allowance created for it is removed only when its exact persisted snapshot
+#   still matches under the engine lock. A compatible launch that has already
+#   resumed and rewritten the allowance keeps its state. Ordinary relaunch
+#   resumes the same allowance. Only
 #   --reset-session-budget creates a fresh one. Under the allowance lock,
 #   reset is refused while the recorded loop pid is still alive. An
 #   interrupted start with no pid, or a pid that is not alive, is what that
@@ -87,9 +87,8 @@
 #   The allowance lock is a directory plus a pid file. Two launches that
 #   overlap after the directory exists and before that pid file is durable
 #   can both enter. Counters can overwrite each other, and two receipts can
-#   be published. That race, the opt-out discard race, and a crash between
-#   the reset line and the delete are stated limits (The-AIE/the-gibson#499),
-#   not closed here.
+#   be published. That race and a crash between the reset line and the delete
+#   are stated limits (The-AIE/the-gibson#499), not closed here.
 #
 # Caller globals (loop.sh): STATE_DIR JOURNAL EXPECTED_REPO_SLUG MAX iter
 #   plus info(). Limits: SB_LIMIT_ITERATIONS SB_LIMIT_WALL_MIN SB_LIMIT_COST_USD
@@ -103,6 +102,7 @@ SB_MESSAGE=""
 SB_SESSION_ID=""
 SB_CREATED=""
 SB_OPT_OUT=""
+SB_ALLOWANCE_FINGERPRINT=""
 SB_ITERATION=""
 SB_COST_STATUS=""
 SB_COST_TEXT=""
@@ -131,6 +131,7 @@ sb_engine() {
   SB_SESSION_ID=""
   SB_CREATED=""
   SB_OPT_OUT=""
+  SB_ALLOWANCE_FINGERPRINT=""
   SB_ITERATION=""
   SB_COST_STATUS=""
   SB_COST_TEXT=""
@@ -180,6 +181,7 @@ sb_engine() {
       SB_LATCH_KIND="${SB_LATCH_KIND:-}" \
       SB_LATCH_REASON="${SB_LATCH_REASON:-}" \
       SB_LATCH_SESSION="${SB_LATCH_SESSION:-}" \
+      SB_EXPECTED_ALLOWANCE_FINGERPRINT="${SB_EXPECTED_ALLOWANCE_FINGERPRINT:-}" \
       SB_LOOP_PID="${SB_LOOP_PID:-$$}" \
       python3 - <<'PY'
 import errno, hashlib, json, os, re, sys, tempfile, time
@@ -202,7 +204,7 @@ def setf(key, value):
 def finish():
     order = [
         "status", "quiet", "reason", "message", "diagnosis", "session_id",
-        "created", "opt_out", "iteration", "consumed", "completed", "elapsed",
+        "created", "opt_out", "allowance_fingerprint", "iteration", "consumed", "completed", "elapsed",
         "overshoot", "cost_status", "cost_usd", "cost_text", "exhausted",
         "prs_merged", "prs_text", "previous_session_id", "started_at",
         "max_iterations", "max_wall_min", "max_cost_usd", "unbounded",
@@ -448,8 +450,14 @@ def load_latch():
         fatal("session budget latch journaled flag is invalid")
     return doc
 
+def allowance_payload(doc):
+    return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+
+def allowance_fingerprint(doc):
+    return hashlib.sha256(allowance_payload(doc)).hexdigest()
+
 def write_allowance(doc):
-    payload = json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+    payload = allowance_payload(doc)
     atomic_write(allowance_path, payload)
 
 def write_latch(kind, reason, session_id, journaled, extra=None):
@@ -1081,6 +1089,19 @@ try:
         setf("status", "ok")
         finish()
 
+    if op == "discard_created_allowance":
+        expected = os.environ.get("SB_EXPECTED_ALLOWANCE_FINGERPRINT", "")
+        if not re.match(r"^[0-9a-f]{64}$", expected):
+            fatal("discard requires the created allowance fingerprint")
+        doc = load_allowance()
+        if doc is None:
+            setf("status", "ok")
+            finish()
+        if allowance_fingerprint(doc) == expected:
+            os.remove(allowance_path)
+        setf("status", "ok")
+        finish()
+
     latch = load_latch()
     if latch and latch.get("kind") == "exhausted" and op in ("startup", "reserve", "boundary"):
         check_latch_identity(latch, want)
@@ -1183,6 +1204,7 @@ try:
         setf("status", "ok")
         setf("created", "1" if created else "0")
         setf("opt_out", opt_out_of(doc) if created else "")
+        setf("allowance_fingerprint", allowance_fingerprint(doc) if created else "")
         setf("session_id", doc["session_id"])
         setf("iteration", doc["consumed_starts"])
         setf("consumed", doc["consumed_starts"])
@@ -1247,6 +1269,7 @@ PY
       session_id) SB_SESSION_ID=$val ;;
       created) SB_CREATED=$val ;;
       opt_out) SB_OPT_OUT=$val ;;
+      allowance_fingerprint) SB_ALLOWANCE_FINGERPRINT=$val ;;
       iteration) SB_ITERATION=$val ;;
       cost_status) SB_COST_STATUS=$val ;;
       cost_text) SB_COST_TEXT=$val ;;
@@ -1292,18 +1315,37 @@ sb_journal_append() {
   cat >> "$JOURNAL"
 }
 
-# The engine has already created this allowance. If the required journal
-# line was not written, remove that file so the next launch cannot resume
-# an opt-out that was never recorded. A symlink is not removed.
+# Test-only. Unset in production. Pauses after the opt-out journal failure and
+# before cleanup reacquires the engine lock, so a compatible reserve can rewrite
+# the allowance and prove stale cleanup leaves that newer snapshot intact.
+sb_discard_test_hold() {
+  local hold="${SB_DISCARD_HOLD_FILE:-}" release="${SB_DISCARD_RELEASE_FILE:-}" i=0
+  [[ -n "$hold" ]] || return 0
+  printf '%s\n' "held" > "$hold" || return 1
+  while [[ "$i" -lt 400 ]]; do
+    [[ -n "$release" && -f "$release" ]] && return 0
+    sleep 0.02
+    i=$((i + 1))
+  done
+  echo "loop.sh: ERROR: session budget: discard test hold expired" >&2
+  return 1
+}
+
+# The engine has already created this allowance. If the required journal line
+# was not written, reacquire the allowance lock and remove the file only while
+# it still matches the exact snapshot returned by that reserve. A compatible
+# reserve that rewrote the allowance wins; cleanup must not delete its state.
 sb_discard_created_allowance() {
-  local path
-  path=$(sb_allowance_path)
-  if [[ -L "$path" ]]; then
-    echo "loop.sh: ERROR: session budget: refusing to remove a symlink allowance" >&2
+  local expected="${SB_ALLOWANCE_FINGERPRINT:-}"
+  if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "loop.sh: ERROR: session budget: created allowance fingerprint is missing" >&2
     return 1
   fi
-  if [[ -f "$path" ]]; then
-    rm -f -- "$path" || return 1
+  sb_discard_test_hold || return 1
+  SB_EXPECTED_ALLOWANCE_FINGERPRINT="$expected" sb_engine discard_created_allowance || return 1
+  if [[ "$SB_STATUS" != "ok" ]]; then
+    echo "loop.sh: ERROR: session budget: ${SB_MESSAGE:-allowance cleanup failed}" >&2
+    return 1
   fi
 }
 

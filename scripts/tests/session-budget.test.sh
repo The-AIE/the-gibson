@@ -1545,6 +1545,64 @@ else
 fi
 [[ -e "$ALLOW" ]] && bad "unbounded symlink journal left an allowance" || ok "unbounded symlink journal leaves no allowance"
 
+echo "failed opt-out cleanup preserves a compatible concurrent reserve"
+clear_hooks
+setup_repo
+echo progress > "$CALLS/mode"
+printf 'SECRET\n' > "$ROOT/optout-race-target.md"
+ln -s "$ROOT/optout-race-target.md" "$JOURNAL"
+rm -f "$ROOT/discard-held" "$ROOT/discard-release"
+(
+  export SB_DISCARD_HOLD_FILE="$ROOT/discard-held"
+  export SB_DISCARD_RELEASE_FILE="$ROOT/discard-release"
+  run_loop "$ROOT/optout-race-first.err" --once --unbounded
+  printf '%s\n' "$RC" > "$ROOT/optout-race-first.rc"
+) &
+optout_race_first_pid=$!
+if [[ -f "$ROOT/discard-held" ]] || python3 - "$ROOT/discard-held" <<'PY'
+import sys, time
+path = sys.argv[1]
+deadline = time.time() + 10
+while time.time() < deadline:
+    try:
+        open(path, "r", encoding="utf-8").read()
+        sys.exit(0)
+    except OSError:
+        time.sleep(0.05)
+sys.exit(1)
+PY
+then
+  ok "failed opt-out cleanup pauses before reacquiring the lock"
+else
+  bad "failed opt-out cleanup did not reach the discard window"
+fi
+optout_race_sid=$(allow_field session_id)
+# The first launch has already refused the symlink. Give the compatible launch
+# a real journal so its ordinary progress write is not part of this fixture.
+rm -f "$JOURNAL"
+printf '# Gibson loop journal\n' > "$JOURNAL"
+run_loop "$ROOT/optout-race-second.err" --once --unbounded
+optout_race_second_rc=$RC
+: > "$ROOT/discard-release"
+wait "$optout_race_first_pid"
+optout_race_first_rc=$(cat "$ROOT/optout-race-first.rc")
+check_eq "original launch still refuses the missing opt-out journal" "$optout_race_first_rc" 1
+check_eq "compatible concurrent launch succeeds" "$optout_race_second_rc" 0
+check_eq "only the compatible launch starts a runner" "$(runner_count)" 1
+if [[ -f "$ALLOW" && ! -L "$ALLOW" ]]; then
+  ok "stale cleanup preserves the rewritten allowance"
+else
+  bad "stale cleanup deleted the rewritten allowance"
+fi
+check_eq "compatible launch keeps the same session" "$(allow_field session_id)" "$optout_race_sid"
+check_eq "compatible reserve keeps both consumed starts" "$(allow_field consumed_starts)" 2
+check_eq "compatible runner records its completion" "$(allow_field completed_iterations)" 1
+if [[ "$(cat "$ROOT/optout-race-target.md")" == "SECRET" ]]; then
+  ok "concurrent opt-out race does not write through the journal symlink"
+else
+  bad "concurrent opt-out race changed the journal symlink target"
+fi
+
 echo "a reset is refused when the journal cannot record it"
 clear_hooks
 setup_repo
