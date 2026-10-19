@@ -670,6 +670,11 @@ echo
 [[ -x "$FLEET" ]] || [[ -f "$FLEET" ]] && ok "loop-fleet.sh present" || bad "loop-fleet.sh missing"
 bash -n "$FLEET" && ok "bash -n loop-fleet.sh" || bad "bash -n failed"
 "$FLEET" --help >/dev/null 2>&1 && ok "--help exits 0" || bad "--help failed"
+fleet_help_out=$("$FLEET" --help 2>&1)
+case "$fleet_help_out" in
+  *--reset-session-budget*) ok "--help documents fleet session-budget reset" ;;
+  *) bad "--help missing fleet session-budget reset" ;;
+esac
 
 # --- valid Gibson-shaped profile -------------------------------------------
 echo "valid Gibson-shaped profile"
@@ -724,6 +729,21 @@ if grep -q 'fake-runner' "$CALLS/launches.log"; then
 else
   bad "runner not in launch log"
 fi
+if grep -qx -- '--reset-session-budget' "$CALLS/launches.log.argv" 2>/dev/null; then
+  bad "ordinary fleet start passed an implicit session-budget reset"
+else
+  ok "ordinary fleet start does not reset session budgets"
+fi
+
+# A reset is passed only for a dead reused lane with persisted budget state.
+printf '{}\n' > "$ROOT/fleet/lane-docs/gibson/session-budget.json"
+: > "$CALLS/launches.log"
+: > "$CALLS/launches.log.argv"
+out=$(run_fleet --reset-session-budget --start) || { bad "explicit fleet budget reset failed: $out"; out=""; }
+reset_arg_count=$(grep -cx -- '--reset-session-budget' "$CALLS/launches.log.argv" 2>/dev/null || true)
+[[ "$reset_arg_count" == "1" ]] \
+  && ok "explicit fleet reset reaches only the reused lane with persisted budget state" \
+  || bad "explicit fleet reset flag count=$reset_arg_count (expected 1): $(cat "$CALLS/launches.log.argv" 2>/dev/null)"
 
 # idempotent status after start
 out=$(run_fleet --status) || true
@@ -798,6 +818,15 @@ write_profile "$PROF" \
 unset FLEET_PROFILE || true
 out=$(run_fleet --profile "$PROF" --status) || true
 echo "$out" | grep 'profile=selector' >/dev/null && ok "--profile PATH works" || bad "--profile failed: $out"
+
+out=$(run_fleet --profile "$PROF" --reset-session-budget --status 2>&1) \
+  && bad "reset modifier should be refused with --status" \
+  || {
+    case "$out" in
+      *"valid only with --start"*) ok "reset modifier is restricted to --start" ;;
+      *) bad "unclear reset/status refusal: $out" ;;
+    esac
+  }
 
 # relative profile path refused
 out=$(run_fleet --profile "relative/path.profile" --status 2>&1) && bad "relative profile should fail" || {
@@ -5130,6 +5159,7 @@ echo "$out" | grep -F "fleet up. status: $FLEET_DIR_ABS/$FLEET_BASE --profile" \
 # Dead-lane restart hint also uses DRIVER_SELF (create DEAD status).
 # Leave a lane base without a live pid so --status reports DEAD.
 rm -f "$LOG_DIR/docs.pid"
+printf '%s\n' 'gibson.session-budget.v1' >> "$FLEET_DIR/lane-docs/gibson/journal.md"
 out=$(
   CDPATH='' cd "$FLEET_DIR_ABS" && \
   env PATH="$BIN:$PATH" \
@@ -5166,6 +5196,9 @@ echo "$out" | grep -F "'$FLEET_DIR_ABS/$FLEET_BASE --profile" \
         || bad "dead-lane hint not absolute after BASE-GONE: $out"
     fi
   }
+echo "$out" | grep -F -- '--reset-session-budget --start' >/dev/null \
+  && ok "dead lane with a budget receipt shows the explicit reset recovery command" \
+  || bad "dead budget lane status missing explicit reset recovery hint: $out"
 
 # --- CR: accepted origin forms still normalize (no-op block removed) -------
 echo "origin slug forms still accepted after no-op removal"

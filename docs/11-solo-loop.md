@@ -190,9 +190,9 @@ compare against a stale baseline.
   `GIBSON_MAX_COST_USD`). A flag wins over the env var. `0` on one dimension,
   or `--unbounded` for all three, is an explicit opt-out and is journaled.
   If that line cannot be written, the launch is refused and that launch
-  removes the allowance it created. Removal happens after the engine lock
-  is released. A second launch can resume the file in that gap; see the
-  stated limits below.
+  asks the engine to remove the allowance it created. Under the allowance
+  lock, removal happens only while the exact persisted snapshot still
+  matches; a compatible launch that already resumed and rewrote it wins.
   Invalid values use the same positive-safe-integer rule as `--stale-budget`
   (no leading zeros, no fractions); `0` is the only extra accepted value.
   Checks run only at iteration boundaries. The session budget never kills a
@@ -247,8 +247,8 @@ compare against a stale baseline.
   `iterations_completed` is the count at the stop. `in_flight: 1` means a
   consumed start had not completed, so the count is not a final total. A
   launchd KeepAlive relaunch that observes the latch does not start another
-  runner or append another receipt. Two launches that both enter during the
-  lock race in the stated limits below can still publish two receipts. The
+  runner or append another receipt. Allowance transactions are serialized by
+  a kernel advisory lock whose descriptor is held for the transaction. The
   latch does not unload the job. `loop-fleet.sh --status` prints
   one rollup line per lane. A missing journal is `receipt=none`. A symlink or
   other non-regular journal is `receipt=unreadable`.
@@ -256,16 +256,17 @@ compare against a stale baseline.
   boolean `merged` and an integer `pr`. The #74 append path does not write
   those fields, so a normal receipt says `prs_merged: not measured`.
   `--dry-run` and `--print-prompt` do not create or reset an allowance.
+  `loop-fleet.sh --reset-session-budget --start` explicitly resets persisted
+  budget state for dead lanes that are relaunched. `GIBSON_MAX_ITERATIONS`,
+  `GIBSON_MAX_WALL_MIN`, and `GIBSON_MAX_COST_USD` select limits only for a
+  fresh allowance or after that explicit reset; changing them cannot rewrite
+  an existing allowance.
   The allowance file is writable by the same user and by the runner. It is
   not a security boundary. The smallest wall cap is one minute.
   A recycled pid can look alive until that other process exits, so reset
   can refuse for a pid that is no longer this loop.
-  Remaining stated limits from the 2026-10-16 pre-push read
+  Remaining stated limit from the 2026-10-16 pre-push read
   (The-AIE/the-gibson#499; not closed here; honest gaps, not stronger guards):
-  The allowance lock is a directory plus a pid file. Two launches that
-  overlap after `session-budget.lock` exists and before its pid file is
-  durable can both enter. Allowance updates can overwrite each other, and
-  two stop receipts can be published.
   An opt-out (`--unbounded` or a zero dimension) whose journal line cannot
   be written is refused. Cleanup reacquires the allowance lock and removes
   only the exact snapshot created by that launch. If a compatible launch has

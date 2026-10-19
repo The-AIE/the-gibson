@@ -33,8 +33,8 @@
 #   publishes the stored snapshot once. A latched stop for a different lane
 #   or repo is refused and does not publish. A launchd KeepAlive relaunch
 #   that observes the latch does not start another runner or append another
-#   receipt. Two launches that both enter during the lock race in LIMITS
-#   can still publish two receipts.
+#   receipt. The allowance transaction uses a kernel advisory lock on a
+#   regular lock file, so process exit releases it without stale-pid reclaim.
 #
 # STOPS
 #   Checked only at iteration boundaries (before a runner is started, and after
@@ -84,11 +84,8 @@
 #   a pid that is not alive is an interrupted start. pid_alive treats EPERM as
 #   not alive, the same way lock reclaim does. A recycled pid can look alive
 #   until that other process exits.
-#   The allowance lock is a directory plus a pid file. Two launches that
-#   overlap after the directory exists and before that pid file is durable
-#   can both enter. Counters can overwrite each other, and two receipts can
-#   be published. That race and a crash between the reset line and the delete
-#   are stated limits (The-AIE/the-gibson#499), not closed here.
+#   A crash between the reset line and the delete is a stated limit
+#   (The-AIE/the-gibson#499), not closed here.
 #
 # Caller globals (loop.sh): STATE_DIR JOURNAL EXPECTED_REPO_SLUG MAX iter
 #   plus info(). Limits: SB_LIMIT_ITERATIONS SB_LIMIT_WALL_MIN SB_LIMIT_COST_USD
@@ -184,7 +181,7 @@ sb_engine() {
       SB_EXPECTED_ALLOWANCE_FINGERPRINT="${SB_EXPECTED_ALLOWANCE_FINGERPRINT:-}" \
       SB_LOOP_PID="${SB_LOOP_PID:-$$}" \
       python3 - <<'PY'
-import errno, hashlib, json, os, re, sys, tempfile, time
+import errno, fcntl, hashlib, json, os, re, sys, tempfile, time
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -288,9 +285,10 @@ if not state_dir or state_dir.startswith("/") is False:
     fatal("session budget state dir must be absolute")
 allowance_path = os.path.join(state_dir, "session-budget.json")
 latch_path = os.path.join(state_dir, "session-budget-latch")
-lock_path = os.path.join(state_dir, "session-budget.lock")
+lock_path = os.path.join(state_dir, "session-budget.lock.flock")
 journal_env = os.environ.get("SB_JOURNAL", "")
 journal_path = journal_env if journal_env else os.path.join(state_dir, "journal.md")
+lock_fd = None
 
 def pid_alive(pid):
     if pid <= 0:
@@ -309,58 +307,39 @@ def recorded_loop_pid():
     return int(raw)
 
 def release_lock():
-    pid_path = os.path.join(lock_path, "pid")
-    try:
-        current = int(open(pid_path, "r", encoding="utf-8").read().strip() or "0")
-    except (OSError, ValueError):
-        current = -1
-    if current != os.getpid():
+    global lock_fd
+    if lock_fd is None:
         return
     try:
-        os.remove(pid_path)
-    except OSError:
-        pass
-    try:
-        os.rmdir(lock_path)
-    except OSError:
-        pass
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+        lock_fd = None
 
 def acquire_lock():
+    global lock_fd
     os.makedirs(state_dir, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(lock_path, flags, 0o644)
+    except OSError as exc:
+        fatal("session budget lock failed: " + (exc.strerror or "unknown"))
     deadline = time.time() + 5
     while True:
         try:
-            os.mkdir(lock_path)
-            fd = os.open(os.path.join(lock_path, "pid"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-            os.write(fd, str(os.getpid()).encode("ascii"))
-            os.fsync(fd)
-            os.close(fd)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_fd = fd
             return
-        except FileExistsError:
-            pid_path = os.path.join(lock_path, "pid")
-            stale = True
-            try:
-                raw = open(pid_path, "r", encoding="utf-8").read().strip()
-                stale = not (raw.isdigit() and pid_alive(int(raw)))
-            except OSError:
-                stale = True
-            if stale:
-                try:
-                    os.remove(pid_path)
-                except OSError:
-                    pass
-                try:
-                    os.rmdir(lock_path)
-                except OSError:
-                    pass
-                continue
+        except BlockingIOError:
             if time.time() > deadline:
+                os.close(fd)
                 fatal("session budget lock held for 5s; refusing to start a runner")
             time.sleep(0.05)
         except OSError as exc:
-            if exc.errno == errno.EEXIST:
-                continue
-            fatal("session budget lock failed: " + exc.strerror)
+            os.close(fd)
+            fatal("session budget lock failed: " + (exc.strerror or "unknown"))
 
 def atomic_write(path, data):
     if os.path.islink(path):

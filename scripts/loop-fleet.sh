@@ -156,6 +156,7 @@ FLEET_MAX_LANES=3
 DRIVER_SELF="$SCRIPT_DIR/$(basename "$0")"
 
 CMD="--start"
+RESET_SESSION_BUDGET=0
 
 usage() {
   cat <<'EOF'
@@ -174,12 +175,15 @@ WHY
 
 USAGE
   FLEET_PROFILE=/absolute/path/to/profile loop-fleet.sh [--start|--halt|--status]
-  loop-fleet.sh --profile /absolute/path/to/profile [--start|--halt|--status]
+  loop-fleet.sh --profile /absolute/path/to/profile [--reset-session-budget] [--start|--halt|--status]
   loop-fleet.sh --help
 
 OPTIONS
   --profile PATH   absolute path to a fleet profile (or set FLEET_PROFILE)
   --start          preflight + create/reuse lane bases + launch (default)
+  --reset-session-budget
+                   with --start, reset persisted budget state only for dead
+                   lanes being relaunched; healthy lanes are untouched
   --halt           write gibson/HALT into every lane (graceful stop)
   --status         show profile identity, per-lane pid/hat/health/runner,
                    and one session-budget receipt line per lane
@@ -198,6 +202,9 @@ ENV (optional overrides after profile load)
   RELEASE_CMD      third-identity release (default: claude … bypassPermissions)
   GH_BIN           gh binary (tests stub this)
   LOOP_SH          loop.sh path (tests stub this)
+  GIBSON_MAX_ITERATIONS / GIBSON_MAX_WALL_MIN / GIBSON_MAX_COST_USD
+                   limits for a fresh allowance or an explicit budget reset;
+                   they do not rewrite an existing allowance
 
 PROFILE FORMAT (v1) — declarative data only; NEVER source the file
   See templates/fleet/profile.v1.example and templates/fleet/README.md.
@@ -2818,7 +2825,7 @@ do_status() {
   assert_profile_identity_for_reuse
   printf '%-10s %-12s %-6s %-8s %-9s %-10s %-10s %-12s %s\n' \
     LANE QUEUE PID HAT HEALTH REQUESTED ACTUAL REASON LAST
-  local dead=0 i id queue d pid hat last health
+  local dead=0 dead_budget=0 i id queue d pid hat last health
   local req act rreason rhealth statusf route_field
   i=0
   while [[ $i -lt ${#LANE_IDS[@]} ]]; do
@@ -2844,6 +2851,9 @@ do_status() {
       health="halted"
     else
       health="DEAD"; dead=1
+      if [[ -f "$d/gibson/journal.md" ]] && grep -q 'gibson.session-budget.v1' "$d/gibson/journal.md" 2>/dev/null; then
+        dead_budget=1
+      fi
     fi
 
     # Runner selection status (persisted under log namespace).
@@ -2891,6 +2901,10 @@ do_status() {
     echo
     echo "One or more lanes are down. '$DRIVER_SELF --profile $PROFILE_PATH --start' is idempotent —"
     echo "it recreates a missing base, leaves healthy lanes alone, and relaunches only what died."
+    if [[ $dead_budget -eq 1 ]]; then
+      echo "A dead lane has a session-budget receipt. Reset it explicitly with:"
+      echo "'$DRIVER_SELF --profile $PROFILE_PATH --reset-session-budget --start'"
+    fi
   fi
 }
 
@@ -3113,7 +3127,7 @@ do_start() {
     || die "invalid remote default pin: $pin_line"
   info "lane base pin: origin/$default_name @ $default_sha"
 
-  local i id queue scope intent d issue pid lane_runner
+  local i id queue scope intent d issue pid lane_runner reset_budget
   i=0
   while [[ $i -lt ${#LANE_IDS[@]} ]]; do
     id="${LANE_IDS[$i]}"
@@ -3128,6 +3142,7 @@ do_start() {
       || die "lane $id: internal — no selected runner recorded before launch (refuse to fall back to the global default)"
     issue="${queue%%,*}"
     d=$(lane_dir "$id")
+    reset_budget=0
 
     # Identity before any pid/mutation path that can reuse a lane base.
     if [[ -d "$d" ]]; then
@@ -3161,6 +3176,13 @@ do_start() {
         # Dead (or never-launched-this-session) lane with valid state: preserve
         # issue/pr/hat/round. Clear HALT so a deliberate relaunch can proceed.
         ensure_lane_markers "$id"
+        if [[ "$RESET_SESSION_BUDGET" == "1" ]] && {
+          [[ -e "$d/gibson/session-budget.json" ]] || [[ -L "$d/gibson/session-budget.json" ]] ||
+          [[ -e "$d/gibson/session-budget-latch" ]] || [[ -L "$d/gibson/session-budget-latch" ]];
+        }; then
+          reset_budget=1
+          info "lane $id: explicit session-budget reset requested for relaunch"
+        fi
         if [[ -f "$d/gibson/HALT" ]]; then
           rm -f "$d/gibson/HALT"
           info "lane $id: cleared HALT for relaunch; preserved loop-state"
@@ -3174,6 +3196,10 @@ do_start() {
     fi
 
     info "launch lane $id → issue #$issue"
+    local session_budget_arg=""
+    if [[ "$reset_budget" == "1" ]]; then
+      session_budget_arg="--reset-session-budget"
+    fi
     # Propagate selection join into loop.sh cost-ledger appends (#141).
     # Local ledger only; no secrets, no fabricated tokens/costs.
     local sel_join sel_pool sel_reason sel_req sel_provider sel_ledger
@@ -3205,6 +3231,7 @@ do_start() {
         --repo-slug "$EXPECTED_SLUG" \
         --gibson "$GIBSON" \
         --error-budget "$ERROR_BUDGET" \
+        ${session_budget_arg:+"$session_budget_arg"} \
         >> "$(lane_log "$id")" 2>&1 || info "lane $id: loop exited non-zero (see $(lane_log "$id"))"
       rm -f "$(lane_pidfile "$id")"
     else
@@ -3225,6 +3252,7 @@ do_start() {
         --repo-slug "$EXPECTED_SLUG" \
         --gibson "$GIBSON" \
         --error-budget "$ERROR_BUDGET" \
+        ${session_budget_arg:+"$session_budget_arg"} \
         >> "$(lane_log "$id")" 2>&1 &
       echo $! > "$(lane_pidfile "$id")"
       # Stagger: avoid N runners racing the same git object store on boot.
@@ -3249,6 +3277,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --start)  CMD="--start"; shift ;;
+    --reset-session-budget) RESET_SESSION_BUDGET=1; shift ;;
     --halt)   CMD="--halt"; shift ;;
     --status) CMD="--status"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -3264,6 +3293,10 @@ fi
 [[ -n "$PROFILE_PATH" ]] || usage_err "profile required: set FLEET_PROFILE or pass --profile PATH"
 
 load_profile "$PROFILE_PATH"
+
+if [[ "$RESET_SESSION_BUDGET" == "1" && "$CMD" != "--start" ]]; then
+  usage_err "--reset-session-budget is valid only with --start"
+fi
 
 case "$CMD" in
   --start)  do_start ;;

@@ -1246,6 +1246,14 @@ check_eq "concurrent boundary A stops" "$conc_a_rc" 2
 check_eq "concurrent boundary B stops" "$conc_b_rc" 2
 check_eq "concurrent boundaries publish one receipt" "$(count_in "$JOURNAL" 'gibson.session-budget.v1')" 1
 check_eq "concurrent boundaries publish one receipt id" "$(count_in "$JOURNAL" '"receipt_id":')" 1
+if [[ -f "$REPO/gibson/session-budget.lock.flock" && ! -L "$REPO/gibson/session-budget.lock.flock" ]]; then
+  ok "allowance transactions use a persistent regular flock file"
+else
+  bad "allowance transaction lock is not a regular flock file"
+fi
+[[ ! -d "$REPO/gibson/session-budget.lock" ]] \
+  && ok "allowance lock no longer uses a reclaimable pid directory" \
+  || bad "legacy pid-directory allowance lock was created"
 
 echo "a crash after the latch publishes one receipt on the next launch"
 clear_hooks
