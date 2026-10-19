@@ -260,17 +260,16 @@ compare against a stale baseline.
   not a security boundary. The smallest wall cap is one minute.
   A recycled pid can look alive until that other process exits, so reset
   can refuse for a pid that is no longer this loop.
-  Stated limits from the 2026-10-16 pre-push read (The-AIE/the-gibson#499;
-  not closed here; an honest gap, not a stronger guard):
+  Remaining stated limits from the 2026-10-16 pre-push read
+  (The-AIE/the-gibson#499; not closed here; honest gaps, not stronger guards):
   The allowance lock is a directory plus a pid file. Two launches that
   overlap after `session-budget.lock` exists and before its pid file is
   durable can both enter. Allowance updates can overwrite each other, and
   two stop receipts can be published.
   An opt-out (`--unbounded` or a zero dimension) whose journal line cannot
-  be written removes the allowance after the engine releases the lock. A
-  second launch that resumed that allowance in the gap loses the file.
-  The next boundary then has no allowance, and a later reserve can create
-  a fresh session, so earlier consumed starts are not on the new allowance.
+  be written is refused. Cleanup reacquires the allowance lock and removes
+  only the exact snapshot created by that launch. If a compatible launch has
+  already resumed and rewritten the allowance, cleanup preserves its state.
   `--reset-session-budget` appends the reset line, then deletes. If the
   process is killed or the machine loses power before either delete, the
   next ordinary launch resumes the old allowance even though the journal
