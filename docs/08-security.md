@@ -49,7 +49,7 @@ Dogfooded first on ConferenceOS ([conference-os#1074](https://github.com/mrhinkl
 - **gitleaks** — Layer 1 (already expected in gibson-gate / target security-gate).
 - **OWASP ZAP** — Layer 5 (already in `ci/security.yml`).
 
-Promotion path: start report-only (`continue-on-error: true` / exit-code 0), triage findings, then drop the soft flag so the layer becomes hard-fail.
+Layer 2 Semgrep is hard-fail in both `ci/gibson-gate.yml` (`security-fast`) and `ci/security.yml` (`sast-semgrep`); remaining report-only scanners (Trivy in `ci/security.yml`) start with exit-code 0, then drop the soft flag after triage.
 
 ## Layer notes
 

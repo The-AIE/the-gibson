@@ -1,12 +1,13 @@
-# gibson-template-version: sha256:52862725d1c8b11a693e6a955da7270aefb01fb71c157687134f3c36147c1a70
+# gibson-template-version: sha256:7548d08591dfa57dac66a8f8c653fb9c7584dfc0fa3c28e97e50eab85bf1f159
 # The Gibson — security layers 2, 3 (partial), 4, 5, 8 (+ nightly full DAST)
 # Install as .github/workflows/security.yml in the target repo (docs/13, docs/08).
 # Calibrate: fill <angle> placeholders; preview URL resolution needs Vercel GitHub
 # integration or secrets.VERCEL_TOKEN.
 #
-# 2026-08: Semgrep (Layer 2 SAST) + Trivy (Layer 3 / fs SCA) added as report-only
-# (continue-on-error) so adopters can baseline without breaking green gates.
-# Promote to hard-fail after triage — same path ConferenceOS #1074 is taking.
+# Layer 2 SAST (sast-semgrep) is hard-fail, matching ci/gibson-gate.yml
+# security-fast (docs/08, AGENTS.md Layer 2). Trivy (Layer 3 / fs SCA) stays
+# report-only (exit-code 0) so adopters can baseline without breaking green
+# gates; promote after triage — same path ConferenceOS #1074 is taking.
 # Layers 1 (gitleaks) and remaining Layer 3 (npm audit / OSV) usually live in the
 # target's gibson-gate.yml or security-gate workflow.
 
@@ -27,21 +28,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Layer 2 — SAST (Semgrep). Report-only until target has a clean board.
+  # Layer 2 — SAST (Semgrep). Hard-fail, matching gibson-gate.yml security-fast.
+  # A failed or skipped scan fails the job (no continue-on-error). Job id
+  # sast-semgrep is stable so adopters who required that check keep the name.
   sast-semgrep:
+    name: SAST (Semgrep, hard-fail)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # Report-only until promoted: job-level so the SHA-pinned uses: step can
-    # fail without a comment-only ::warning:: gaming the visible-skip sensor.
-    continue-on-error: true
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 1
-      - name: Semgrep SAST (report)
-        id: semgrep
+      - name: Semgrep SAST
         uses: semgrep/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
         with:
           config: >-
@@ -51,34 +51,6 @@ jobs:
             p/security-audit
             p/secrets
             p/owasp-top-ten
-      # L-056: report-only must stay visible. Trailing if: always() so a
-      # checkout/action failure is not hidden; steps.semgrep.outcome
-      # distinguishes success from failure/skipped. Job stays continue-on-error.
-      - name: Report Semgrep outcome
-        if: always()
-        env:
-          SEMGREP_OUTCOME: ${{ steps.semgrep.outcome }}
-        run: |
-          outcome="${SEMGREP_OUTCOME:-unknown}"
-          case "$outcome" in
-            success)
-              msg="Semgrep SAST is report-only (job continue-on-error); scan completed — findings do not fail the gate until promoted to hard-fail"
-              echo "::notice::${msg}"
-              ;;
-            failure)
-              msg="Semgrep SAST is report-only (job continue-on-error); scan failed — findings do not fail the gate until promoted to hard-fail"
-              echo "::warning::${msg}"
-              ;;
-            skipped)
-              msg="Semgrep SAST is report-only (job continue-on-error); scan skipped (prior step or action did not run)"
-              echo "::warning::${msg}"
-              ;;
-            *)
-              msg="Semgrep SAST is report-only (job continue-on-error); unexpected outcome=${outcome}"
-              echo "::warning::${msg}"
-              ;;
-          esac
-          echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
 
   # Layer 3 (partial) — Trivy filesystem / supply-chain complementary scan.
   trivy-fs:
