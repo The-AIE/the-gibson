@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:52862725d1c8b11a693e6a955da7270aefb01fb71c157687134f3c36147c1a70
+# gibson-template-version: sha256:dabcdcfc38bd45a38a375edcc193f28bc86aa4f1b1e60e71a899bed6765e9fe2
 # The Gibson — security layers 2, 3 (partial), 4, 5, 8 (+ nightly full DAST)
 # Install as .github/workflows/security.yml in the target repo (docs/13, docs/08).
 # Calibrate: fill <angle> placeholders; preview URL resolution needs Vercel GitHub

@@ -519,7 +519,7 @@ export const CANONICAL_FORBIDDEN_REPO_CLAIMS = [
 ];
 
 export const CANONICAL_PRE_CHANGE = {
-  commit: "dcca0c18d39488d3a18842901a3d46efee0e280b",
+  commit: "85f64ee3cd681b628ae1b3f5bd8960cf649d0511",
   impliedMandatoryFiles: [
     "AGENTS.md",
     "docs/02-sdlc-pipeline.md",
@@ -534,7 +534,7 @@ export const CANONICAL_PRE_CHANGE = {
     "docs/23-delivery-control.md",
     "playbooks/delivery-control.md",
   ],
-  impliedMandatoryBytes: 125317,
+  impliedMandatoryBytes: 125292,
   lessonsBytes: 66857,
   agentsBytes: 7404,
 };

@@ -35,7 +35,7 @@
       "source_meta_url": "https://github.com/aaif-goose/goose/releases/tag/v1.45.0",
       "retrieved_utc": "2026-08-03",
       "execution": "offline-validate-only",
-      "notes": "Strategy-pinned in docs/GOOSE-STRATEGY.md and adapters/goose/README.md. Do not change without strategy update. Live goose run remains Mark-gated (#28)."
+      "notes": "Pinned in adapters/goose/README.md. Do not change without strategy update. Live goose run remains Mark-gated (#28)."
     },
     {
       "id": "gitleaks",

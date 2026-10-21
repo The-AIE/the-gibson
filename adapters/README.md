@@ -26,7 +26,7 @@ Adapters carry **zero rules of their own**.
 | Devin (cloud supervisor) | [devin/README.md](devin/README.md) |
 
 **Goose** is the preferred **engine under the hood** for single-builder sessions
-([docs/GOOSE-STRATEGY.md](../docs/GOOSE-STRATEGY.md)). Gibson remains the brand.
+(see the Goose adapter README). Gibson remains the brand.
 
 Devin is the odd one out: it is wired as the persistent **cloud supervisor** that
 reviews finished branches and owns GitHub, not as a local runner

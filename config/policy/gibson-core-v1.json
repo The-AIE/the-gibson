@@ -50,14 +50,14 @@
         "id": "src.sdlc-pipeline",
         "path": "docs/02-sdlc-pipeline.md",
         "digestAlgorithm": "sha256",
-        "digest": "c876a38d895e4408a72cdef6aee4a8e9c2e233d7239df09cde6679c47a4a000a",
+        "digest": "ccfa6072142d72cdbfaba10c11cd74ee78fa325fc6e710a74457050fe324ce72",
         "role": "explanatory-history"
       },
       {
         "id": "src.fork-upstream",
         "path": "docs/18-fork-and-upstream.md",
         "digestAlgorithm": "sha256",
-        "digest": "6003123b35d2cf785509608c98ad06c2be9c307d9219b4cb639d3f6c0ffd3425",
+        "digest": "e4b404746d0b3a0de153f68e215a9128e5ec8f71d202b2dfcdb7f04d043d5c84",
         "role": "explanatory-history"
       }
     ]

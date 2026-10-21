@@ -354,7 +354,7 @@
   "policyManifestMirrorPath": "config/policy/gibson-core-v1.json",
   "ruleMigrationAuditPath": "config/policy/rule-migration-audit.v1.json",
   "preChangeAt": {
-    "commit": "dcca0c18d39488d3a18842901a3d46efee0e280b",
+    "commit": "85f64ee3cd681b628ae1b3f5bd8960cf649d0511",
     "impliedMandatoryFiles": [
       "AGENTS.md",
       "docs/02-sdlc-pipeline.md",
@@ -369,7 +369,7 @@
       "docs/23-delivery-control.md",
       "playbooks/delivery-control.md"
     ],
-    "impliedMandatoryBytes": 125317,
+    "impliedMandatoryBytes": 125292,
     "lessonsBytes": 66857,
     "agentsBytes": 7404,
     "note": "Pre-change implied mandatory chain is the files AGENTS.md treated as binding by unguarded 'see docs/N' pointers, measured at the exact branch point. memory/LESSONS.md is reported separately because Law 1 required a consult; docs/09 already specified tag-filter rather than full-file ingest."

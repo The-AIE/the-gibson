@@ -83,6 +83,4 @@ and is enforced by [`adapters/goose/enforce.sh`](../adapters/goose/enforce.sh) (
 
 - [docs/14-human-gates.md](14-human-gates.md)
 - [docs/08-security.md](08-security.md)
-- [docs/GOOSE-STRATEGY.md](GOOSE-STRATEGY.md)
-- [docs/GOOSE-SPIKE-FINDINGS.md](GOOSE-SPIKE-FINDINGS.md)
 - ProductApp Crew Chief approval gate (downstream product)

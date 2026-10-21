@@ -124,4 +124,4 @@ every fork inherits them.
 5. Adopt your first repo (doc 13). Schedule `upstream-sync.sh` weekly.
 
 ---
-[← 17 · Site checkups and tune-ups](17-deployment-optimization.md) · [Home](../index.md) · [19 · The ProductApp product →](19-product-and-mcp.md)
+[← 17 · Site checkups and tune-ups](17-deployment-optimization.md) · [Home](../index.md)

@@ -169,7 +169,6 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 | [docs/16-nontechnical-operation.md](docs/16-nontechnical-operation.md) | Operator tier: chat-only interface, decision cards, the never-stuck ladder |
 | [docs/17-deployment-optimization.md](docs/17-deployment-optimization.md) | Inspecting & optimizing the deployment target: rendering, caching, cost, field vitals |
 | [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) | Fork it, customize in `local/`, keep receiving upstream updates; contribute back |
-| [docs/19-product-and-mcp.md](docs/19-product-and-mcp.md) | ProductApp Foreman: the productized tier + the guided-setup MCP design |
 | [docs/22-devin-cloud-supervisor.md](docs/22-devin-cloud-supervisor.md) | Local runners build; a Devin cloud session reviews, opens the PR, and merges |
 | [GUIDE.md](GUIDE.md) | **Mark's operator manual** — start work, approve gates, run the loop, tune the harness |
 | [VIBECODING.md](VIBECODING.md) | **The for-dummies guide** — vibecoding for non-technical owners, zero jargon |

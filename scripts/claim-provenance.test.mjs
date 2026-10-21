@@ -54,7 +54,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
-const BRANCH_POINT = "4773eb580c408f15aacd3715c2bdbbc6a348402b";
+const BRANCH_POINT = "a245691849c3135fae31cdc02288a1c4314791d8";
 
 const SHA = {
   base: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
@@ -808,7 +808,7 @@ describe("historical negative controls (captured)", () => {
 - Isolation: dedicated worktree
 - Issue: #271
 - Claim scope: scripts/release-claim.sh scripts/tests/release-claim.test.sh
-- Original branch-point baseline: \`ea1dff3212054443347b36bb586e584422ab32bc\`
+- Original branch-point baseline: \`8ee7a8a0bfbba861609c64ea3f2006dce8f9a753\`
 - Exact head: \`f779354d4a9798cbdab1ef10cfa0ad6fa9f54270\`
 `,
       commits: [

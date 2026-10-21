@@ -5,7 +5,7 @@ nav_exclude: true
 
 # Adapter — Goose (engine under the hood)
 
-Contract: [docs/10](../../docs/10-vendor-adapters.md). Strategy: [docs/GOOSE-STRATEGY.md](../../docs/GOOSE-STRATEGY.md).
+Contract: [docs/10](../../docs/10-vendor-adapters.md).
 License gate: [docs/GOOSE-LICENSE-VERIFICATION.md](../../docs/GOOSE-LICENSE-VERIFICATION.md) (**passed**).
 
 Goose is the **runtime engine**. The product identity remains **The Gibson**. Users

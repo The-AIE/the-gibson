@@ -41,7 +41,7 @@ Each `adapters/<vendor>/` provides, in whatever form the runtime supports:
 | **Grok** | `AGENTS.md` via prompt preamble | `grok -p "<playbook prompt>"`; solo loop (doc 11) | MC MCP calls + curl heartbeat | near-unlimited flat-rate pool — see doc 15 |
 | **Hermes** | persona instruction + `AGENTS.md` | **first-class runner**: cron-driven role dispatch, solo loop driver, and messaging front-end (digests, escalations, "ping Mark") | MC MCP + cron heartbeat | model-agnostic (Nous/OpenRouter/Anthropic/OpenAI); the fleet's voice *and* a worker |
 | **pi** | `AGENTS.md` natively | extension wrapping playbook dispatch | extension → MC ingest | primitives-native; good experimentation host |
-| **Goose** | Recipe `instructions` + `adapters/goose/templates/doctrine-mount.md` | `adapters/goose/session.sh` + `enforce.sh` (claim/gate/release; no goose binary required). Optional: `goose recipe validate`. **No** `goose run` until #28. **Not** a `loop.sh --runner` yet | `permission-map.yaml` Always/Ask/Never (#35) | Engine-under-the-hood ([GOOSE-STRATEGY](GOOSE-STRATEGY.md)); brand stays Gibson. Pin CLI v1.45.0. |
+| **Goose** | Recipe `instructions` + `adapters/goose/templates/doctrine-mount.md` | `adapters/goose/session.sh` + `enforce.sh` (claim/gate/release; no goose binary required). Optional: `goose recipe validate`. **No** `goose run` until #28. **Not** a `loop.sh --runner` yet | `permission-map.yaml` Always/Ask/Never (#35) | Engine-under-the-hood; brand stays Gibson. Pin CLI v1.45.0. |
 
 ## Known asymmetries (managed, not hidden)
 

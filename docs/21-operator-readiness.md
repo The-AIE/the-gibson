@@ -60,4 +60,4 @@ The end goal is met when **all** of the following are true on at least one live 
 This checklist is the north star. Harness PRs should move at least one box. Closing the checklist is how we know the end goal is met.
 
 ---
-[← 19 · Product and MCP](19-product-and-mcp.md) · [Home](../index.md) · [Prompts →](prompts.md) · [VIBECODING](../VIBECODING.md) · [QUICKSTART](../QUICKSTART.md)
+[Home](../index.md) · [Prompts →](prompts.md) · [VIBECODING](../VIBECODING.md) · [QUICKSTART](../QUICKSTART.md)

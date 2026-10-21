@@ -249,8 +249,6 @@ The red-team playbook learns the Pale Fire class.
   defense-in-depth checklist for agent-runtime targets that separates what Gibson
   audits from what the target must build. Fleet-distributed config with no integrity
   check is now a NOT READY blocker on its own.
-- **`playbooks/red-team/targets/target-app.md`** — speaker bios and session
-  titles named as the prompt-injection entry points, not just the stored-XSS ones.
 
 Target repos stop knowing about The Gibson.
 

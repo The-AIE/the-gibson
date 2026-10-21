@@ -7437,7 +7437,7 @@ copy_rc_bundle() { # dest
 
 _271_PATH="$PATH"
 _RC_REPO=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
-_BP="ea1dff3212054443347b36bb586e584422ab32bc"
+_BP="8ee7a8a0bfbba861609c64ea3f2006dce8f9a753"
 
 # --- source-level sensors -------------------------------------------------
 _term_fn=$(extract_fn "$RC" terminal_cleanup_release)

@@ -102,7 +102,7 @@ power.
 ## What's Foreman / CodeWright?
 
 Product names for the Operator-facing layer: CodeWright guides the plan
-(Blueprint); Foreman runs the crew ([docs/19](docs/19-product-and-mcp.md)). Free
+(Blueprint); Foreman runs the crew. Free
 add-on to the AIE subscription (D-005).
 
 ## I don't understand a message the team sent. Is that on me?

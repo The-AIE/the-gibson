@@ -18,7 +18,7 @@ nav_order: 23
 
 **Provenance:** verification for
 [#29](https://github.com/The-AIE/the-gibson/issues/29) (first item in the
-Goose build sequence — see `docs/GOOSE-STRATEGY.md` § Work plan), performed
+Goose build sequence), performed
 2026-08-01 by the cb-finish campaign (driver iteration 45) against the
 upstream repository reachable at `github.com/block/goose` (now serving as
 `aaif-goose/goose` — see governance finding). This is a dated capture of
@@ -104,7 +104,7 @@ the #28 spike.
 
 All four #29 checkboxes are satisfied for the purpose they serve —
 unblocking the #28 spike. The dependency chain #29 → #28 → #33 may
-proceed; nothing found here changes GOOSE-STRATEGY.md's build-on
+proceed; nothing found here changes the build-on
 recommendation or its non-goals (no fleet layer on Goose until the
 re-evaluation trigger fires; Goose credited as engine, never surfaced as
 product identity).

@@ -17,11 +17,11 @@ One-line definitions for Gibson terms. Plain language first; doc links second.
 | **Agent-claimed** | GitHub label meaning an agent holds the issue; part of the claim protocol. [docs/05](05-concurrency.md) |
 | **Ask Contract** | Every human ask states what / does / why / risks, in plain language. [AGENTS.md](../AGENTS.md), [docs/16](16-nontechnical-operation.md) |
 | **Baseline** | Failure counts at branch point; green gate allows no *new* failures beyond this. [docs/06](06-quality-gates.md) |
-| **Blueprint** | Operator-facing plain-language plan (product name); maps to PLAN.md translation. [docs/19](19-product-and-mcp.md) |
+| **Blueprint** | Operator-facing plain-language plan (product name); maps to PLAN.md translation. |
 | **Burn-down** | Issues that clear pre-existing gate debt until hard-fail can cover the whole codebase. [docs/13](13-adoption.md) |
 | **Canonical checkout** | The shared clone of a target repo — **read-only** for edits; mutation in worktrees. [docs/05](05-concurrency.md) |
 | **Claim** | Label + claim-table row asserting scope ownership so agents do not race. [docs/05](05-concurrency.md) |
-| **CodeWright** | Guided intake / planning product surface over the planner role. [docs/19](19-product-and-mcp.md) |
+| **CodeWright** | Guided intake / planning product surface over the planner role. |
 | **Computational sensor** | Deterministic check (typecheck, lint, test, ZAP rule). [docs/01](01-principles.md) |
 | **Contract (sprint)** | Acceptance criteria agreed before build; evaluators grade against it. [docs/04](04-plan-to-issues.md) |
 | **Cross-vendor review** | Reviewer runtime ≠ builder runtime when available. [docs/06](06-quality-gates.md) |
@@ -32,7 +32,7 @@ One-line definitions for Gibson terms. Plain language first; doc links second.
 | **Error budget (loop)** | Max consecutive red gate failures before solo loop stops (default 5). [docs/11](11-solo-loop.md) |
 | **Fail closed** | Missing/broken quality step **blocks** merge instead of skipping. [docs/06](06-quality-gates.md) |
 | **FAN-OUT review** | Parallel per-lens reviewers + adversarial refutation (Tier C). [docs/06](06-quality-gates.md) |
-| **Foreman** | Product orchestrator that runs the crew after Blueprint approval. [docs/19](19-product-and-mcp.md) |
+| **Foreman** | Product orchestrator that runs the crew after Blueprint approval. |
 | **Fresh context** | New model session per role hat; state in files, not chat memory. [docs/11](11-solo-loop.md) |
 | **G / S / F grade** | Grind / Skilled / Frontier task routing for model economics. [docs/15](15-model-economics.md) |
 | **Gate (green)** | generate → typecheck → lint → test → build; zero new failures. [docs/06](06-quality-gates.md) |

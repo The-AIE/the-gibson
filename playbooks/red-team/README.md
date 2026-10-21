@@ -72,7 +72,7 @@ absolute private home paths into the ledger.
 1. **Build it in Gibson.** The protocol lives here, app-agnostic, so any property can be a
    target. This is the source of truth for how we red-team.
 2. **Use it on TargetApp first.** TargetApp is the highest-stakes app in the portfolio
-   — real payments, real attendee PII — so it's target #1. See `targets/target-app.md`.
+   — real payments, real attendee PII — so it's target #1.
 3. **Graduate it downstream into ProductApp.** ProductApp is "the reference implementation
    of the AIOS operating model," and its Crew Chief runs on the **Employee Handbook skill
    pack** (the real IP). This red-team protocol becomes a skill in that pack so the agent crew

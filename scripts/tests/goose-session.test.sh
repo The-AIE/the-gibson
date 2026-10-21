@@ -156,7 +156,7 @@ fi
 echo "pre-commit red gate fail-closed (#35 transcript)"
 # ---------------------------------------------------------------------------
 # Small gibson tree with failing gate.sh
-MINI="$ROOT/mini-gibson"
+MINI="$ROOT/small-gibson"
 mkdir -p "$MINI/scripts" "$MINI/adapters/goose"
 cp "$ENFORCE" "$MINI/adapters/goose/enforce.sh"
 chmod +x "$MINI/adapters/goose/enforce.sh"

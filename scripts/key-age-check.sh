@@ -6,7 +6,7 @@
 # Nonzero only on usage / flag errors. Never prints file contents, never
 # calls GitHub, never rotates a key.
 #
-# Portable on macOS Bash 3.2 and Linux. Docs: docs/runbooks/key-lifecycle.md
+# Portable on macOS Bash 3.2 and Linux.
 set -euo pipefail
 
 usage() {

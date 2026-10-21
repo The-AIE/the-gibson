@@ -90,7 +90,6 @@ Findings, backlogs, retros, and other history remain in `docs/`, `memory/`, and
 | 16 | [nontechnical-op](16-nontechnical-operation.md) | Operator mode |
 | 17 | [deploy-opt](17-deployment-optimization.md) | Inspect/optimize |
 | 18 | [fork-upstream](18-fork-and-upstream.md) | Fork without pain |
-| 19 | [product-mcp](19-product-and-mcp.md) | Foreman / CodeWright |
 | 20 | [multi-model](20-multi-model-orchestration.md) | Coordinator pattern |
 | 21 | [operator-readiness](21-operator-readiness.md) | Definition of done |
 | 22 | [devin-supervisor](22-devin-cloud-supervisor.md) | Cloud reviewer/merger + escalation ladder |
@@ -102,9 +101,7 @@ Findings, backlogs, retros, and other history remain in `docs/`, `memory/`, and
 | 28 | [self-learning-loops](28-self-learning-loops.md) | Artifact ladder, standing loops, spec gate (#210) |
 | 29 | [guarded-state-transitions](29-guarded-state-transitions.md) | Illegal state moves fail loud; frozen decision packages |
 | 30 | [verification-lever](30-verification-lever.md) | `gibson-verify`: receipts at an exact head; verified vs claim-only |
-| — | [goose-strategy](GOOSE-STRATEGY.md) | Build on Goose's engine: engine / brand / interop / funnel |
 | — | [goose-license-verification](GOOSE-LICENSE-VERIFICATION.md) | #29 findings: Apache-2.0 embed / re-brand / pin / AAIF governance |
-| — | [goose-spike-findings](GOOSE-SPIKE-FINDINGS.md) | #28 paperwork pass only — no live runtime spike; scaffold permitted, runtime still gated |
 | — | [autonomy-modes](autonomy-modes.md) | Four modes + per-tool overrides mapped to Goose; no new Gibson session defaults |
 | — | [conventions](CONVENTIONS.md) | Code & doc target contract — live vs planned state, retrofit batches, and owner gates |
 | — | [brand-kit](../assets/images/branding/README.md) | Logo, lockups, tagline, colors and usage rules (2026-09-27) |

@@ -5,7 +5,7 @@ each artifact names its exact command.
 
 ## Merge-audit baseline (H1/H4)
 
-`cos-merge-audit-50-2026-08-15.md` — `node scripts/audit-merges.mjs --repo
+The merge-audit artifact is kept out of this repo — `node scripts/audit-merges.mjs --repo
 example-org/target-app --limit 50` at 2026-08-15. Note: this window already
 includes 2026-08-14/15 merges (the first partially-harnessed days), so it is a
 conservative baseline — the pre-harness era looks *better* in it than it was.
