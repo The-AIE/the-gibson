@@ -1,13 +1,14 @@
-# gibson-template-version: sha256:7548d08591dfa57dac66a8f8c653fb9c7584dfc0fa3c28e97e50eab85bf1f159
+# gibson-template-version: sha256:c7d1d2ac33f9a2ab93e17c8b399eec6ab6504de323a52b21b15138552419dbbe
 # The Gibson — security layers 2, 3 (partial), 4, 5, 8 (+ nightly full DAST)
 # Install as .github/workflows/security.yml in the target repo (docs/13, docs/08).
 # Calibrate: fill <angle> placeholders; preview URL resolution needs Vercel GitHub
 # integration or secrets.VERCEL_TOKEN.
 #
-# Layer 2 SAST (sast-semgrep) is hard-fail, matching ci/gibson-gate.yml
-# security-fast (docs/08, AGENTS.md Layer 2). Trivy (Layer 3 / fs SCA) stays
-# report-only (exit-code 0) so adopters can baseline without breaking green
-# gates; promote after triage — same path ConferenceOS #1074 is taking.
+# Layer 2 SAST (sast-semgrep) is hard-fail: `pipx run semgrep ci` with the
+# rulesets on that step. A nonzero CLI exit fails the job. The command sets
+# no severity threshold. Trivy (Layer 3 / fs SCA) stays report-only
+# (exit-code 0) so adopters can baseline without breaking green gates;
+# promote after triage — same path ConferenceOS #1074 is taking.
 # Layers 1 (gitleaks) and remaining Layer 3 (npm audit / OSV) usually live in the
 # target's gibson-gate.yml or security-gate workflow.
 
@@ -28,11 +29,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Layer 2 — SAST (Semgrep). Hard-fail, matching gibson-gate.yml security-fast.
-  # A failed or skipped scan fails the job (no continue-on-error). Job id
-  # sast-semgrep is stable so adopters who required that check keep the name.
+  # Layer 2 — SAST (Semgrep). Hard-fail: no continue-on-error on this job.
+  # No job-level `name:`. The check context is the job id when `name` is
+  # omitted; a display name would replace it.
   sast-semgrep:
-    name: SAST (Semgrep, hard-fail)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -42,15 +42,7 @@ jobs:
         with:
           fetch-depth: 1
       - name: Semgrep SAST
-        uses: semgrep/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
-        with:
-          config: >-
-            p/typescript
-            p/nextjs
-            p/react
-            p/security-audit
-            p/secrets
-            p/owasp-top-ten
+        run: pipx run semgrep ci --config p/typescript --config p/nextjs --config p/react --config p/security-audit --config p/secrets --config p/owasp-top-ten
 
   # Layer 3 (partial) — Trivy filesystem / supply-chain complementary scan.
   trivy-fs:

@@ -49,7 +49,9 @@ Dogfooded first on ConferenceOS ([conference-os#1074](https://github.com/mrhinkl
 - **gitleaks** — Layer 1 (already expected in gibson-gate / target security-gate).
 - **OWASP ZAP** — Layer 5 (already in `ci/security.yml`).
 
-Layer 2 Semgrep is hard-fail in both `ci/gibson-gate.yml` (`security-fast`) and `ci/security.yml` (`sast-semgrep`); remaining report-only scanners (Trivy in `ci/security.yml`) start with exit-code 0, then drop the soft flag after triage.
+In `ci/security.yml`, job `sast-semgrep` is hard-fail: `pipx run semgrep ci` with `--config` for `p/typescript`, `p/nextjs`, `p/react`, `p/security-audit`, `p/secrets`, and `p/owasp-top-ten`. The job has no `continue-on-error`. The command sets no `--severity` and no other threshold, so this workflow does not enforce a high-and-above-only cutoff; a nonzero CLI exit fails the job. `ci/gibson-gate.yml` job `security-fast` uses the same `pipx run semgrep ci` mechanism with `p/owasp-top-ten` and `p/secrets` only. Trivy in `ci/security.yml` stays report-only (`exit-code: 0`) until triage.
+
+The layer table above still lists SAST as **hard** on high+. That cell is the written layer policy. The shipped `sast-semgrep` command does not set it.
 
 ## Layer notes
 
@@ -57,9 +59,11 @@ Layer 2 Semgrep is hard-fail in both `ci/gibson-gate.yml` (`security-fast`) and 
 and a leak = immediate human gate (rotation requires a human).
 
 **2 — SAST.** Semgrep is the workhorse (fast, per-PR, custom rules); CodeQL where
-the repo's language/size justifies it. **Custom rules are ratchet output**: when a
-security lesson lands in `memory/LESSONS.md`, the historian's fix is often a Semgrep
-rule — the agent that hit the bug writes the rule that makes it impossible.
+the repo's language/size justifies it. The shipped `sast-semgrep` job runs
+`pipx run semgrep ci` with the six `--config` packs named above and sets no
+severity flag. **Custom rules are ratchet output**: when a security lesson lands
+in `memory/LESSONS.md`, the historian's fix is often a Semgrep rule — the agent
+that hit the bug writes the rule that makes it impossible.
 
 **3 — Supply chain.** New-dependency PRs get the elevated treatment automatically
 (hot-file rule): provenance check (age, maintenance, install-script flags), and the

@@ -10,7 +10,7 @@ the code.
 | File | Job | Spec |
 |---|---|---|
 | [`gibson-gate.yml`](gibson-gate.yml) | Green gate + security layers 1–3 + **protected test-integrity** (four isolated jobs; unique required check `test-integrity`) | [docs/06](../docs/06-quality-gates.md), [docs/08](../docs/08-security.md), issue #70 |
-| [`security.yml`](security.yml) | Layer 2 SAST (Semgrep, **hard-fail**, same verdict as gibson-gate `security-fast`); Layer 3 partial (Trivy, report-only until triage); Layers 4 (authz matrix), 5 (ZAP baseline vs. preview), 8 (posture); nightly full DAST vs. **staging** | docs/08 |
+| [`security.yml`](security.yml) | Layer 2 SAST (Semgrep hard-fail: `pipx run semgrep ci` with `p/typescript`, `p/nextjs`, `p/react`, `p/security-audit`, `p/secrets`, `p/owasp-top-ten`; no `--severity`); Layer 3 partial (Trivy, report-only until triage); Layers 4 (authz matrix), 5 (ZAP baseline vs. preview), 8 (posture); nightly full DAST vs. **staging** | docs/08 |
 | [`ux-eval.yml`](ux-eval.yml) | Playwright contract flows + axe + Lighthouse against PR preview URL | [docs/07](../docs/07-uiux-evaluation.md) |
 | [`schema-guard.yml`](schema-guard.yml) | Schema diff without migration file fails; bans destructive migrate flags. The `forbid-destructive-flags` job creates a **new required-check context** — add it to branch protection or a red run will not block merges. | [docs/12](../docs/12-vercel.md), L-002 |
 | [`retro.yml`](retro.yml) | Weekly exhaust → artifact (+ optional issue) for historian | [docs/09](../docs/09-memory-and-self-improvement.md) |
