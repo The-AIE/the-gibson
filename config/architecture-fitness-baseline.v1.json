@@ -16,8 +16,8 @@
     "ref": "01bafdeecadb28ecee7415cd1b2ef57c58b7c4bc"
   },
   "collector": {
-    "version": "1.0.0",
-    "digest": "98536807652c3acaedd68dca9e80c178cefb39b1e64357b539db8f7039d28ee1",
+    "version": "1.0.1",
+    "digest": "2cc171d01c20a3d7b0c7c1f8ab1ceead1185fd66f332051280ed98ca608775e3",
     "note": "Collector did not necessarily exist at source.commit; digest is of the collector that produced this baseline artifact."
   },
   "classification": {

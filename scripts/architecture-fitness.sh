@@ -10,7 +10,7 @@
 # Portable on macOS Bash 3.2 and Linux. Requires node and git on PATH.
 set -euo pipefail
 
-COLLECTOR_VERSION="1.0.0"
+COLLECTOR_VERSION="1.0.1"
 SCHEMA="gibson.architecture-fitness-report.v1"
 DEFAULT_BASELINE="config/architecture-fitness-baseline.v1.json"
 
@@ -200,6 +200,11 @@ const COLLECTOR_VERSION = process.env.AF_COLLECTOR_VERSION;
 const COLLECTOR_DIGEST = process.env.AF_COLLECTOR_DIGEST;
 const DEFAULT_BASELINE = process.env.AF_DEFAULT_BASELINE;
 
+// Exact full-line marker. The line in this script is not itself the marker.
+const SELF_FIXTURE_MARKER = "# architecture-fitness-self-fixture:v1";
+const LEGACY_SELF_FIXTURE_COMMIT = "01bafdeecadb28ecee7415cd1b2ef57c58b7c4bc";
+const LEGACY_SELF_FIXTURE_TREE = "41fcceeb0d8e8d6d46d426e595e1190cad8d2599";
+
 function fail(msg, code) {
   process.stderr.write("architecture-fitness.sh: " + msg + "\n");
   process.exit(code == null ? 3 : code);
@@ -374,10 +379,15 @@ if (rawPaths.length === 0) fail("incomplete evidence: source tree has zero track
 
 const paths = [];
 for (const p of rawPaths) {
-  const rel = p.replace(/\\/g, "/").replace(/^\.\//, "");
-  if (rel.includes("\0") || rel.split("/").some((c) => c === ".." || c === "")) {
+  // Refuse before any normalization or lookup. Rewriting "\\" to "/" substitutes
+  // a sibling such as a/b for a literal a\b entry (L-058).
+  if (p.includes("\\")) {
+    fail("unsafe path in tree: literal backslash rejected");
+  }
+  if (p.includes("\0") || p.split("/").some((c) => c === ".." || c === "")) {
     fail("unsafe path in tree: rejected");
   }
+  const rel = p.replace(/^\.\//, "");
   paths.push(rel);
 }
 
@@ -391,6 +401,38 @@ if (sourceMode === "worktree") {
   }
 } else {
   files = loadCommitFiles(sourceCommit, paths);
+}
+
+// Exactly one self-fixture marker, except the frozen legacy source pair which
+// must contain zero. Both object ids are required; a descendant that deletes
+// the collector is not this pair.
+function isLegacySelfFixturePair(commit, tree) {
+  return commit === LEGACY_SELF_FIXTURE_COMMIT && tree === LEGACY_SELF_FIXTURE_TREE;
+}
+function isSelfFixtureFile(file) {
+  if (!file || file.binary) return false;
+  const lines = file.text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i] === SELF_FIXTURE_MARKER) return true;
+  }
+  return false;
+}
+let selfFixtureMarkerCount = 0;
+for (const f of files) {
+  if (f.binary) continue;
+  const markerLines = f.text.split("\n");
+  for (let i = 0; i < markerLines.length; i++) {
+    if (markerLines[i] === SELF_FIXTURE_MARKER) selfFixtureMarkerCount += 1;
+  }
+}
+if (isLegacySelfFixturePair(sourceCommit, sourceTree)) {
+  if (selfFixtureMarkerCount !== 0) {
+    fail("legacy architecture-fitness source must contain zero self-fixture markers");
+  }
+} else if (selfFixtureMarkerCount === 0) {
+  fail("selected source must contain exactly one architecture-fitness self-fixture marker");
+} else if (selfFixtureMarkerCount !== 1) {
+  fail("duplicate architecture-fitness self-fixture markers");
 }
 
 // ---------------------------------------------------------------------------
@@ -915,7 +957,7 @@ for (const cat of MUTATION_CATEGORIES) {
     if (
       f.binary ||
       !/(?:^|\/)tests\/.*(?:\.test\.|\.spec\.|_test\.)/.test(f.path) ||
-      f.path === "scripts/tests/architecture-fitness.test.sh"
+      isSelfFixtureFile(f)
     ) continue;
     const lines = f.text.split("\n");
     for (let i = 0; i < lines.length; i++) {
@@ -1469,7 +1511,7 @@ const json = stableStringify(report);
 if (json.includes(REPO)) {
   fail("internal error: report contains absolute repo path");
 }
-if (/\/Users\/|\/home\/|\/private\/var\/folders\/|\/tmp\/gibson-/i.test(json)) {
+if (/\/Users\/|\/home\/|\/private\/var\/folders\/|\/var\/folders\/|\/tmp\//i.test(json)) {
   fail("internal error: report appears to contain absolute user/temp paths");
 }
 
@@ -1534,12 +1576,17 @@ if (EMIT_BASELINE) {
   try {
     parentStat = fs.lstatSync(requestedParent);
   } catch (e) {
-    fail("unsafe baseline output path: parent directory does not exist");
+    fail("unsafe baseline output path: cannot stat parent");
   }
   if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) {
     fail("unsafe baseline output path: real parent directory required");
   }
-  const realParent = fs.realpathSync(requestedParent);
+  let realParent;
+  try {
+    realParent = fs.realpathSync(requestedParent);
+  } catch (e) {
+    fail("unsafe baseline output path: cannot resolve parent");
+  }
   const outPath = path.join(realParent, baseName);
   try {
     const st = fs.lstatSync(outPath);
@@ -1547,29 +1594,99 @@ if (EMIT_BASELINE) {
       fail("unsafe baseline output path: regular file or missing target required");
     }
   } catch (e) {
-    if (e && e.code !== "ENOENT") throw e;
+    if (!(e && e.code === "ENOENT")) {
+      fail("unsafe baseline output path: cannot stat output");
+    }
   }
+
+  // Documented emit failures (one stderr line, no path, exit 3):
+  //   unsafe baseline output path: cannot stat parent
+  //   unsafe baseline output path: cannot resolve parent
+  //   unsafe baseline output path: cannot stat output
+  //   cannot create baseline temporary directory
+  //   cannot write baseline temporary file
+  //   cannot rename baseline into place
+  //   cannot remove baseline temporary directory
+  // Cleanup runs before fail(). fail() calls process.exit(), which does not
+  // run a finally block, so removal cannot live in finally.
   let tempDir = null;
   let tmp = null;
+  let staged = null;
+
+  function unlinkQuiet(target) {
+    try {
+      fs.unlinkSync(target);
+      return false;
+    } catch (e) {
+      return !(e && e.code === "ENOENT");
+    }
+  }
+  function removeBaselineTempDir(tempDir) {
+    fs.rmdirSync(tempDir);
+  }
+  function cleanupBaselineTempBeforeFail() {
+    let failed = false;
+    if (tmp !== null) {
+      if (unlinkQuiet(tmp)) failed = true;
+      tmp = null;
+    }
+    if (staged !== null) {
+      if (unlinkQuiet(staged)) failed = true;
+      staged = null;
+    }
+    if (tempDir !== null) {
+      try {
+        removeBaselineTempDir(tempDir);
+        tempDir = null;
+      } catch (e) {
+        failed = true;
+      }
+    }
+    return failed;
+  }
+
   try {
     tempDir = fs.mkdtempSync(path.join(realParent, ".architecture-fitness-"));
-    tmp = path.join(tempDir, "baseline.json");
+  } catch (e) {
+    fail("cannot create baseline temporary directory");
+  }
+  tmp = path.join(tempDir, "baseline.json");
+  try {
     fs.writeFileSync(tmp, stableStringify(baselineDoc), {
       encoding: "utf8",
       mode: 0o644,
       flag: "wx",
     });
-    fs.renameSync(tmp, outPath);
+  } catch (e) {
+    if (cleanupBaselineTempBeforeFail()) fail("cannot remove baseline temporary directory");
+    fail("cannot write baseline temporary file");
+  }
+  staged = path.join(realParent, ".architecture-fitness-" + path.basename(tempDir) + ".staged");
+  try {
+    fs.renameSync(tmp, staged);
     tmp = null;
   } catch (e) {
-    fail("cannot safely write baseline: " + e.message.replace(REPO, "<repo>"));
-  } finally {
-    if (tmp !== null) {
-      try { fs.unlinkSync(tmp); } catch (e) { /* best effort */ }
+    if (cleanupBaselineTempBeforeFail()) fail("cannot remove baseline temporary directory");
+    fail("cannot stage baseline temporary file");
+  }
+  try {
+    removeBaselineTempDir(tempDir);
+    tempDir = null;
+  } catch (e) {
+    if (staged !== null && unlinkQuiet(staged)) {
+      staged = null;
+      fail("cannot remove baseline temporary directory");
     }
-    if (tempDir !== null) {
-      try { fs.rmdirSync(tempDir); } catch (e) { /* best effort */ }
-    }
+    staged = null;
+    fail("cannot remove baseline temporary directory");
+  }
+  try {
+    fs.renameSync(staged, outPath);
+    staged = null;
+  } catch (e) {
+    if (staged !== null) unlinkQuiet(staged);
+    staged = null;
+    fail("cannot rename baseline into place");
   }
 }
 

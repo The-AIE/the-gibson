@@ -138,10 +138,40 @@ and stable matching locations:
 - **missing** means no matching test evidence was found.
 
 Documentation, production diagnostics, and the collector's own pattern text do
-not count as receipt evidence. The collector sensor's own fixture tags are also
-excluded, so adding this dashboard cannot improve its coverage score. Even an
-explicit assertion only records the intended coverage category: **test quantity
-is insufficient proof of correctness.**
+not count as receipt evidence. Fixture text is excluded only when its file
+contains the exact self-fixture marker, so renaming that file cannot make the
+collector's own tags improve the coverage score. An unmarked executable
+assertion still counts. Even an explicit assertion only records the intended
+coverage category: **test quantity is insufficient proof of correctness.**
+
+### Self-fixture marker, path refusal, and emit failures (#198)
+
+Exclusion is an exact full-line marker, not a filename. The marker text is the full line `# architecture-fitness-self-fixture:v1` (this sentence is not that line). Every selected commit and every worktree scan must contain that line exactly once. Two or more copies fail closed with `duplicate architecture-fitness self-fixture markers`. Zero copies fail closed with `selected source must contain exactly one architecture-fitness self-fixture marker`.
+
+The one exception is the frozen legacy source pair, and both object ids are required:
+
+- commit `01bafdeecadb28ecee7415cd1b2ef57c58b7c4bc`
+- tree `41fcceeb0d8e8d6d46d426e595e1190cad8d2599`
+
+That pair must contain zero markers. A different commit, a different tree, or a descendant that deletes the collector does not enter the exception.
+
+A literal backslash in a raw Git path is rejected before any normalization or lookup, in both exact-commit and worktree modes (`unsafe path in tree: literal backslash rejected`). The collector does not rewrite a backslash to a slash. A tree that contains `..` or an empty path component is rejected (`unsafe path in tree: rejected`). The `..` case is a hand-built Git tree, because a normal checkout cannot store that name.
+
+Baseline emission failures each exit 3, write one stderr line, write no stdout, and do not include a stack, a repository path, an output path, or a temporary path. An existing output target is left unchanged. After the temporary directory is created, the temporary file and directory are removed before `fail()`. Removal does not live in `finally`: `fail()` calls `process.exit()`, and Node skips `finally` on that call. The seven lines, prefixed in stderr by `architecture-fitness.sh: `, are:
+
+1. `unsafe baseline output path: cannot stat parent`
+2. `unsafe baseline output path: cannot resolve parent`
+3. `unsafe baseline output path: cannot stat output`
+4. `cannot create baseline temporary directory`
+5. `cannot write baseline temporary file`
+6. `cannot rename baseline into place`
+7. `cannot remove baseline temporary directory`
+
+A report whose text contains `/tmp/`, `/var/folders/`, `/private/var/folders/`, `/Users/`, or `/home/` fails closed. The check is the report text itself.
+
+### Baseline update rule
+
+Collector version for this hardening is exactly `1.0.1`. Regenerating `config/architecture-fitness-baseline.v1.json` uses the current collector against the pinned source commit above. The only fields that may change are `collector.version` and `collector.digest`. The digest is 64 lowercase hex and must differ from the previous digest when the collector bytes change. Source commit, source tree, schema, disposition, notes, classification, metrics, safety drivers, dependencies, policy identifiers, and mutation receipts stay as they were. Roll back by reverting the collector and the baseline together.
 
 ### Committed baseline
 
@@ -227,7 +257,14 @@ separation, dynamic dependency unknowns, duplicate IDs, missing mutation
 categories, heuristic-only mutation uncertainty, symlink-safe baseline I/O,
 large piped/redirected report completeness, deep baseline contradictions, a
 neutralized dynamic-detector mutant, report-only regression exit 0, and
-absolute-path leakage.
+absolute-path leakage. Issue #198 adds the self-fixture marker (a renamed
+file, duplicates, a missing marker, the legacy pair, a same-tree other commit,
+and a descendant that deletes the collector), literal-backslash refusal with a
+counted mutant, a hand-built `..` tree with a counted mutant, an absolute-path
+canary for `/tmp`, `/var/folders`, `/private/var/folders`, `/Users`, and
+`/home` with a counted mutant, and injected parent lstat, parent realpath,
+output-leaf lstat, mkdtemp, temporary-write, atomic-rename, and cleanup
+failures, plus a natural non-ENOENT leaf.
 
 ## Non-goals (this slice)
 
@@ -236,3 +273,8 @@ absolute-path leakage.
 - No model/harness benchmark runner or provider selection.
 - No changes to G1–G16, risk tiers, review/merge/deploy authority.
 - Completing #184 does **not** close #159.
+- Replacing the parent directory after a successful containment preflight is
+  not a general hostile-host or TOCTOU defense. The named injected parent and
+  leaf failures still fail closed.
+- No metric recalibration. A baseline regeneration for a collector change may
+  update only `collector.version` and `collector.digest`.

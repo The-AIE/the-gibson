@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# architecture-fitness-self-fixture:v1
 # architecture-fitness.test.sh — sensors for scripts/architecture-fitness.sh (#184)
 #
 # Temporary fixture repositories only. Deterministic. No network.
@@ -192,6 +193,9 @@ EOF
   cat > "$repo/README.md" <<'EOF'
 # Fixture
 EOF
+
+  # Exactly one self-fixture marker. Kept out of demo.test.sh so its assertions count.
+  printf '%s\n' '# architecture-fitness-self-fixture:v1' > "$repo/scripts/tests/architecture-fitness.test.sh"
 
   # config / workflows
   cat > "$repo/config/app.json" <<'EOF'
@@ -475,7 +479,9 @@ cat > "$FIX/scripts/tests/demo.test.sh" <<'EOF'
 echo "ordinary test"
 EOF
 # The collector's own fixture vocabulary must not improve its score.
-cat > "$FIX/scripts/tests/architecture-fitness.test.sh" <<'EOF'
+{
+  printf '%s\n' '# architecture-fitness-self-fixture:v1'
+  cat <<'EOF'
 #!/usr/bin/env bash
 # mutation-category:review_bypass
 # mutation-category:stale_head_acceptance
@@ -485,6 +491,7 @@ cat > "$FIX/scripts/tests/architecture-fitness.test.sh" <<'EOF'
 # mutation-category:false_delivery_success
 # mutation-category:incomplete_cleanup
 EOF
+} > "$FIX/scripts/tests/architecture-fitness.test.sh"
 # production comments/paths that would otherwise keep categories present
 cat > "$FIX/scripts/release-preflight.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -691,14 +698,14 @@ echo "=== no absolute temp/user paths in output ==="
 run_collector "$FIX" --ref "$MAIN_SHA" --no-baseline --format json
 printf '%s' "$OUT" > "$ROOT/paths.json"
 # Fail if common absolute path shapes appear
-if printf '%s' "$OUT" | grep -E '/Users/|/home/|/private/var/folders/|/tmp/gibson-|"'"$ROOT"'"' >/dev/null; then
+if printf '%s' "$OUT" | grep -E '/Users/|/home/|/private/var/folders/|/var/folders/|/tmp/|"'"$ROOT"'"' >/dev/null; then
   bad "absolute temp/user path leaked into output"
 else
   ok "no absolute temp/user paths in JSON"
 fi
 # human mode also clean
 run_collector "$FIX" --ref "$MAIN_SHA" --no-baseline --format human
-if printf '%s' "$OUT" | grep -E '/Users/|/home/|/private/var/folders/|/tmp/gibson-' >/dev/null; then
+if printf '%s' "$OUT" | grep -E '/Users/|/home/|/private/var/folders/|/var/folders/|/tmp/' >/dev/null; then
   bad "absolute path leaked into human output"
 else
   ok "no absolute paths in human output"
@@ -815,6 +822,423 @@ echo "=== human mode + JSON schema disposition explicit ==="
 run_collector "$FIX" --ref "$MAIN_SHA" --no-baseline --format human
 contains "human disposition report-only" "$OUT" "disposition: report-only"
 contains "human #164 note" "$OUT" "#164"
+
+# ---------------------------------------------------------------------------
+# #198 — marker exclusion, path refusal, sanitized emit failures, counted mutants
+# ---------------------------------------------------------------------------
+copy_collector_once() {
+  local dest="$1" old="$2" new="$3"
+  node - "$COLLECTOR" "$dest" "$old" "$new" <<'NODE'
+const fs = require("fs");
+const [src, dest, oldS, newS] = process.argv.slice(2);
+const text = fs.readFileSync(src, "utf8");
+let n = 0;
+let i = 0;
+while ((i = text.indexOf(oldS, i)) !== -1) { n += 1; i += oldS.length; }
+if (n !== 1) {
+  process.stderr.write("replacement matched " + n + "\n");
+  process.exit(2);
+}
+fs.writeFileSync(dest, text.replace(oldS, newS));
+fs.chmodSync(dest, 0o755);
+NODE
+}
+
+run_bin() {
+  local bin="$1" repo="$2"
+  shift 2
+  OUT=$("$bin" --repo "$repo" "$@" 2>"$ROOT/err.txt")
+  RC=$?
+}
+
+assert_sanitized() {
+  local label="$1" line="$2" target="$3" parent="$4" expect_clean="$5"
+  check "$label exit 3" "$RC" "3"
+  local err staged_left left
+  err=$(cat "$ROOT/err.txt")
+  check "$label stderr" "$err" "architecture-fitness.sh: $line"
+  check "$label stdout empty" "$OUT" ""
+  if printf '%s' "$err" | grep -E '/|Error:|^[[:space:]]*at ' >/dev/null; then
+    bad "$label stderr leaked a path or stack"
+  else
+    ok "$label stderr has no path or stack"
+  fi
+  check "$label target unchanged" "$(cat "$target")" "SENTINEL-OUTPUT"
+  staged_left=$(find "$parent" -name '*.staged' -print)
+  check "$label staged file removed" "$staged_left" ""
+  if [[ "$expect_clean" == "clean" ]]; then
+    left=$(find "$parent" -name '.architecture-fitness-*' -print)
+    check "$label temporary files removed" "$left" ""
+  else
+    left=$(find "$parent" -name '.architecture-fitness-*' -print)
+    if [[ -n "$left" ]]; then
+      ok "$label leaves the temporary directory when removal fails"
+    else
+      bad "$label removed the temporary directory despite a cleanup failure"
+    fi
+  fi
+}
+
+prepare_emit() {
+  local parent="$1"
+  rm -rf "$parent"
+  mkdir -p "$parent"
+  printf '%s\n' 'SENTINEL-OUTPUT' > "$parent/baseline.json"
+}
+
+inject_throw='(function () { const err = new Error("injected"); err.code = "EACCES"; throw err; })()'
+
+echo
+echo "=== #198 self-fixture marker ==="
+MARK="$ROOT/marker-repo"
+rm -rf "$MARK"
+mkdir -p "$MARK/scripts/tests"
+$GIT init -q "$MARK"
+git -C "$MARK" symbolic-ref HEAD refs/heads/main
+printf '%s\n' '#!/usr/bin/env bash' 'if true; then exit 0; fi' > "$MARK/scripts/claim.sh"
+{
+  printf '%s\n' '# architecture-fitness-self-fixture:v1'
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'ok "mutation-category:review_bypass receipt"'
+} > "$MARK/scripts/tests/renamed-self.test.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'ok "mutation-category:halt_bypass receipt"' > "$MARK/scripts/tests/live.test.sh"
+$GIT -C "$MARK" add -A
+$GIT -C "$MARK" commit -q -m "renamed self fixture"
+MARK_SHA=$(git -C "$MARK" rev-parse HEAD)
+run_collector "$MARK" --ref "$MARK_SHA" --no-baseline --format json
+check "renamed marked fixture scans" "$RC" "0"
+printf '%s' "$OUT" > "$ROOT/renamed.json"
+node - "$ROOT/renamed.json" <<'NODE' && ok "renamed marker excludes; unmarked assertion counts" || bad "self-fixture exclusion"
+const r = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8"));
+const review = r.mutation_receipts.categories.find((c) => c.id === "review_bypass");
+const halt = r.mutation_receipts.categories.find((c) => c.id === "halt_bypass");
+if (!review || review.status !== "missing") throw new Error("review " + JSON.stringify(review));
+if (!halt || halt.status !== "present") throw new Error("halt " + JSON.stringify(halt));
+if (!halt.locations.some((l) => l.indexOf("scripts/tests/live.test.sh:") === 0)) {
+  throw new Error("halt locations " + JSON.stringify(halt.locations));
+}
+if (review.locations.some((l) => l.indexOf("renamed-self") !== -1)) throw new Error("renamed counted");
+NODE
+
+if copy_collector_once "$ROOT/predicate-mutant.sh" 'isSelfFixtureFile(f)' 'false'; then
+  ok "predicate replacement matched once"
+else
+  bad "predicate replacement was not unique"
+fi
+run_bin "$ROOT/predicate-mutant.sh" "$MARK" --ref "$MARK_SHA" --no-baseline --format json
+printf '%s' "$OUT" > "$ROOT/predicate-mutant.json"
+if [[ "$RC" -eq 0 ]] && node - "$ROOT/predicate-mutant.json" <<'NODE'
+const r = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8"));
+const review = r.mutation_receipts.categories.find((c) => c.id === "review_bypass");
+if (!review || review.status !== "present") process.exit(1);
+if (!review.locations.some((l) => l.indexOf("scripts/tests/renamed-self.test.sh:") === 0)) process.exit(1);
+NODE
+then
+  ok "deleting the self-fixture predicate is killed"
+else
+  bad "self-fixture predicate mutant survived"
+fi
+
+DUP="$ROOT/dup-repo"
+rm -rf "$DUP"
+mkdir -p "$DUP/scripts/tests"
+$GIT init -q "$DUP"
+git -C "$DUP" symbolic-ref HEAD refs/heads/main
+printf '%s\n' 'plain' > "$DUP/README.md"
+printf '%s\n' '# architecture-fitness-self-fixture:v1' > "$DUP/scripts/tests/a.test.sh"
+printf '%s\n' '# architecture-fitness-self-fixture:v1' > "$DUP/scripts/tests/b.test.sh"
+$GIT -C "$DUP" add -A
+$GIT -C "$DUP" commit -q -m "duplicate markers"
+DUP_SHA=$(git -C "$DUP" rev-parse HEAD)
+run_collector "$DUP" --ref "$DUP_SHA" --no-baseline --format json
+check "duplicate markers exit 3" "$RC" "3"
+contains "duplicate marker message" "$(cat "$ROOT/err.txt")" "duplicate architecture-fitness self-fixture markers"
+check "duplicate markers write no stdout" "$OUT" ""
+
+ZERO="$ROOT/zero-repo"
+rm -rf "$ZERO"
+mkdir -p "$ZERO"
+$GIT init -q "$ZERO"
+git -C "$ZERO" symbolic-ref HEAD refs/heads/main
+printf '%s\n' 'plain' > "$ZERO/README.md"
+$GIT -C "$ZERO" add -A
+$GIT -C "$ZERO" commit -q -m "no marker"
+ZERO_SHA=$(git -C "$ZERO" rev-parse HEAD)
+run_collector "$ZERO" --ref "$ZERO_SHA" --no-baseline --format json
+check "missing marker exits 3" "$RC" "3"
+contains "missing marker message" "$(cat "$ROOT/err.txt")" "exactly one architecture-fitness self-fixture marker"
+
+run_collector "$ZERO" --worktree --no-baseline --format json
+check "worktree missing marker exits 3" "$RC" "3"
+contains "worktree missing marker message" "$(cat "$ROOT/err.txt")" "exactly one architecture-fitness self-fixture marker"
+
+echo
+echo "=== #198 legacy self-fixture pair is exact ==="
+REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
+common=$(git -C "$REPO_ROOT" rev-parse --git-common-dir)
+case "$common" in
+  /*) ;;
+  *) common="$REPO_ROOT/$common" ;;
+esac
+VIEW="$ROOT/legacy-view"
+rm -rf "$VIEW"
+mkdir -p "$VIEW"
+$GIT init -q "$VIEW"
+mkdir -p "$VIEW/.git/objects/info"
+printf '%s\n' "$common/objects" > "$VIEW/.git/objects/info/alternates"
+LEGACY_COMMIT=01bafdeecadb28ecee7415cd1b2ef57c58b7c4bc
+LEGACY_TREE=41fcceeb0d8e8d6d46d426e595e1190cad8d2599
+run_collector "$VIEW" --ref "$LEGACY_COMMIT" --no-baseline --format json
+check "legacy pair with zero markers exits 0" "$RC" "0"
+SAME_COMMIT=$($GIT -C "$VIEW" commit-tree "$LEGACY_TREE" -m "same tree different commit")
+run_collector "$VIEW" --ref "$SAME_COMMIT" --no-baseline --format json
+check "same tree different commit exits 3" "$RC" "3"
+contains "same tree is not the legacy pair" "$(cat "$ROOT/err.txt")" "exactly one architecture-fitness self-fixture marker"
+if copy_collector_once "$ROOT/tree-only-mutant.sh" \
+  'return commit === LEGACY_SELF_FIXTURE_COMMIT && tree === LEGACY_SELF_FIXTURE_TREE;' \
+  'return tree === LEGACY_SELF_FIXTURE_TREE;'; then
+  ok "legacy-pair replacement matched once"
+else
+  bad "legacy-pair replacement was not unique"
+fi
+run_bin "$ROOT/tree-only-mutant.sh" "$VIEW" --ref "$SAME_COMMIT" --no-baseline --format json
+check "tree-only exception mutant is killed" "$RC" "0"
+
+DESC="$ROOT/desc-view"
+rm -rf "$DESC"
+mkdir -p "$DESC"
+$GIT init -q "$DESC"
+mkdir -p "$DESC/.git/objects/info"
+printf '%s\n' "$common/objects" > "$DESC/.git/objects/info/alternates"
+$GIT -C "$DESC" checkout -q --detach 96ac60c89e1c1ae2a90f460dbfadaf54724b0d3f
+$GIT -C "$DESC" rm -q -- scripts/architecture-fitness.sh
+$GIT -C "$DESC" commit -q -m "delete architecture-fitness collector"
+DESC_SHA=$(git -C "$DESC" rev-parse HEAD)
+run_collector "$DESC" --ref "$DESC_SHA" --no-baseline --format json
+check "descendant that deletes the collector exits 3" "$RC" "3"
+contains "descendant is not the legacy pair" "$(cat "$ROOT/err.txt")" "exactly one architecture-fitness self-fixture marker"
+lacks "descendant stderr is not the legacy-zero message" "$(cat "$ROOT/err.txt")" "legacy architecture-fitness source must contain zero"
+
+echo
+echo "=== #198 literal backslash git paths ==="
+BS="$ROOT/backslash-repo"
+rm -rf "$BS"
+mkdir -p "$BS/scripts/a" "$BS/scripts/tests"
+$GIT init -q "$BS"
+git -C "$BS" symbolic-ref HEAD refs/heads/main
+printf '%s\n' '#!/usr/bin/env bash' 'source "$SCRIPT_DIR/slash-only.sh"' > "$BS/scripts/a/b.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'source "$SCRIPT_DIR/backslash-only.sh"' > "$BS/scripts/a\\b.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'if true; then exit 0; fi' > "$BS/scripts/claim.sh"
+printf '%s\n' '# architecture-fitness-self-fixture:v1' > "$BS/scripts/tests/architecture-fitness.test.sh"
+$GIT -C "$BS" add -A
+$GIT -C "$BS" commit -q -m "backslash sibling"
+BS_SHA=$(git -C "$BS" rev-parse HEAD)
+run_collector "$BS" --ref "$BS_SHA" --no-baseline --format json
+check "commit-mode backslash exits 3" "$RC" "3"
+contains "commit-mode backslash message" "$(cat "$ROOT/err.txt")" "literal backslash rejected"
+check "commit-mode backslash writes no stdout" "$OUT" ""
+lacks "commit-mode does not emit slash sibling" "$OUT" "slash-only.sh"
+lacks "commit-mode does not emit backslash target" "$OUT" "backslash-only.sh"
+run_collector "$BS" --worktree --no-baseline --format json
+check "worktree-mode backslash exits 3" "$RC" "3"
+contains "worktree-mode backslash message" "$(cat "$ROOT/err.txt")" "literal backslash rejected"
+check "worktree-mode backslash writes no stdout" "$OUT" ""
+if copy_collector_once "$ROOT/backslash-mutant.sh" 'p.includes("\\")' 'p.includes("NEVER-BACKSLASH")'; then
+  ok "backslash replacement matched once"
+else
+  bad "backslash replacement was not unique"
+fi
+run_bin "$ROOT/backslash-mutant.sh" "$BS" --ref "$BS_SHA" --no-baseline --format json
+printf '%s' "$OUT" > "$ROOT/backslash-mutant.json"
+if [[ "$RC" -eq 0 ]] && node - "$ROOT/backslash-mutant.json" <<'NODE'
+const r = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8"));
+const unknowns = r.shell_dependencies.unknowns;
+const slash = unknowns.filter((u) => u.raw === "$SCRIPT_DIR/slash-only.sh" && u.from === "scripts/a/b.sh");
+const back = unknowns.filter((u) => u.raw === "$SCRIPT_DIR/backslash-only.sh" && u.from === "scripts/a\\b.sh");
+if (slash.length !== 1 || back.length !== 1) {
+  process.stderr.write("slash=" + slash.length + " back=" + back.length + "\n");
+  process.exit(1);
+}
+NODE
+then
+  ok "deleting the backslash rejection admits both names without substitution"
+else
+  bad "backslash mutant did not prove distinct reads"
+fi
+
+echo
+echo "=== #198 hand-built unsafe git tree ==="
+UNSAFE="$ROOT/unsafe-repo"
+rm -rf "$UNSAFE"
+mkdir -p "$UNSAFE"
+$GIT init -q "$UNSAFE"
+UNSAFE_COMMIT=$(node - "$UNSAFE" <<'NODE'
+const { execFileSync } = require("child_process");
+const repo = process.argv[2];
+const gitBase = ["-c", "user.email=sensor@gibson.invalid", "-c", "user.name=gibson-sensor", "-c", "commit.gpgsign=false", "-C", repo];
+function git(args, opts) {
+  return execFileSync("git", gitBase.concat(args), Object.assign({ encoding: "utf8" }, opts || {}));
+}
+function blob(text) {
+  return git(["hash-object", "-w", "--stdin"], { input: text }).trim();
+}
+function tree(entries) {
+  const parts = [];
+  const sorted = entries.slice().sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const e of sorted) {
+    parts.push(Buffer.from(e.mode + " " + e.name + "\0", "utf8"));
+    parts.push(Buffer.from(e.sha, "hex"));
+  }
+  return git(["hash-object", "--literally", "-t", "tree", "-w", "--stdin"], { input: Buffer.concat(parts) }).trim();
+}
+const secret = blob("SENTINEL-DOTDOT\n");
+const claim = blob("#!/usr/bin/env bash\nif true; then exit 0; fi\n");
+const marker = blob("# architecture-fitness-self-fixture:v1\n");
+const tests = tree([{ mode: "100644", name: "architecture-fitness.test.sh", sha: marker }]);
+const scriptsWithTests = tree([
+  { mode: "100644", name: "claim.sh", sha: claim },
+  { mode: "100644", name: "..", sha: secret },
+  { mode: "40000", name: "tests", sha: tests },
+]);
+const root = tree([{ mode: "40000", name: "scripts", sha: scriptsWithTests }]);
+process.stdout.write(git(["commit-tree", root, "-m", "hostile dotdot"]).trim());
+NODE
+)
+run_collector "$UNSAFE" --ref "$UNSAFE_COMMIT" --no-baseline --format json
+check "unsafe tree exits 3" "$RC" "3"
+contains "unsafe tree message" "$(cat "$ROOT/err.txt")" "unsafe path in tree: rejected"
+check "unsafe tree writes no stdout" "$OUT" ""
+lacks "unsafe tree does not emit sentinel" "$OUT" "SENTINEL-DOTDOT"
+if copy_collector_once "$ROOT/unsafe-mutant.sh" \
+  'p.split("/").some((c) => c === ".." || c === "")' \
+  'p.split("/").some((c) => false)'; then
+  ok "unsafe-tree replacement matched once"
+else
+  bad "unsafe-tree replacement was not unique"
+fi
+run_bin "$ROOT/unsafe-mutant.sh" "$UNSAFE" --ref "$UNSAFE_COMMIT" --no-baseline --format json
+check "deleting the unsafe-tree rejection is killed" "$RC" "0"
+lacks "unsafe mutant stderr is not the path rejection" "$(cat "$ROOT/err.txt")" "unsafe path in tree: rejected"
+
+echo
+echo "=== #198 absolute-path canary matrix ==="
+for prefix in /tmp /var/folders /private/var/folders /Users /home; do
+  CAN="$ROOT/canary-$(printf '%s' "$prefix" | tr '/' '-')"
+  rm -rf "$CAN"
+  mkdir -p "$CAN/scripts/tests"
+  $GIT init -q "$CAN"
+  git -C "$CAN" symbolic-ref HEAD refs/heads/main
+  printf '%s\n' '#!/usr/bin/env bash' "source ${prefix}/archfit-canary" 'if true; then exit 0; fi' > "$CAN/scripts/claim.sh"
+  printf '%s\n' '# architecture-fitness-self-fixture:v1' > "$CAN/scripts/tests/architecture-fitness.test.sh"
+  $GIT -C "$CAN" add -A
+  $GIT -C "$CAN" commit -q -m "canary $prefix"
+  CAN_SHA=$(git -C "$CAN" rev-parse HEAD)
+  run_collector "$CAN" --ref "$CAN_SHA" --no-baseline --format json
+  check "canary $prefix exits 3" "$RC" "3"
+  contains "canary $prefix message" "$(cat "$ROOT/err.txt")" "absolute user/temp paths"
+  check "canary $prefix writes no stdout" "$OUT" ""
+  lacks "canary $prefix not in stdout" "$OUT" "${prefix}/archfit-canary"
+done
+if copy_collector_once "$ROOT/leak-mutant.sh" \
+  '/\/Users\/|\/home\/|\/private\/var\/folders\/|\/var\/folders\/|\/tmp\//i.test(json)' \
+  'false'; then
+  ok "absolute-path replacement matched once"
+else
+  bad "absolute-path replacement was not unique"
+fi
+run_bin "$ROOT/leak-mutant.sh" "$ROOT/canary--tmp" --ref "$(git -C "$ROOT/canary--tmp" rev-parse HEAD)" --no-baseline --format json
+check "deleting the absolute-path rejection is killed" "$RC" "0"
+contains "leak mutant emits the /tmp canary" "$OUT" "/tmp/archfit-canary"
+
+echo
+echo "=== #198 sanitized baseline emit failures ==="
+seed_fixture "$FIX"
+EMIT_SHA=$(git -C "$FIX" rev-parse HEAD)
+EMIT_PARENT="$ROOT/emit-parent"
+prepare_emit "$EMIT_PARENT"
+run_collector "$FIX" --ref "$EMIT_SHA" --no-baseline --emit-baseline "$EMIT_PARENT/baseline.json" --format json
+check "sanitized emit still writes" "$RC" "0"
+node - "$EMIT_PARENT/baseline.json" <<'NODE' && ok "successful emit writes collector 1.0.1" || bad "successful emit baseline"
+const b = JSON.parse(require("fs").readFileSync(process.argv[2], "utf8"));
+if (b.collector.version !== "1.0.1") throw new Error(String(b.collector && b.collector.version));
+if (!/^[0-9a-f]{64}$/.test(b.collector.digest || "")) throw new Error("digest");
+NODE
+
+# Confirm the sentinel is gone and no temp remains.
+if [[ "$(cat "$EMIT_PARENT/baseline.json")" != "SENTINEL-OUTPUT" ]]; then
+  ok "successful emit replaces the previous output"
+else
+  bad "successful emit left the sentinel in place"
+fi
+success_left=$(find "$EMIT_PARENT" -name '.architecture-fitness-*' -print)
+check "successful emit removes temporary files" "$success_left" ""
+
+inject_case() {
+  local name="$1" old="$2" new="$3" line="$4" clean="$5"
+  local parent="$ROOT/emit-$name"
+  local mutant="$ROOT/emit-mutant-$name.sh"
+  prepare_emit "$parent"
+  if copy_collector_once "$mutant" "$old" "$new"; then
+    ok "$name replacement matched once"
+  else
+    bad "$name replacement was not unique"
+    return
+  fi
+  run_bin "$mutant" "$FIX" --ref "$EMIT_SHA" --no-baseline --emit-baseline "$parent/baseline.json" --format json
+  assert_sanitized "$name" "$line" "$parent/baseline.json" "$parent" "$clean"
+}
+
+inject_case parent-lstat \
+  'fs.lstatSync(requestedParent)' \
+  "$inject_throw" \
+  "unsafe baseline output path: cannot stat parent" \
+  clean
+inject_case parent-realpath \
+  'fs.realpathSync(requestedParent)' \
+  "$inject_throw" \
+  "unsafe baseline output path: cannot resolve parent" \
+  clean
+inject_case leaf-lstat \
+  'fs.lstatSync(outPath)' \
+  "$inject_throw" \
+  "unsafe baseline output path: cannot stat output" \
+  clean
+inject_case mkdtemp \
+  'fs.mkdtempSync(path.join(realParent, ".architecture-fitness-"))' \
+  "$inject_throw" \
+  "cannot create baseline temporary directory" \
+  clean
+inject_case temp-write \
+  'fs.writeFileSync(tmp, stableStringify(baselineDoc), {' \
+  "$inject_throw(); fs.writeFileSync(tmp, stableStringify(baselineDoc), {" \
+  "cannot write baseline temporary file" \
+  clean
+inject_case atomic-rename \
+  'fs.renameSync(staged, outPath)' \
+  "$inject_throw" \
+  "cannot rename baseline into place" \
+  clean
+inject_case cleanup \
+  'fs.rmdirSync(tempDir)' \
+  "$inject_throw" \
+  "cannot remove baseline temporary directory" \
+  dirty
+
+LONG_PARENT="$ROOT/emit-long"
+prepare_emit "$LONG_PARENT"
+LONG_LEAF=$(node -e 'process.stdout.write("x".repeat(300) + ".json")')
+run_collector "$FIX" --ref "$EMIT_SHA" --no-baseline --emit-baseline "$LONG_PARENT/$LONG_LEAF" --format json
+check "non-ENOENT leaf lstat exits 3" "$RC" "3"
+check "non-ENOENT leaf stderr" "$(cat "$ROOT/err.txt")" "architecture-fitness.sh: unsafe baseline output path: cannot stat output"
+check "non-ENOENT leaf stdout empty" "$OUT" ""
+check "non-ENOENT leaf leaves the sibling sentinel" "$(cat "$LONG_PARENT/baseline.json")" "SENTINEL-OUTPUT"
+if printf '%s' "$(cat "$ROOT/err.txt")" | grep -E '/|Error:|^[[:space:]]*at ' >/dev/null; then
+  bad "non-ENOENT leaf stderr leaked a path or stack"
+else
+  ok "non-ENOENT leaf stderr has no path or stack"
+fi
+long_left=$(find "$LONG_PARENT" -name '.architecture-fitness-*' -print)
+check "non-ENOENT leaf creates no temporary directory" "$long_left" ""
 
 # ---------------------------------------------------------------------------
 echo
