@@ -175,6 +175,50 @@ class DecidedHeads(unittest.TestCase):
         self.assertEqual(self.settled_numbers("another instance holds the lock\n"), [])
 
 
+class RunWrapper(unittest.TestCase):
+    def test_timeout_kills_the_whole_process_group(self):
+        import os
+        import tempfile
+        import time
+        d = tempfile.mkdtemp()
+        pidfile = os.path.join(d, "child.pid")
+        script = os.path.join(d, "wrapper.sh")
+        with open(script, "w") as handle:
+            handle.write("#!/bin/bash\nsleep 300 &\necho $! > '%s'\necho started\nwait\n" % pidfile)
+        os.chmod(script, 0o700)
+        output, _rc, timed_out = probe.run_wrapper(script, 2)
+        self.assertTrue(timed_out)
+        self.assertIn("started", output)
+        with open(pidfile) as handle:
+            child = int(handle.read().strip())
+        deadline = time.time() + 5
+        alive = True
+        while time.time() < deadline:
+            try:
+                os.kill(child, 0)
+                # zombie or live: check via /proc-less approach: ps state
+                state = os.popen("ps -o stat= -p %d" % child).read().strip()
+                alive = bool(state) and not state.startswith("Z")
+            except OSError:
+                alive = False
+            if not alive:
+                break
+            time.sleep(0.2)
+        self.assertFalse(alive, "grandchild survived the group kill")
+
+    def test_normal_exit_is_not_a_timeout(self):
+        import os
+        import tempfile
+        d = tempfile.mkdtemp()
+        script = os.path.join(d, "ok.sh")
+        with open(script, "w") as handle:
+            handle.write("#!/bin/bash\necho The-AIE/conference-os#1 skip not-open\nexit 0\n")
+        os.chmod(script, 0o700)
+        output, rc, timed_out = probe.run_wrapper(script, 10)
+        self.assertEqual((rc, timed_out), (0, False))
+        self.assertIn("skip not-open", output)
+
+
 class RunTimeout(unittest.TestCase):
     def test_timeout_covers_every_slot(self):
         self.assertEqual(probe._run_timeout(POLICY), 900 * 3 + 300)

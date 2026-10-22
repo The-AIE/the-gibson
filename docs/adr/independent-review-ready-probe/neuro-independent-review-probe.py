@@ -280,6 +280,44 @@ def _run_timeout(policy):
     return per_pull * slots + 300
 
 
+class _Completed(object):
+    def __init__(self, stdout, returncode):
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+def run_wrapper(path, timeout):
+    """Run the wrapper in its own process group; on timeout kill the whole group.
+
+    Killing only the direct child would let the controller (or a vendor CLI it
+    spawned) outlive the probe and keep controller.lock, which would park the
+    fallback scan. SIGKILL to the group reaps every descendant that stayed in
+    it. Returns (stdout, returncode, timed_out).
+    """
+    import signal
+
+    child = subprocess.Popen(
+        [path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        output, _ = child.communicate(timeout=timeout)
+        return output or "", child.returncode, False
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            output, _ = child.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            output = ""
+        return output or "", child.returncode, True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="neuro-independent-review-probe")
     parser.add_argument("--policy", required=True)
@@ -328,20 +366,9 @@ def main(argv=None):
         for repo, number, head, _key in candidates:
             _log("trigger {0}#{1} {2}".format(repo, number, head))
         started = time.monotonic()
-        try:
-            completed = subprocess.run(
-                [args.run_script],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
-                timeout=_run_timeout(policy),
-            )
-        except subprocess.TimeoutExpired as expired:
-            partial = expired.stdout
-            if isinstance(partial, bytes):
-                partial = partial.decode("utf-8", "replace")
-            sys.stdout.write(partial or "")
+        output, returncode, timed_out = run_wrapper(args.run_script, _run_timeout(policy))
+        if timed_out:
+            sys.stdout.write(output)
             # A timed-out run is settled for the probe's purposes: these heads go
             # to the fallback scan only, so a hung wrapper cannot be re-fired by
             # the probe every minute and starve the scheduled job of the lock.
@@ -349,8 +376,9 @@ def main(argv=None):
             for repo, number, _head, key in candidates:
                 cache[key] = {"number": number, "triggered": now, "timeout": True}
             _store_cache(cache_path, cache)
-            _log("controller killed after {0}s; heads left for the fallback scan".format(expired.timeout))
+            _log("controller killed after {0}s; heads left for the fallback scan".format(_run_timeout(policy)))
             return 0
+        completed = _Completed(output, returncode)
         output = completed.stdout or ""
         sys.stdout.write(output)
         if LOCK_HELD_LINE in output:
