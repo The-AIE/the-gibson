@@ -12,12 +12,13 @@ entry point, not a second implementation.
 | `gibson-setup` | 3 — install the teeth | templates/target-repo/, docs/22 wiring |
 | `gibson-direct` | 4 — product direction | playbooks/planner.md, decomposer.md |
 | `gibson-run` | 5 — the loop | scripts/loop.sh, docs/11, docs/15 routing |
+| `gibson-ship` | 6 — PR open → live | the target's claim parser and required contexts, its review-evidence trust file, the Mini reviewer's journal, `references/deployments.json` |
 
 ## Install (personal, all sessions)
 
 ```bash
 mkdir -p ~/.claude/skills
-for s in gibson gibson-audit gibson-resources gibson-setup gibson-run gibson-direct; do
+for s in gibson gibson-audit gibson-resources gibson-setup gibson-run gibson-direct gibson-ship; do
   ln -sfn ~/Code/the-gibson/skills/$s ~/.claude/skills/$s
 done
 ```

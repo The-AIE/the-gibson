@@ -1,0 +1,86 @@
+{
+  "schemaVersion": "1.0.0",
+  "targets": [
+    {
+      "name": "conference-os core",
+      "repo": "The-AIE/conference-os",
+      "defaultBranch": "main",
+      "productionBranch": "release",
+      "requiredContexts": ["quality", "build-e2e-required", "DCO", "review-evidence"],
+      "deploy": {
+        "provider": "vercel",
+        "team": "the-aie",
+        "integrationProject": "conference-os-vercel",
+        "productionProject": "conference-os-vercel",
+        "source": "git",
+        "notes": "Every merge to main deploys the Integration Preview. Production advances when maintainers fast-forward release (docs/RELEASING.md); hotfixes via mercury-fixes."
+      },
+      "mergeCaptain": ".github/workflows/merge-on-green.yml (squash, --match-head-commit, refuses heads behind main)",
+      "reviewEvidence": {
+        "trustFile": ".github/review-evidence-trust.json",
+        "independentApp": "aie-independent-review[bot] on mac-mini (launchd com.peripety.neuro-independent-review)",
+        "miniWatches": true
+      },
+      "syncFrom": null,
+      "postDeployConfig": null,
+      "stalePaths": ["ata/release (last real promote 8ed2c1da, 2026-10-12; nothing deploys from it)"],
+      "verified": "2026-10-21"
+    },
+    {
+      "name": "events.allthingsai.org (All Things AI install)",
+      "repo": "The-AIE/ata-events-site",
+      "defaultBranch": "main",
+      "productionBranch": null,
+      "branchProtection": "none on main (GitHub: Branch not protected); merges have been merge commits by mrhinkle",
+      "deploy": {
+        "provider": "vercel",
+        "team": "the-aie",
+        "teamId": "team_uY30O2yqZCvo3E2BptyJQmXi",
+        "productionProject": "conference-os-ata",
+        "projectId": "prj_t24vsP1kOklbmse8E53xR3pTej9d",
+        "source": "cli",
+        "command": "vercel deploy --prod --scope the-aie   # from the merged main checkout of ata-events-site, linked to conference-os-ata; record the SHA in the sync PR",
+        "aliases": ["events.allthingsai.org", "conference-os-ata.vercel.app", "conference-os-ata-the-aie.vercel.app"],
+        "notes": "Project docs say Production Branch = release, but the repo has no release branch, so merging to main yields a Preview only. The last two production deployments (2026-10-18, 2026-10-21) were source=cli by mrhinkle-theaie with no git metadata."
+      },
+      "syncFrom": {
+        "repo": "The-AIE/conference-os",
+        "method": "worktree from origin/main, branch sync/<topic>-<core-pr>, git cherry-pick -x <core merge sha>",
+        "title": "chore(core): sync ConferenceOS #NNNN (<summary>)",
+        "examples": ["ata-events-site#31", "ata-events-site#37", "ata-events-site#46", "ata-events-site#52"]
+      },
+      "reviewEvidence": {
+        "trustFile": ".github/review-evidence-trust.json (same as core)",
+        "miniWatches": false,
+        "notes": "Owner attestation at the exact head was accepted on #46 (2026-10-15); same evaluator as core, so expect the same-actor rule. Get a cross-vendor read of the cherry-pick diff first."
+      },
+      "schema": "Production migrations via core Actions → production-migrate with install=conference-os-ata (docs/RELEASING.md step 3); Mark's call.",
+      "postDeployConfig": "Install MCP at /api/mcp on the public host (cos_admin key) or /organizer admin. Example: update_site_announcement after the deploy is READY.",
+      "verify": "get_deployment(withGitRepoInfo) or vercel inspect <url> --scope the-aie: READY, target production, alias includes events.allthingsai.org; then curl the affected route.",
+      "stalePaths": ["conference-os branch ata/release"],
+      "verified": "2026-10-21"
+    },
+    {
+      "name": "the-gibson",
+      "repo": "The-AIE/the-gibson",
+      "defaultBranch": "main",
+      "productionBranch": null,
+      "requiredContexts": ["claim-isolation", "sensors", "review-evidence"],
+      "deploy": {
+        "provider": "github-pages",
+        "source": "git",
+        "notes": "Docs site from main (_config.yml). No application deploy; step 7 and 8 do not apply beyond README/skills install (symlink from ~/Code/the-gibson/skills)."
+      },
+      "reviewEvidence": {
+        "trustFile": "config/review-evidence.v1.json",
+        "sweep": ".github/workflows/pr-review-evidence.yml stamps every open head",
+        "miniWatches": false,
+        "notes": "Mini coverage needs controller changes (per-repo requiredContexts, per-repo trusted root), not a policy.json edit."
+      },
+      "syncFrom": null,
+      "postDeployConfig": null,
+      "stalePaths": [],
+      "verified": "2026-10-21"
+    }
+  ]
+}
