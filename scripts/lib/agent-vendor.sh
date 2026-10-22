@@ -16,10 +16,11 @@
 #   push, with the same decision rule the evaluator applies later.
 #
 # RULE (per commit in BASE..HEAD; the base commit itself is outside the range)
-#   - authored by a lane-bot login (`<id>+aie-agent-lanes-*[bot]@users.noreply.
-#     github.com`): resolves by identity, nothing to check;
 #   - author or committer email in the reserved `.invalid` domain: GitHub maps
-#     it to no login, the trailer is never read (`no-login`, #503/#504);
+#     it to no login, the trailer is never read (`no-login`, #503/#504); this is
+#     checked first, for every commit, lane-bot authored or not;
+#   - then, authored by a lane-bot login (`<id>+aie-agent-lanes-*[bot]@users.
+#     noreply.github.com`): resolves by identity, no trailer needed;
 #   - no `Agent-Vendor:` trailer anywhere in the message (`owner-unvendored`,
 #     #506); more than one distinct vendor named; or a vendor outside
 #     AUTHOR_COMMIT_VENDORS in scripts/pr-review-evidence.mjs.
@@ -58,14 +59,17 @@ agent_vendor_commit_problem() {
   local repo="$1" sha="$2" ae ce body line v vendors="" n=0
   ae=$(git -C "$repo" log -1 --format=%ae "$sha" 2>/dev/null) || { echo unreadable; return 0; }
   ce=$(git -C "$repo" log -1 --format=%ce "$sha" 2>/dev/null) || { echo unreadable; return 0; }
-  if agent_vendor_lane_bot_email "$ae"; then
-    return 0
-  fi
+  # Both identities first, on every path: review-evidence resolves the author
+  # AND the committer to a login, so a lane-bot author with a .invalid committer
+  # still fails `committer:<sha>:no-login` (Codex review of #525).
   for v in "$ae" "$ce"; do
     case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
       *.invalid) echo "invalid-email:${v}"; return 0 ;;
     esac
   done
+  if agent_vendor_lane_bot_email "$ae"; then
+    return 0
+  fi
   body=$(git -C "$repo" log -1 --format=%B "$sha" 2>/dev/null) || { echo unreadable; return 0; }
   # Every Agent-Vendor line anywhere in the message, exactly as the evaluator
   # matches them (case-insensitive key and value). Here-string, not a pipe into

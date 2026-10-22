@@ -406,13 +406,14 @@ else bad "fixture bug: origin/main missing"; fi
 # trailer in its own paragraph above the Gibson block, then hand-made work
 # without any trailer, and no gibson.agentVendor anywhere. Hooks are not wired
 # in this fixture until setup-hooks.sh runs, so the messages are what we write.
-reserve_msg() { # vendor-lines...
+reserve_msg() { # branch vendor-lines...
+  local branch="$1"; shift
   printf 'chore: reserve issue #9 for issue-9-x\n\n'
   local l; for l in "$@"; do printf '%s\n' "$l"; done
-  printf '\nGibson-Reservation: v1\nGibson-Claim-ID: issue-9-x\nGibson-Issue: #9\nGibson-Branch: feat/9-x\n'
+  printf '\nGibson-Reservation: v1\nGibson-Claim-ID: issue-9-x\nGibson-Issue: #9\nGibson-Branch: %s\n' "$branch"
 }
 git -C "$FR" worktree add -q "$ROOT/fr-lane" -b feat/9-x HEAD 2>/dev/null
-(cd "$ROOT/fr-lane" && lane_env $GIT_LANE commit -q --allow-empty -s -m "$(reserve_msg 'Agent-Vendor: Grok')" \
+(cd "$ROOT/fr-lane" && lane_env $GIT_LANE commit -q --allow-empty -s -m "$(reserve_msg feat/9-x 'Agent-Vendor: Grok')" \
   && lane_env $GIT_LANE commit -q --allow-empty -s -m "hand-made work, no trailer") >/dev/null 2>&1
 RES_SHA=$(git -C "$ROOT/fr-lane" rev-parse HEAD~1)
 if (cd "$ROOT/fr-lane" && "$SETUP" --vendor from-reservation) >"$ROOT/fr.out" 2>"$ROOT/fr.err"; then
@@ -420,7 +421,7 @@ if (cd "$ROOT/fr-lane" && "$SETUP" --vendor from-reservation) >"$ROOT/fr.out" 2>
 else
   bad "--vendor from-reservation failed: $(cat "$ROOT/fr.err")"
 fi
-if grep -q "vendor 'grok' read from reservation commit $RES_SHA" "$ROOT/fr.out"; then ok "names the vendor (lower-cased) and the reservation SHA it was read from"
+if grep -q "vendor 'grok' read from reservation commit $RES_SHA (Gibson-Branch: feat/9-x" "$ROOT/fr.out"; then ok "names the vendor (lower-cased), the reservation SHA and the Gibson-Branch it matched"
 else bad "from-reservation output unclear: $(cat "$ROOT/fr.out")"; fi
 declared=$(git -C "$ROOT/fr-lane" config --worktree --get gibson.agentVendor 2>/dev/null || true)
 if [[ "$declared" == "grok" ]]; then ok "lane is declared grok (worktree-scoped)"
@@ -465,14 +466,27 @@ fr_case() { # name branch exit-want needle msg-lines...
   else bad "$name: declared '$(git -C "$ROOT/fr-$name" config --worktree --get gibson.agentVendor)' despite the refusal"; fi
 }
 fr_case no-reservation feat/10-plain 1 "no commit in" "plain work, never claimed"
-fr_case no-trailer feat/11-old 1 "has no Agent-Vendor trailer" "$(reserve_msg)"
-fr_case two-vendors feat/12-two 1 "more than one vendor (claude grok)" "$(reserve_msg 'Agent-Vendor: claude' 'Agent-Vendor: grok')"
-fr_case unknown-vendor feat/13-bogus 2 "unknown agent vendor 'bogus'" "$(reserve_msg 'Agent-Vendor: bogus')"
-# Only the FIRST reservation after the merge-base counts: a later commit that
-# happens to carry the marker (a cherry-picked foreign reservation) is not read.
-fr_case first-wins feat/14-first 0 "" "$(reserve_msg 'Agent-Vendor: codex')" "$(reserve_msg 'Agent-Vendor: grok')"
-if [[ "$(git -C "$ROOT/fr-first-wins" config --worktree --get gibson.agentVendor 2>/dev/null)" == "codex" ]]; then ok "first-wins: the first reservation's vendor (codex) is the declaration"
-else bad "first-wins: declared '$(git -C "$ROOT/fr-first-wins" config --worktree --get gibson.agentVendor 2>/dev/null)' (want codex)"; fi
+fr_case no-trailer feat/11-old 1 "has no Agent-Vendor trailer" "$(reserve_msg feat/11-old)"
+fr_case two-vendors feat/12-two 1 "more than one vendor (claude grok)" "$(reserve_msg feat/12-two 'Agent-Vendor: claude' 'Agent-Vendor: grok')"
+fr_case unknown-vendor feat/13-bogus 2 "unknown agent vendor 'bogus'" "$(reserve_msg feat/13-bogus 'Agent-Vendor: bogus')"
+# The reservation must name THIS branch (Codex review of #525). A lane stacked
+# on another lane has the parent's reservation in its range and must not
+# inherit the parent's vendor; its own reservation is matched wherever it sits.
+fr_case stacked-child feat/14-child 1 "belong to another lane" "$(reserve_msg feat/14-parent 'Agent-Vendor: codex')"
+if grep -q "Gibson-Branch: feat/14-parent" "$ROOT/fr-stacked-child.err"; then ok "stacked-child: refusal names the foreign reservation's branch"
+else bad "stacked-child: refusal does not name the parent's reservation: $(cat "$ROOT/fr-stacked-child.err")"; fi
+fr_case match-not-first feat/15-mine 0 "" "$(reserve_msg feat/15-parent 'Agent-Vendor: codex')" "$(reserve_msg feat/15-mine 'Agent-Vendor: grok')"
+if [[ "$(git -C "$ROOT/fr-match-not-first" config --worktree --get gibson.agentVendor 2>/dev/null)" == "grok" ]]; then ok "match-not-first: the reservation naming this branch (grok) wins over an earlier parent reservation (codex)"
+else bad "match-not-first: declared '$(git -C "$ROOT/fr-match-not-first" config --worktree --get gibson.agentVendor 2>/dev/null)' (want grok)"; fi
+fr_case two-own feat/16-dup 1 "ambiguous" "$(reserve_msg feat/16-dup 'Agent-Vendor: grok')" "$(reserve_msg feat/16-dup 'Agent-Vendor: grok')"
+git -C "$FR" worktree add -q --detach "$ROOT/fr-detached" HEAD 2>/dev/null
+(cd "$ROOT/fr-detached" && lane_env $GIT_LANE commit -q --no-verify --allow-empty -s -m "$(reserve_msg feat/17-x 'Agent-Vendor: grok')") >/dev/null 2>&1
+set +e
+(cd "$ROOT/fr-detached" && "$SETUP" --vendor from-reservation) >/dev/null 2>"$ROOT/fr-detached.err"
+det_rc=$?
+set -e
+if [[ "$det_rc" -eq 1 ]] && grep -q 'HEAD is detached' "$ROOT/fr-detached.err"; then ok "detached HEAD: exit 1, no Gibson-Branch can match"
+else bad "detached rc=$det_rc: $(cat "$ROOT/fr-detached.err")"; fi
 NOORIGIN="$ROOT/no-origin"
 mkdir -p "$NOORIGIN" && $GIT init -q "$NOORIGIN" && mkdir -p "$NOORIGIN/.githooks" && cp "$PREPARE" "$COMMIT_MSG" "$NOORIGIN/.githooks/"
 (cd "$NOORIGIN" && lane_env $GIT_LANE commit -q --allow-empty -m init) >/dev/null 2>&1

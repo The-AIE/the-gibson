@@ -27,13 +27,16 @@ WHAT IT DOES
   vendors review-evidence resolves from the trailer.
 
   --vendor from-reservation reads NAME from the lane's own reservation commit:
-  the first commit after the merge-base with origin/main (origin/master as the
-  fallback) whose message carries `Gibson-Reservation: v1`, taking its
-  `Agent-Vendor:` value. This is how a lane created by claim.sh BEFORE the
+  the commit after the merge-base with origin/main (origin/master as the
+  fallback) whose message carries `Gibson-Reservation: v1` AND whose
+  `Gibson-Branch:` names the checked-out branch, taking its `Agent-Vendor:`
+  value. A reservation for another branch in the same range (a lane stacked on
+  a lane) is never used: a child does not inherit its parent's vendor. This is how a lane created by claim.sh BEFORE the
   worktree declaration existed gets declared without anyone retyping the
-  vendor. It refuses (exit 1) when there is no reservation commit in that
-  range, when the reservation has no Agent-Vendor trailer, or when its trailers
-  name more than one distinct vendor — nothing is guessed. `claims-status.sh`
+  vendor. It refuses (exit 1) when no reservation in that range names this
+  branch, when more than one does, when HEAD is detached, when the reservation
+  has no Agent-Vendor trailer, or when its trailers name more than one distinct
+  vendor — nothing is guessed. `claims-status.sh`
   lists the registered lane worktrees that are still undeclared.
 
 WHY
@@ -66,8 +69,9 @@ EXAMPLES
 EXIT
   0 done (or no-op outside a work tree)   2 usage / unknown vendor
   1 a git config write failed or could not be read back; or, with
-    from-reservation, no reservation commit, no Agent-Vendor trailer on it,
-    or more than one distinct vendor named there
+    from-reservation, no reservation commit naming this branch (or more than
+    one, or a detached HEAD), no Agent-Vendor trailer on it, or more than one
+    distinct vendor named there
 EOF2
 }
 
@@ -164,19 +168,44 @@ if [[ "$FROM_RESERVATION" -eq 1 ]]; then
     echo "setup-hooks.sh: --vendor from-reservation: no merge base between HEAD and ${base_ref} — pass --vendor <name>" >&2
     exit 1
   fi
+  # The reservation is the one whose Gibson-Branch names THIS branch. A lane
+  # stacked on another lane sees the parent's reservation in the same range,
+  # and taking the first one would inherit the parent's vendor silently
+  # (Codex review of #525); a branch with two reservations of its own is
+  # ambiguous. Both refuse.
+  cur_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  if [[ -z "$cur_branch" ]]; then
+    echo "setup-hooks.sh: --vendor from-reservation: HEAD is detached, so no Gibson-Branch can match it — check out the lane branch, or pass --vendor <name>" >&2
+    exit 1
+  fi
   reservation=""
+  reservation_count=0
+  other_reservations=""
   range_shas=$(git rev-list --reverse "${merge_base}..${head_sha}" 2>/dev/null || true)
   while IFS= read -r sha; do
     [[ -n "$sha" ]] || continue
-    if git log -1 --format=%B "$sha" | grep -E '^Gibson-Reservation: v1[[:space:]]*$' >/dev/null; then
+    body=$(git log -1 --format=%B "$sha" 2>/dev/null || true)
+    grep -E '^Gibson-Reservation: v1[[:space:]]*$' <<<"$body" >/dev/null || continue
+    res_branch=$(grep -E '^Gibson-Branch:[[:space:]]*' <<<"$body" | head -1 | sed 's/^Gibson-Branch:[[:space:]]*//; s/[[:space:]]*$//')
+    if [[ "$res_branch" == "$cur_branch" ]]; then
       reservation="$sha"
-      break
+      reservation_count=$((reservation_count + 1))
+    else
+      other_reservations="${other_reservations:+$other_reservations, }${sha:0:7} (Gibson-Branch: ${res_branch:-<none>})"
     fi
   done <<EOF3
 $range_shas
 EOF3
+  if [[ "$reservation_count" -gt 1 ]]; then
+    echo "setup-hooks.sh: --vendor from-reservation: ${reservation_count} reservation commits in ${merge_base}..${head_sha} name Gibson-Branch: ${cur_branch} — ambiguous, refusing to guess; pass --vendor <name> explicitly" >&2
+    exit 1
+  fi
   if [[ -z "$reservation" ]]; then
-    echo "setup-hooks.sh: --vendor from-reservation: no commit in ${merge_base}..${head_sha} carries 'Gibson-Reservation: v1' — this lane has no claim.sh reservation to read; pass --vendor <name> explicitly" >&2
+    if [[ -n "$other_reservations" ]]; then
+      echo "setup-hooks.sh: --vendor from-reservation: no reservation commit in ${merge_base}..${head_sha} names Gibson-Branch: ${cur_branch}; the range only has ${other_reservations}, which belong to another lane (a stacked lane does not inherit its parent's vendor) — pass --vendor <name> explicitly" >&2
+    else
+      echo "setup-hooks.sh: --vendor from-reservation: no commit in ${merge_base}..${head_sha} carries 'Gibson-Reservation: v1' — this lane has no claim.sh reservation to read; pass --vendor <name> explicitly" >&2
+    fi
     exit 1
   fi
   reservation_vendors=""
@@ -205,7 +234,7 @@ EOF3
   esac
   VENDOR="$reservation_vendors"
   vendor_check "$VENDOR"
-  echo "setup-hooks: vendor '${VENDOR}' read from reservation commit ${reservation} (${base_ref} merge-base ${merge_base})"
+  echo "setup-hooks: vendor '${VENDOR}' read from reservation commit ${reservation} (Gibson-Branch: ${cur_branch}; ${base_ref} merge-base ${merge_base})"
 fi
 
 # Ensure hooks stay executable after checkout on filesystems that drop +x.

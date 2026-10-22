@@ -128,8 +128,10 @@ authored or committed under a `.invalid` email; `scripts/prepush.sh` reports the
 commit resolves through independent review instead). The rule lives once, in
 `scripts/lib/agent-vendor.sh`. A lane created by `claim.sh` before the declaration existed is
 declared from its own reservation commit with `scripts/setup-hooks.sh --vendor from-reservation`
-(first commit after the merge-base with `origin/main` carrying `Gibson-Reservation: v1`; refused
-when there is none, when it has no trailer, or when its trailers disagree), and
+(the commit after the merge-base with `origin/main` carrying `Gibson-Reservation: v1` whose
+`Gibson-Branch:` names the checked-out branch, so a stacked lane never inherits its parent's;
+refused when none names this branch, more than one does, it has no trailer, or its trailers
+disagree), and
 `scripts/claims-status.sh` lists every registered lane worktree that is still undeclared.
 
 **Residual window (documented, not hidden).** The workflow resolves the head via the

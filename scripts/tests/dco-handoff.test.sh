@@ -84,6 +84,7 @@ work_commit() { # email [git-commit args...] — signed, -a
 #   two-vendors    signed, two distinct Agent-Vendor trailers
 #   unknown-vendor signed, Agent-Vendor: bogus
 #   bot            signed, lane-bot email, no trailer       (resolves by login)
+#   bot-invalid-committer  lane-bot author, .invalid committer, no trailer
 setup_repo() { # setup_repo <mode>
   local mode="${1:-signed}"
   rm -rf "$REPO" "$REMOTE"
@@ -103,6 +104,11 @@ setup_repo() { # setup_repo <mode>
     two-vendors)    work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: claude" -m "Agent-Vendor: codex" ;;
     unknown-vendor) work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: bogus" ;;
     bot)            work_commit "$BOT_EMAIL" -m "work" ;;
+    bot-invalid-committer)
+      # Lane-bot author, .invalid committer, no trailer: review-evidence fails
+      # committer:<sha>:no-login, so the walk must not take the bot fast path
+      # before looking at both identities (Codex review of #525).
+      GIT_AUTHOR_EMAIL="$BOT_EMAIL" GIT_COMMITTER_EMAIL=sensor@gibson.invalid $GIT -C "$REPO" commit -q -s -a -m "work" ;;
     *) echo "setup_repo: unknown mode $mode" >&2; exit 1 ;;
   esac
   $GIT -C "$REPO" checkout -q main
@@ -338,6 +344,19 @@ grep -q "$SHA multi-vendor:claude,codex" "$REPO/gibson/journal.md" && ok "two-ve
 setup_repo unknown-vendor; SHA=$(head_sha); write_state "$BRANCH" "$SHA"; run_loop "$ROOT/r4.err"
 grep -q "$SHA unknown-vendor:bogus" "$REPO/gibson/journal.md" && ok "unknown-vendor: reason names bogus" || bad "unknown-vendor reason: $(cat "$REPO/gibson/journal.md")"
 
+echo "Agent-Vendor walk: a lane-bot author does not excuse a .invalid committer (mixed identity)"
+setup_repo bot-invalid-committer
+SHA=$(head_sha)
+if [[ "$(git -C "$REPO" log -1 --format=%ae "$SHA")" == "$BOT_EMAIL" && "$(git -C "$REPO" log -1 --format=%ce "$SHA")" == "sensor@gibson.invalid" ]]; then ok "fixture: author is the lane bot, committer is .invalid"
+else bad "fixture bug: identities $(git -C "$REPO" log -1 --format='%ae %ce' "$SHA")"; fi
+write_state "$BRANCH" "$SHA"
+: > "$CALLS/devin.cmds"
+run_loop "$ROOT/loop-bot-invalid.err"
+if handoff_invoked; then bad "bot-invalid-committer: loop handed off a commit review-evidence rejects as committer no-login"
+else ok "bot-invalid-committer: loop does not invoke the supervisor"; fi
+if grep -q "$SHA invalid-email:sensor@gibson.invalid" "$REPO/gibson/journal.md"; then ok "bot-invalid-committer: journal names the .invalid committer"
+else bad "bot-invalid-committer: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
+
 echo "Agent-Vendor walk: a lane-bot commit resolves by identity and is handed off without a trailer"
 setup_repo bot
 SHA=$(head_sha)
@@ -365,9 +384,17 @@ out=$(agent_vendor_unresolved_shas "$REPO" "$BASE" "$BASE"); rc=$?
 if agent_vendor_unresolved_shas "$REPO" "$BASE" deadbeef >/dev/null 2>&1; then bad "unreadable head must return 1"
 else ok "agent_vendor_unresolved_shas: unreadable head returns 1 (caller fails closed)"; fi
 agent_vendor_lane_bot_email "$BOT_EMAIL" && ok "lane-bot email recognised" || bad "lane-bot email not recognised"
+setup_repo bot-invalid-committer
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)")
+[[ "$why" == "invalid-email:sensor@gibson.invalid" ]] && ok "agent_vendor_commit_problem: bot author + .invalid committer → invalid-email (identities before the bot fast path)" || bad "mixed identity reason was '$why'"
+setup_repo bot
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)")
+[[ -z "$why" ]] && ok "agent_vendor_commit_problem: bot author + bot committer, no trailer → resolves" || bad "bot commit reason was '$why'"
 agent_vendor_lane_bot_email "$LANE_EMAIL" && bad "lane email mistaken for a bot" || ok "a lane email is not a bot"
 agent_vendor_lane_bot_email "x+dependabot[bot]@users.noreply.github.com" && bad "another bot mistaken for a lane bot" || ok "a non-lane bot is not a lane bot"
 # Probe: run from inside the lane branch, undeclared → 3 (report only), declared → 1, fixed → 0, bad base → 2.
+setup_repo unvendored
+SHA=$(head_sha)
 git -C "$REPO" checkout -q "$BRANCH"
 out=$(cd "$REPO" && cp_agent_vendor_walk main); rc=$?
 [[ "$rc" -eq 3 && "$out" == *"$SHA no-trailer"* && "$out" == *"fix: "* && "$out" == *"report only"* ]] && ok "cp_agent_vendor_walk: undeclared checkout → 3 with SHA, reason, fix" || bad "probe undeclared rc=$rc: $out"

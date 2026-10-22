@@ -19,8 +19,10 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
   walk. `scripts/prepush.sh` reports the same walk over `origin/main..HEAD` (`agent-vendor`
   probe: FAIL on a declared lane, WARN/report-only on an undeclared checkout). The rule is one
   function in `scripts/lib/agent-vendor.sh`. `scripts/setup-hooks.sh --vendor from-reservation`
-  declares a lane from its own `claim.sh` reservation commit and refuses when there is none, it
-  has no trailer, or its trailers disagree. `scripts/claims-status.sh` prints an "undeclared
+  declares a lane from its own `claim.sh` reservation commit (the one whose `Gibson-Branch:`
+  names the checked-out branch, so a stacked lane never inherits its parent's vendor) and
+  refuses when none names this branch, more than one does, it has no trailer, or its trailers
+  disagree. `scripts/claims-status.sh` prints an "undeclared
   lanes" list after the claim table: every registered worktree on a lane branch with no
   `gibson.agentVendor`, each with the fix. Sensors: `dco-handoff.test.sh`, `prepush.test.sh`,
   `setup-hooks.test.sh`, `claims-status.test.sh`; `loop-handoff.test.sh` fixtures now commit as a
