@@ -241,7 +241,7 @@ esac
 # canonical checkout keeps whatever the owner chose. Every write is read back;
 # a declaration that cannot be proven is a refusal, not a warning.
 lane_vendor_declare() { # wt-dir vendor
-  local wt="$1" vendor="$2" ext got hooks
+  local wt="$1" vendor="$2" ext got hooks hooks_dir probe
   ext=$(git -C "$wt" config --get extensions.worktreeConfig 2>/dev/null || true)
   if [[ "$ext" != "true" ]]; then
     if git -C "$wt" config --get core.worktree >/dev/null 2>&1; then
@@ -265,13 +265,40 @@ lane_vendor_declare() { # wt-dir vendor
         die "cannot wire .githooks for $wt — refusing to leave a lane whose commits are not checked for Agent-Vendor"
       hooks=.githooks
     else
-      info "WARNING: no .githooks/ in this repository — later commits on $wt are NOT checked for an Agent-Vendor trailer (only the reservation carries one); copy the Gibson .githooks/ into the repository and re-run to close this"
+      # No hooks anywhere: the repository has not adopted the Gibson hooks, so
+      # nothing (DCO included) is enforced at commit time here. A loud gap, not
+      # a refusal: refusing the claim would block every adopter until the hooks
+      # are copied in, and the reservation below still carries the trailer.
+      info "WARNING: ENFORCEMENT GAP — no core.hooksPath and no .githooks/ in this repository: later commits on $wt are NOT checked for an Agent-Vendor trailer (only the reservation carries one); copy the Gibson .githooks/ into the repository and re-run to close this"
+      info "lane vendor declared: gibson.agentVendor=$vendor on $wt (hooks: none)"
+      return 0
     fi
   fi
-  if [[ -n "$hooks" && -d "$wt/$hooks" ]]; then
-    chmod +x "$wt/$hooks"/* 2>/dev/null || true
+  # A hooks path that is configured but does not hold the Gibson hooks
+  # (core.hooksPath=/dev/null, a stale directory, a non-executable file) is a
+  # silent bypass: the lane would look declared and every commit would go out
+  # unchecked. Refuse it (Codex review of #523, finding 2).
+  case "$hooks" in
+    /*) hooks_dir="$hooks" ;;
+    *)  hooks_dir="$wt/$hooks" ;;
+  esac
+  [[ -d "$hooks_dir" ]] ||
+    die "core.hooksPath=$hooks does not resolve to a directory ($hooks_dir) — refusing to declare a lane whose commits would never be checked; point core.hooksPath at the Gibson .githooks/ and re-run"
+  chmod +x "$hooks_dir"/prepare-commit-msg "$hooks_dir"/commit-msg 2>/dev/null || true
+  [[ -x "$hooks_dir/prepare-commit-msg" && -x "$hooks_dir/commit-msg" ]] ||
+    die "core.hooksPath=$hooks lacks an executable prepare-commit-msg and commit-msg ($hooks_dir) — refusing to declare a lane whose commits would never be checked; install the Gibson .githooks/ there and re-run"
+  # Prove the declaration is effective: the real prepare-commit-msg, run the way
+  # git runs it (cwd = the worktree), must stamp this lane's vendor on a probe.
+  probe=$(mktemp "${TMPDIR:-/tmp}/gibson-lane-probe.XXXXXX") ||
+    die "cannot create a probe message file — refusing to declare a lane without proving the hooks work"
+  printf 'probe: lane declaration\n\nnot a commit\n' > "$probe"
+  if ! (cd "$wt" && env -u GIBSON_AGENT_VENDOR "$hooks_dir/prepare-commit-msg" "$probe") >/dev/null 2>&1 ||
+     ! grep -qx "Agent-Vendor: $vendor" "$probe"; then
+    rm -f "$probe"
+    die "the hooks at core.hooksPath=$hooks did not stamp 'Agent-Vendor: $vendor' on a probe message — they are not the Gibson hooks, or the declaration is not visible to them; refusing to continue"
   fi
-  info "lane vendor declared: gibson.agentVendor=$vendor on $wt${hooks:+ (hooks: $hooks)}"
+  rm -f "$probe"
+  info "lane vendor declared: gibson.agentVendor=$vendor on $wt (hooks: $hooks, probe stamped)"
 }
 
 # --- local scope-token grammar (#331) ---------------------------------------
