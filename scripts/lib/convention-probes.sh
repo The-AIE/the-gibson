@@ -83,3 +83,36 @@ cp_recipe_hash_all() {
   [[ "$seen" -gt 0 ]] || { echo "no recipe declaring a playbook was found to check"; return 2; }
   return "$worst"
 }
+
+# cp_agent_vendor_walk [BASE] — every commit in merge-base(HEAD, BASE)..HEAD
+# must be one review-evidence resolves to a vendor (follow-up to the-gibson#523:
+# lanes declared before it, and `git commit --no-verify`, bypass the hooks).
+# Default BASE origin/main. Run from inside the repo. Prints "<sha> <reason>"
+# per offender plus the fix. Returns 0 clean, 2 cannot run (no git, BASE or
+# HEAD unresolvable, lib missing), 1 findings on a DECLARED lane
+# (gibson.agentVendor set: every commit there must carry the trailer), and 3
+# findings on an undeclared checkout — report only, because an owner commit on
+# the owner's own branch resolves through independent review instead; loop.sh
+# is where the same findings block, since a lane handoff has no such review yet.
+cp_agent_vendor_walk() {
+  local base="${1:-origin/main}" lib mb head out rc
+  command -v git >/dev/null 2>&1 || return 2
+  lib="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agent-vendor.sh"
+  [[ -f "$lib" ]] || { echo "scripts/lib/agent-vendor.sh missing"; return 2; }
+  # shellcheck source=agent-vendor.sh
+  . "$lib" || return 2
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "not inside a git work tree"; return 2; }
+  head=$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null) || { echo "HEAD is unborn"; return 2; }
+  git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 || { echo "base ref not found: $base"; return 2; }
+  mb=$(git merge-base "$head" "$base" 2>/dev/null) || { echo "no merge base between HEAD and $base"; return 2; }
+  out=$(agent_vendor_unresolved_shas . "$mb" "$head"); rc=$?
+  [[ "$rc" -eq 0 ]] || { echo "cannot walk $mb..$head"; return 2; }
+  [[ -n "$out" ]] || return 0
+  printf '%s\n' "$out"
+  echo "fix: $(agent_vendor_fix_hint)"
+  if [[ -n "$(git config --get gibson.agentVendor 2>/dev/null || true)" ]]; then
+    return 1
+  fi
+  echo "(undeclared checkout: report only; an owner commit resolves through independent review)"
+  return 3
+}

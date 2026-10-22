@@ -26,5 +26,6 @@ Preconditions: doctor is ok. The two refusal recipes are safe offline: they exit
 
 - Never run a real `claim.sh <issue> ...` against the live repo to "see it work": it adds a label and opens a PR. Use the suite, which uses a fake `gh`.
 - Anything that calls `claim.sh` (lane runners, Mini jobs) must pass a vendor now, or it refuses.
-- A lane made by hand (`git worktree add`) is not declared: run `scripts/setup-hooks.sh --vendor <name>` inside it, or its commits go out without the trailer exactly as before. A lane whose `user.email` is a `.invalid` address cannot commit on a declared lane at all.
+- A lane made by hand (`git worktree add`) is not declared: run `scripts/setup-hooks.sh --vendor <name>` inside it, or its commits go out without the trailer exactly as before. A `claim.sh` lane made before the declaration existed is declared from its own reservation with `scripts/setup-hooks.sh --vendor from-reservation`; `scripts/claims-status.sh` lists the lanes still undeclared. A lane whose `user.email` is a `.invalid` address cannot commit on a declared lane at all.
+- Undeclared lanes and `git commit --no-verify` bypass the hooks; `scripts/loop.sh` blocks the supervisor handoff of such a range (same rule, `scripts/lib/agent-vendor.sh`) and `scripts/prepush.sh` reports it (`agent-vendor` probe). Sensors: `scripts/tests/dco-handoff.test.sh`, `scripts/tests/prepush.test.sh`.
 - Tests that use the fake `gh` share state: add new test blocks at the end of the file.

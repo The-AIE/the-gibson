@@ -35,7 +35,8 @@ make_repo() {
   local d="$ROOT/$1"
   mkdir -p "$d/scripts/lib" "$d/scripts/tests"
   cp "$REPO_ROOT/scripts/prepush.sh" "$d/scripts/"
-  cp "$REPO_ROOT/scripts/lib/convention-probes.sh" "$REPO_ROOT/scripts/lib/wall-timeout.sh" "$d/scripts/lib/"
+  cp "$REPO_ROOT/scripts/lib/convention-probes.sh" "$REPO_ROOT/scripts/lib/wall-timeout.sh" \
+     "$REPO_ROOT/scripts/lib/agent-vendor.sh" "$d/scripts/lib/"
   reach_stub "$d" 0
   cat > "$d/scripts/ok.mjs" <<'EOF'
 const a = process.argv.slice(2);
@@ -102,6 +103,28 @@ printf '# playbook: playbooks/builder.md\n' > "$d/playbooks/recipes/builder.yaml
 run_prepush "$d"
 [[ "$RC" -eq 1 && "$(last_line)" == *"FAILED recipe-hash"* ]] && ok "recipe whose pin was removed is reported, not skipped" || bad "recipenopin rc=$RC: $OUT"
 
+# --- Agent-Vendor walk: WARN on an undeclared checkout, FAIL on a declared lane
+# The fixture identity is sensor@gibson.invalid, the `.invalid` class review-
+# evidence maps to no login; a branch commit under it is a finding.
+d=$(make_repo vendorwalk)
+git -C "$d" checkout -q -b feat/1-x
+printf 'x\n' > "$d/x.txt"
+git -C "$d" add x.txt && git -C "$d" commit -q -s -m "work without a resolvable vendor"
+VSHA=$(git -C "$d" rev-parse HEAD)
+OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+[[ "$RC" -eq 0 && "$OUT" == *"WARN     agent-vendor"* && "$OUT" == *"$VSHA invalid-email:"* && "$OUT" == *"setup-hooks.sh --vendor from-reservation"* ]] \
+  && ok "undeclared checkout: unresolvable commit is WARN with SHA, reason and fix; exit stays 0 (report only)" || bad "vendorwalk undeclared rc=$RC: $OUT"
+git -C "$d" config gibson.agentVendor claude
+OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+[[ "$RC" -eq 1 && "$(last_line)" == *"FAILED agent-vendor"* && "$OUT" == *"$VSHA invalid-email:"* ]] \
+  && ok "declared lane: the same commit is FAIL, exit 1, name is last line" || bad "vendorwalk declared rc=$RC: $OUT"
+git -C "$d" config --unset gibson.agentVendor
+GIT_AUTHOR_EMAIL=lane@gibson.test GIT_COMMITTER_EMAIL=lane@gibson.test git -C "$d" commit -q --amend --reset-author --no-edit -m "work" -m "Agent-Vendor: claude" -s
+OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+[[ "$RC" -eq 0 && "$OUT" == *"PASS     agent-vendor"* ]] && ok "one known trailer under a resolvable email: PASS" || bad "vendorwalk fixed rc=$RC: $OUT"
+OUT=$(cd "$d" && bash scripts/prepush.sh --base refs/heads/does-not-exist --no-tests 2>&1); RC=$?
+[[ "$RC" -eq 2 ]] && ok "unresolvable base is still the usage error (probe never guesses a range)" || bad "vendorwalk badbase rc=$RC"
+
 # --- invalid --base is a usage error, not a silent all-clear ----------------
 d=$(make_repo badbase)
 OUT=$(cd "$d" && bash scripts/prepush.sh --base does-not-exist 2>&1); RC=$?
@@ -159,6 +182,7 @@ OUT=$(cd "$d" && PATH="$ROOT/nonode-bin" bash scripts/prepush.sh --base HEAD 2>&
 gate_exercises() { grep -qF "$2" "$1"; }
 RUNALL="$REPO_ROOT/scripts/tests/run-all.sh"
 GOOSE="$REPO_ROOT/scripts/tests/goose-recipes.test.sh"
+DCO="$REPO_ROOT/scripts/tests/dco-handoff.test.sh"
 # probe name -> "gate file|needle". Every probe prepush.sh runs must appear here,
 # and the needle must still be in that gate file.
 probe_gate() {
@@ -167,6 +191,7 @@ probe_gate() {
     mjs-unknown-flag)    echo "$RUNALL|cp_mjs_unknown_flag" ;;
     bash-n)              echo "$RUNALL|cp_bash_n" ;;
     recipe-hash)         echo "$GOOSE|cp_recipe_hash_drift" ;;
+    agent-vendor)        echo "$DCO|cp_agent_vendor_walk" ;;
     *) return 1 ;;
   esac
 }

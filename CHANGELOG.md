@@ -10,6 +10,30 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### Undeclared lanes and `--no-verify` commits are caught before review time (follow-up to #523)
+
+- **What changed:** `scripts/loop.sh` walks the handed-off range for commits `review-evidence`
+  would report `identity-unresolved` — not from a lane-bot login, and with no `Agent-Vendor:`
+  trailer, more than one vendor, an unknown vendor, or a `.invalid` author/committer email — and
+  blocks the supervisor handoff naming the SHAs and the fix, beside the existing Signed-off-by
+  walk. `scripts/prepush.sh` reports the same walk over `origin/main..HEAD` (`agent-vendor`
+  probe: FAIL on a declared lane, WARN/report-only on an undeclared checkout). The rule is one
+  function in `scripts/lib/agent-vendor.sh`. `scripts/setup-hooks.sh --vendor from-reservation`
+  declares a lane from its own `claim.sh` reservation commit and refuses when there is none, it
+  has no trailer, or its trailers disagree. `scripts/claims-status.sh` prints an "undeclared
+  lanes" list after the claim table: every registered worktree on a lane branch with no
+  `gibson.agentVendor`, each with the fix. Sensors: `dco-handoff.test.sh`, `prepush.test.sh`,
+  `setup-hooks.test.sh`, `claims-status.test.sh`; `loop-handoff.test.sh` fixtures now commit as a
+  resolvable lane identity with one trailer, as a real lane does.
+- **Why:** the hooks from #523 run only on a declared lane, and `git commit --no-verify` skips
+  them on any lane. Lanes created before #523 are undeclared, so their commits still reach
+  review-evidence with no trailer and fail there — the last place to learn it. The loop and the
+  pre-push check are the first.
+- **Migration note for forks:** nothing to install. Inside each existing lane worktree run
+  `scripts/setup-hooks.sh --vendor from-reservation` (or `--vendor <name>` for a hand-made lane);
+  `scripts/claims-status.sh` shows which lanes still need it. A lane handoff whose range has an
+  unvendored commit is now blocked by the loop until the commit is amended or rebased.
+
 ### Lane commits carry `Agent-Vendor:` at commit time (the 2026-10-21 closures)
 
 - **What changed:** `scripts/claim.sh` now declares the claim's vendor on the worktree it

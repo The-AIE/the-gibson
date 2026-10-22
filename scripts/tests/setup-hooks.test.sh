@@ -212,7 +212,7 @@ claim_list=$(grep -m1 -E '^[[:space:]]+claude\|codex\|grok\|devin\) ;;' "$GIBSON
   | sed 's/^[[:space:]]*//; s/) ;;.*//' | tr '|' '\n' | sort | tr '\n' ' ')
 if [[ -n "$mjs_list" ]]; then ok "pr-review-evidence.mjs still exports AUTHOR_COMMIT_VENDORS ($mjs_list)"
 else bad "could not read AUTHOR_COMMIT_VENDORS from pr-review-evidence.mjs"; fi
-for f in "$PREPARE" "$COMMIT_MSG" "$SETUP"; do
+for f in "$PREPARE" "$COMMIT_MSG" "$SETUP" "$GIBSON/scripts/lib/agent-vendor.sh"; do
   if [[ "$(list_of "$f")" == "$mjs_list" ]]; then ok "$(basename "$f") vendor list matches the evaluator"
   else bad "$(basename "$f") vendor list '$(list_of "$f")' != evaluator '$mjs_list'"; fi
 done
@@ -387,6 +387,103 @@ if (cd "$E2E" && GIT_AUTHOR_EMAIL=sensor@gibson.invalid GIT_COMMITTER_EMAIL=sens
 else
   bad "main worktree refused a commit on identity grounds"
 fi
+
+echo "setup-hooks.sh --vendor from-reservation declares a pre-#523 claim.sh lane from its own reservation commit"
+FR="$ROOT/fr"
+mkdir -p "$FR"
+$GIT init -q "$FR"
+git -C "$FR" config user.name gibson-sensor
+git -C "$FR" config user.email "$LANE_EMAIL"
+mkdir -p "$FR/.githooks"
+cp "$PREPARE" "$COMMIT_MSG" "$FR/.githooks/"
+(cd "$FR" && git add .githooks && lane_env $GIT_LANE commit -q -m init) >/dev/null 2>&1
+$GIT init -q --bare "$ROOT/fr-origin.git"
+git -C "$FR" remote add origin "$ROOT/fr-origin.git"
+git -C "$FR" push -q origin HEAD:refs/heads/main 2>/dev/null
+if git -C "$FR" rev-parse --verify --quiet 'origin/main^{commit}' >/dev/null; then ok "fixture: origin/main resolves"
+else bad "fixture bug: origin/main missing"; fi
+# The lane exactly as claim.sh left it before #523: reservation commit with the
+# trailer in its own paragraph above the Gibson block, then hand-made work
+# without any trailer, and no gibson.agentVendor anywhere. Hooks are not wired
+# in this fixture until setup-hooks.sh runs, so the messages are what we write.
+reserve_msg() { # vendor-lines...
+  printf 'chore: reserve issue #9 for issue-9-x\n\n'
+  local l; for l in "$@"; do printf '%s\n' "$l"; done
+  printf '\nGibson-Reservation: v1\nGibson-Claim-ID: issue-9-x\nGibson-Issue: #9\nGibson-Branch: feat/9-x\n'
+}
+git -C "$FR" worktree add -q "$ROOT/fr-lane" -b feat/9-x HEAD 2>/dev/null
+(cd "$ROOT/fr-lane" && lane_env $GIT_LANE commit -q --allow-empty -s -m "$(reserve_msg 'Agent-Vendor: Grok')" \
+  && lane_env $GIT_LANE commit -q --allow-empty -s -m "hand-made work, no trailer") >/dev/null 2>&1
+RES_SHA=$(git -C "$ROOT/fr-lane" rev-parse HEAD~1)
+if (cd "$ROOT/fr-lane" && "$SETUP" --vendor from-reservation) >"$ROOT/fr.out" 2>"$ROOT/fr.err"; then
+  ok "--vendor from-reservation exits 0 on a lane with a reservation"
+else
+  bad "--vendor from-reservation failed: $(cat "$ROOT/fr.err")"
+fi
+if grep -q "vendor 'grok' read from reservation commit $RES_SHA" "$ROOT/fr.out"; then ok "names the vendor (lower-cased) and the reservation SHA it was read from"
+else bad "from-reservation output unclear: $(cat "$ROOT/fr.out")"; fi
+declared=$(git -C "$ROOT/fr-lane" config --worktree --get gibson.agentVendor 2>/dev/null || true)
+if [[ "$declared" == "grok" ]]; then ok "lane is declared grok (worktree-scoped)"
+else bad "lane declaration was '${declared:-<unset>}'"; fi
+if ! git -C "$FR" config --get gibson.agentVendor >/dev/null 2>&1; then ok "main worktree stays undeclared"
+else bad "declaration leaked into the main worktree"; fi
+if (cd "$ROOT/fr-lane" && lane_env env -u GIBSON_AGENT_VENDOR $GIT_LANE commit -q --allow-empty -m "work after declaring") 2>"$ROOT/fr-after.err" \
+   && grep -qx 'Agent-Vendor: grok' <<<"$(git -C "$ROOT/fr-lane" log -1 --format=%B)"; then
+  ok "the next plain git commit on the lane carries Agent-Vendor: grok through the hooks"
+else
+  bad "commit after from-reservation lacks the trailer: $(cat "$ROOT/fr-after.err") $(git -C "$ROOT/fr-lane" log -1 --format=%B)"
+fi
+if (cd "$ROOT/fr-lane" && lane_env env -u GIBSON_AGENT_VENDOR $GIT_LANE commit -q --allow-empty -m "claude says" -m "Agent-Vendor: claude") 2>/dev/null; then
+  bad "a cross-vendor trailer was accepted on the lane declared from its reservation"
+else
+  ok "a cross-vendor trailer is refused on the lane declared from its reservation"
+fi
+
+echo "--vendor from-reservation refuses loudly instead of guessing"
+# Commits are made with --no-verify: the from-reservation run above wired
+# core.hooksPath for the whole repository, and commit-msg would refuse the
+# two-vendor and bogus-vendor messages — which is exactly the bypass this
+# option and the loop's walk exist for.
+fr_case() { # name branch exit-want needle msg-lines...
+  local name="$1" branch="$2" want="$3" needle="$4"; shift 4
+  git -C "$FR" worktree add -q "$ROOT/fr-$name" -b "$branch" HEAD 2>/dev/null
+  local l
+  for l in "$@"; do
+    (cd "$ROOT/fr-$name" && lane_env $GIT_LANE commit -q --no-verify --allow-empty -s -m "$l") >/dev/null 2>&1
+  done
+  set +e
+  (cd "$ROOT/fr-$name" && "$SETUP" --vendor from-reservation) >"$ROOT/fr-$name.out" 2>"$ROOT/fr-$name.err"
+  local rc=$?
+  set -e
+  if [[ "$want" -eq 0 ]]; then
+    if [[ "$rc" -eq 0 ]]; then ok "$name: exit 0"; else bad "$name: rc=$rc stderr=$(cat "$ROOT/fr-$name.err")"; fi
+    return 0
+  fi
+  if [[ "$rc" -eq "$want" ]] && grep -q -- "$needle" "$ROOT/fr-$name.err"; then ok "$name: exit $want, names '$needle'"
+  else bad "$name: rc=$rc (want $want) stderr=$(cat "$ROOT/fr-$name.err")"; fi
+  if ! git -C "$ROOT/fr-$name" config --worktree --get gibson.agentVendor >/dev/null 2>&1; then ok "$name: nothing was declared"
+  else bad "$name: declared '$(git -C "$ROOT/fr-$name" config --worktree --get gibson.agentVendor)' despite the refusal"; fi
+}
+fr_case no-reservation feat/10-plain 1 "no commit in" "plain work, never claimed"
+fr_case no-trailer feat/11-old 1 "has no Agent-Vendor trailer" "$(reserve_msg)"
+fr_case two-vendors feat/12-two 1 "more than one vendor (claude grok)" "$(reserve_msg 'Agent-Vendor: claude' 'Agent-Vendor: grok')"
+fr_case unknown-vendor feat/13-bogus 2 "unknown agent vendor 'bogus'" "$(reserve_msg 'Agent-Vendor: bogus')"
+# Only the FIRST reservation after the merge-base counts: a later commit that
+# happens to carry the marker (a cherry-picked foreign reservation) is not read.
+fr_case first-wins feat/14-first 0 "" "$(reserve_msg 'Agent-Vendor: codex')" "$(reserve_msg 'Agent-Vendor: grok')"
+if [[ "$(git -C "$ROOT/fr-first-wins" config --worktree --get gibson.agentVendor 2>/dev/null)" == "codex" ]]; then ok "first-wins: the first reservation's vendor (codex) is the declaration"
+else bad "first-wins: declared '$(git -C "$ROOT/fr-first-wins" config --worktree --get gibson.agentVendor 2>/dev/null)' (want codex)"; fi
+NOORIGIN="$ROOT/no-origin"
+mkdir -p "$NOORIGIN" && $GIT init -q "$NOORIGIN" && mkdir -p "$NOORIGIN/.githooks" && cp "$PREPARE" "$COMMIT_MSG" "$NOORIGIN/.githooks/"
+(cd "$NOORIGIN" && lane_env $GIT_LANE commit -q --allow-empty -m init) >/dev/null 2>&1
+set +e
+(cd "$NOORIGIN" && "$SETUP" --vendor from-reservation) >/dev/null 2>"$ROOT/no-origin.err"
+no_rc=$?
+set -e
+if [[ "$no_rc" -eq 1 ]] && grep -q 'neither origin/main nor origin/master' "$ROOT/no-origin.err"; then ok "no origin/main: exit 1, says what to fetch or pass"
+else bad "no-origin rc=$no_rc: $(cat "$ROOT/no-origin.err")"; fi
+if grep -q 'from-reservation' <<<"$("$SETUP" --help)"; then ok "--help documents --vendor from-reservation"
+else bad "--help does not mention from-reservation"; fi
 
 echo
 echo "setup-hooks.test.sh: $PASS passed, $FAIL failed"

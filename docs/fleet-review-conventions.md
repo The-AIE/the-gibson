@@ -118,6 +118,20 @@ worktree; the owner's own checkout, which declares nothing, is unchanged. Note t
 worktree add` copies the current worktree's `config.worktree` into the new one, so a lane cut
 by hand from a declared worktree inherits that declaration until re-declared.
 
+The hooks only run where a lane is declared, and `git commit --no-verify` skips them anywhere, so
+two backstops apply the same decision rule the evaluator will: `scripts/loop.sh` walks the
+handed-off range before queueing a supervisor handoff (beside its Signed-off-by walk) and blocks,
+naming the SHAs and the fix, on any commit not authored by a lane-bot login that has no
+`Agent-Vendor:` trailer, names more than one vendor, names one the evaluator does not know, or is
+authored or committed under a `.invalid` email; `scripts/prepush.sh` reports the same walk over
+`origin/main..HEAD` (FAIL on a declared lane, WARN on an undeclared checkout, where an owner
+commit resolves through independent review instead). The rule lives once, in
+`scripts/lib/agent-vendor.sh`. A lane created by `claim.sh` before the declaration existed is
+declared from its own reservation commit with `scripts/setup-hooks.sh --vendor from-reservation`
+(first commit after the merge-base with `origin/main` carrying `Gibson-Reservation: v1`; refused
+when there is none, when it has no trailer, or when its trailers disagree), and
+`scripts/claims-status.sh` lists every registered lane worktree that is still undeclared.
+
 **Residual window (documented, not hidden).** The workflow resolves the head via the
 API and falls back to the event's head so `pending` is stamped even when the API call
 fails. Review and comment events carry no head in their payload; if the API is down

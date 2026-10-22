@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # dco-handoff.test.sh — sensors for Signed-off-by refusal on handoff (issue #204)
+# and for the Agent-Vendor walk beside it (follow-up to the-gibson#520/#523)
 #
 # WHY
 #   CI must not be the first thing that notices an unsigned commit. Supervisor
 #   handoff (including --dry-run) and the loop handoff path refuse any commit
 #   in the handed-off range that lacks a Signed-off-by trailer. The *base*
 #   commit is outside that range and is left unsigned on purpose.
+#   Likewise review time must not be the first place to learn a lane commit
+#   resolves to no vendor: the loop walks the same range for commits with no
+#   Agent-Vendor trailer, more than one vendor, an unknown vendor, or a
+#   `.invalid` author/committer email (lane-bot commits resolve by identity),
+#   and scripts/prepush.sh reports the same rule through cp_agent_vendor_walk.
 #
 # USAGE
 #   scripts/tests/dco-handoff.test.sh
@@ -59,8 +65,26 @@ export PATH
 
 GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gpgsign=false"
 
-# base stays unsigned on purpose; work commits are signed or not per caller.
-setup_repo() { # setup_repo <signed|unsigned>
+# The hermetic identity above is sensor@gibson.invalid on purpose: `.invalid`
+# is the no-login class the Agent-Vendor walk refuses. Work that must be handed
+# off is therefore committed as a resolvable-looking lane address with one
+# trailer; a lane-bot address resolves by identity and needs no trailer.
+LANE_EMAIL=lane@gibson.test
+BOT_EMAIL='317307306+aie-agent-lanes-grok[bot]@users.noreply.github.com'
+work_commit() { # email [git-commit args...] — signed, -a
+  local email="$1"; shift
+  GIT_AUTHOR_EMAIL="$email" GIT_COMMITTER_EMAIL="$email" $GIT -C "$REPO" commit -q -s -a "$@"
+}
+
+# base stays unsigned on purpose; work commits are shaped per caller:
+#   signed         one Agent-Vendor trailer, lane email (hands off)
+#   unsigned       no Signed-off-by (DCO refuses first)
+#   unvendored     signed, lane email, no trailer           (#506 class)
+#   invalid-email  signed, trailer, author/committer .invalid (#503/#504 class)
+#   two-vendors    signed, two distinct Agent-Vendor trailers
+#   unknown-vendor signed, Agent-Vendor: bogus
+#   bot            signed, lane-bot email, no trailer       (resolves by login)
+setup_repo() { # setup_repo <mode>
   local mode="${1:-signed}"
   rm -rf "$REPO" "$REMOTE"
   mkdir -p "$REPO"
@@ -71,11 +95,16 @@ setup_repo() { # setup_repo <signed|unsigned>
   $GIT -C "$REPO" commit -q -m "base"
   $GIT -C "$REPO" checkout -q -b "$BRANCH"
   echo work >> "$REPO/README.md"
-  if [[ "$mode" == "signed" ]]; then
-    $GIT -C "$REPO" commit -q -s -am "work"
-  else
-    $GIT -C "$REPO" commit -q -am "work"
-  fi
+  case "$mode" in
+    signed)         work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: claude" ;;
+    unsigned)       $GIT -C "$REPO" commit -q -am "work" ;;
+    unvendored)     work_commit "$LANE_EMAIL" -m "work" ;;
+    invalid-email)  work_commit sensor@gibson.invalid -m "work" -m "Agent-Vendor: claude" ;;
+    two-vendors)    work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: claude" -m "Agent-Vendor: codex" ;;
+    unknown-vendor) work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: bogus" ;;
+    bot)            work_commit "$BOT_EMAIL" -m "work" ;;
+    *) echo "setup_repo: unknown mode $mode" >&2; exit 1 ;;
+  esac
   $GIT -C "$REPO" checkout -q main
   $GIT init -q --bare "$REMOTE"
   git -C "$REPO" remote add origin "https://github.com/acme/widget.git"
@@ -273,6 +302,86 @@ if handoff_invoked; then
 else
   bad "loop blocked a signed range (stderr=$(tr '\n' ' ' <"$ROOT/loop-signed.err") journal=$([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent))"
 fi
+
+# ---------------------------------------------------------------------------
+# Agent-Vendor walk (follow-up to the-gibson#520/#523)
+# ---------------------------------------------------------------------------
+echo "Agent-Vendor walk: the loop refuses work review-evidence would not resolve, before reviewer or supervisor"
+for mode in unvendored invalid-email two-vendors unknown-vendor; do
+  setup_repo "$mode"
+  SHA=$(head_sha)
+  write_state "$BRANCH" "$SHA"
+  run_loop "$ROOT/loop-$mode.err"
+  if handoff_invoked; then bad "$mode: loop invoked the supervisor"
+  else ok "$mode: loop does not invoke the supervisor"; fi
+  if [[ -s "$CALLS/second-opinion.count" ]]; then bad "$mode: loop spent a reviewer"
+  else ok "$mode: loop does not spend a reviewer"; fi
+  if grep -q 'Agent-Vendor' "$REPO/gibson/journal.md" && grep -q "$SHA" "$REPO/gibson/journal.md" \
+     && grep -q 'setup-hooks.sh --vendor from-reservation' "$REPO/gibson/journal.md" \
+     && grep -q 'git commit --amend' "$REPO/gibson/journal.md"; then
+    ok "$mode: journal names Agent-Vendor, the SHA and the fix (setup-hooks.sh --vendor, amend/rebase)"
+  else
+    bad "$mode: journal missing the Agent-Vendor reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"
+  fi
+  if grep -qi 'Signed-off-by trailer' "$REPO/gibson/journal.md"; then bad "$mode: refused for DCO, not for Agent-Vendor (fixture is signed)"
+  else ok "$mode: the DCO walk passed; only the Agent-Vendor walk refused"; fi
+  if grep -qx "handoff: $BRANCH" "$REPO/gibson/loop-state.md"; then ok "$mode: handoff stays queued"
+  else bad "$mode: handoff was cleared from loop-state"; fi
+done
+# The reason the journal gives must be the evaluator's class, per mode.
+setup_repo unvendored;     SHA=$(head_sha); write_state "$BRANCH" "$SHA"; run_loop "$ROOT/r1.err"
+grep -q "$SHA no-trailer" "$REPO/gibson/journal.md" && ok "unvendored: reason is no-trailer" || bad "unvendored reason: $(cat "$REPO/gibson/journal.md")"
+setup_repo invalid-email;  SHA=$(head_sha); write_state "$BRANCH" "$SHA"; run_loop "$ROOT/r2.err"
+grep -q "$SHA invalid-email:sensor@gibson.invalid" "$REPO/gibson/journal.md" && ok "invalid-email: reason names the .invalid address" || bad "invalid-email reason: $(cat "$REPO/gibson/journal.md")"
+setup_repo two-vendors;    SHA=$(head_sha); write_state "$BRANCH" "$SHA"; run_loop "$ROOT/r3.err"
+grep -q "$SHA multi-vendor:claude,codex" "$REPO/gibson/journal.md" && ok "two-vendors: reason lists both" || bad "two-vendors reason: $(cat "$REPO/gibson/journal.md")"
+setup_repo unknown-vendor; SHA=$(head_sha); write_state "$BRANCH" "$SHA"; run_loop "$ROOT/r4.err"
+grep -q "$SHA unknown-vendor:bogus" "$REPO/gibson/journal.md" && ok "unknown-vendor: reason names bogus" || bad "unknown-vendor reason: $(cat "$REPO/gibson/journal.md")"
+
+echo "Agent-Vendor walk: a lane-bot commit resolves by identity and is handed off without a trailer"
+setup_repo bot
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+: > "$CALLS/devin.cmds"
+run_loop "$ROOT/loop-bot.err"
+if handoff_invoked; then ok "lane-bot authored range is handed off"
+else bad "lane-bot range blocked (stderr=$(tr '\n' ' ' <"$ROOT/loop-bot.err") journal=$([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent))"; fi
+
+echo "Agent-Vendor walk: the same rule, as scripts/lib/agent-vendor.sh and prepush's cp_agent_vendor_walk"
+# Probe return codes are data here, not failures: keep errexit off.
+set +e
+# shellcheck source=../lib/convention-probes.sh
+. "$GIBSON/scripts/lib/convention-probes.sh"
+# shellcheck source=../lib/agent-vendor.sh
+. "$GIBSON/scripts/lib/agent-vendor.sh"
+if [[ "$AGENT_VENDORS" == "claude codex grok devin" ]]; then ok "lib vendor list is the evaluator's four"
+else bad "lib vendor list drifted: $AGENT_VENDORS"; fi
+setup_repo unvendored
+SHA=$(head_sha); BASE=$(base_sha)
+out=$(agent_vendor_unresolved_shas "$REPO" "$BASE" "$SHA"); rc=$?
+[[ "$rc" -eq 0 && "$out" == "$SHA no-trailer" ]] && ok "agent_vendor_unresolved_shas: readable range, one finding '<sha> no-trailer'" || bad "walk rc=$rc out='$out'"
+out=$(agent_vendor_unresolved_shas "$REPO" "$BASE" "$BASE"); rc=$?
+[[ "$rc" -eq 0 && -z "$out" ]] && ok "agent_vendor_unresolved_shas: empty range is clean (the unsigned, .invalid base is outside it)" || bad "empty range rc=$rc out='$out'"
+if agent_vendor_unresolved_shas "$REPO" "$BASE" deadbeef >/dev/null 2>&1; then bad "unreadable head must return 1"
+else ok "agent_vendor_unresolved_shas: unreadable head returns 1 (caller fails closed)"; fi
+agent_vendor_lane_bot_email "$BOT_EMAIL" && ok "lane-bot email recognised" || bad "lane-bot email not recognised"
+agent_vendor_lane_bot_email "$LANE_EMAIL" && bad "lane email mistaken for a bot" || ok "a lane email is not a bot"
+agent_vendor_lane_bot_email "x+dependabot[bot]@users.noreply.github.com" && bad "another bot mistaken for a lane bot" || ok "a non-lane bot is not a lane bot"
+# Probe: run from inside the lane branch, undeclared → 3 (report only), declared → 1, fixed → 0, bad base → 2.
+git -C "$REPO" checkout -q "$BRANCH"
+out=$(cd "$REPO" && cp_agent_vendor_walk main); rc=$?
+[[ "$rc" -eq 3 && "$out" == *"$SHA no-trailer"* && "$out" == *"fix: "* && "$out" == *"report only"* ]] && ok "cp_agent_vendor_walk: undeclared checkout → 3 with SHA, reason, fix" || bad "probe undeclared rc=$rc: $out"
+git -C "$REPO" config gibson.agentVendor claude
+out=$(cd "$REPO" && cp_agent_vendor_walk main); rc=$?
+[[ "$rc" -eq 1 && "$out" == *"$SHA no-trailer"* ]] && ok "cp_agent_vendor_walk: declared lane → 1" || bad "probe declared rc=$rc: $out"
+git -C "$REPO" config --unset gibson.agentVendor
+out=$(cd "$REPO" && cp_agent_vendor_walk refs/heads/nope); rc=$?
+[[ "$rc" -eq 2 ]] && ok "cp_agent_vendor_walk: unresolvable base → 2 (cannot run), never a pass" || bad "probe bad base rc=$rc: $out"
+setup_repo signed
+git -C "$REPO" checkout -q "$BRANCH"
+out=$(cd "$REPO" && cp_agent_vendor_walk main); rc=$?
+[[ "$rc" -eq 0 && -z "$out" ]] && ok "cp_agent_vendor_walk: one known trailer under a resolvable email → 0" || bad "probe clean rc=$rc: $out"
+git -C "$REPO" checkout -q main
 
 echo
 echo "dco-handoff.test.sh: $PASS passed, $FAIL failed"
