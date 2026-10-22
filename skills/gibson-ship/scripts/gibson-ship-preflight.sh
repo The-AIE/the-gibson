@@ -19,7 +19,7 @@ if [ -f "$CFG" ]; then
 fi
 [ -n "$BASE" ] || BASE=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null || echo main)
 if [ -z "$CTX" ] && [ -n "$REPO" ]; then
-  if PROT=$(gh api "repos/$REPO/branches/$BASE/protection" --jq '(.required_status_checks.contexts // [])[]' 2>/dev/null); then CTX=$(echo "$PROT" | tr '\n' ' '); SRC="branch protection on $BASE"; else note "$REPO: $BASE has no branch protection (GitHub 404); nothing is required before merge"; fi
+  CTX=$(gh api "repos/$REPO/branches/$BASE/protection" --jq '(.required_status_checks.contexts // [])[]' 2>/dev/null | tr '\n' ' '); [ -n "$CTX" ] && SRC="branch protection on $BASE"
 fi
 [ -n "$CTX" ] && ok "required contexts ($SRC): $CTX" || note "no required contexts found in $CFG or branch protection; review-evidence may still gate"
 git fetch -q origin "$BASE" 2>/dev/null || fail "git fetch origin $BASE"

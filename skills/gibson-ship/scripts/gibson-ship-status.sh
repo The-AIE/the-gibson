@@ -13,7 +13,7 @@ BEHIND=$(gh api "repos/$REPO/compare/$BASE...$HEAD" --jq .behind_by 2>/dev/null)
 # Required contexts: installed config in the checkout if we are in that repo, else branch protection.
 CTX=""; SRC=""
 if [ -f .agents/gibson-delivery.json ] && [ "$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)" = "$REPO" ]; then CTX=$(jq -r '(.requiredContexts // [])[]' .agents/gibson-delivery.json | tr '\n' ' '); SRC=".agents/gibson-delivery.json"; fi
-if [ -z "$CTX" ]; then if PROT=$(gh api "repos/$REPO/branches/$BASE/protection" --jq '(.required_status_checks.contexts // [])[]' 2>/dev/null); then CTX=$(echo "$PROT" | tr '\n' ' '); SRC="branch protection on $BASE"; else SRC="none: $BASE has no branch protection (GitHub 404)"; fi; fi
+[ -n "$CTX" ] || { CTX=$(gh api "repos/$REPO/branches/$BASE/protection" --jq '(.required_status_checks.contexts // [])[]' 2>/dev/null | tr '\n' ' '); SRC="branch protection on $BASE"; }
 echo; echo "Required contexts at head (${SRC:-none found}): ${CTX:-none}"
 CR=$(gh api "repos/$REPO/commits/$HEAD/check-runs?per_page=100" --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion // "-")"')
 ST=$(gh api "repos/$REPO/commits/$HEAD/status" --jq '.statuses[] | "\(.context)\t\(.state)\t\(.description // "")"')

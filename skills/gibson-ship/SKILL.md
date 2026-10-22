@@ -185,63 +185,6 @@ Merging to the default branch ships nothing to a live site. Read
    the sync PR or the core PR.
 4. Write the outcome to Cortex (`cortex-write`): PR numbers, merge SHA, deployment id, config.
 
-## Example: ConferenceOS, PR open → live on events.allthingsai.org
-
-Two card rows carry this walk: `conference-os core` and `events.allthingsai.org` in
-`references/deployments.json`. The outputs below are from the scripts run against
-conference-os#2357 on 2026-10-21 (full text in the-gibson#514).
-
-1. **Preflight in the PR worktree.** `gibson-ship-preflight.sh body.md 2357` read the required
-   contexts from branch protection (`quality build-e2e-required DCO review-evidence`), parsed the
-   body with the repo's own `parsePullRequestMetadata` (claim `ata-site-announcement-strip`,
-   isolation `dedicated worktree`), found one authoring vendor (`claude`, via `Agent-Vendor`
-   trailers on all six commits), found the migration-safety block (schema PR), and failed one
-   check: head behind `main` by one. With the body as first opened it also failed the two claim
-   lines, which is the miss that cost the first CI round.
-2. **Wait.** `gibson-ship-status.sh 2357` showed `quality`, `build-e2e-required`, `DCO` green and
-   `review-evidence` pending "UNREVIEWED: awaiting trusted-provider evidence". Nothing to do yet.
-3. **One pre-review**, Codex CLI, batched fixes, one push. CLI output is advisory.
-4. **Hand-off.** The status script's Mini section showed the journal: `snapshot-changed` at 00:13
-   (base moved when #2356 merged), `fail` at 00:44 and 01:35 (two App REQUEST_CHANGES comments,
-   `result=fail` blocks), `required-context` at 01:52 after the next push. Each line maps to a row
-   in the table in step 4. No attestation: all commits are owner-authored.
-5. **Merge.** Schema PR, so Mark's go first; then the captain merges once the App passes a head
-   that contains the `main` tip, or `gh pr merge 2357 --squash --match-head-commit <head>`.
-6. **Promote.** Card row `events.allthingsai.org`: worktree of `The-AIE/ata-events-site` from
-   `main`, `git cherry-pick -x <merge sha>`, sync PR with the same claim lines, merge, then
-   `vercel deploy --prod --scope the-aie` from the merged checkout (production is a CLI deploy;
-   no `release` branch exists), SHA recorded on the sync PR.
-7. **Verify, then configure.** `vercel inspect <url> --scope the-aie` READY with
-   `events.allthingsai.org` in the aliases; curl the public route; then the install MCP call
-   (`update_site_announcement`) that turns the shipped-off strip on.
-
-## Example: Agent Kontrol (not yet Gibson-adopted)
-
-Card row `Agent Kontrol (fleet.peripety.com)`. Read on 2026-10-21: `mrhinkle/agent-kontrol` has
-no `.agents/` directory, no `check-active-work.mjs`, no review-evidence workflow or trust file,
-no DCO or `Agent-Vendor` convention, and no branch protection on `main` or `release`. Its one
-workflow is `ci.yml` (typecheck, tests against Postgres, Docker build + `/login` probe).
-Deploy path is documented and verified: Vercel project `mission-control` (team `the-aie`),
-Production Branch `release`, domain `fleet.peripety.com`; the last two production deployments
-were git-triggered from `release` at merge `1e0b052e` (#39).
-
-`gibson-ship-preflight.sh body.md 39` on #39 reports: no branch protection (note), body has no
-claim lines (fail), one authoring vendor (`codex`, read from the lane-bot login), no schema, and
-head behind `main`. `gibson-ship-status.sh 39` reports no required contexts, no evidence blocks,
-and that the Mini does not watch the repo. Two findings beyond the scripts: #39 was a feature
-branch merged **straight into `release`** by the Grok lane bot that authored it (self-merge,
-bypassing `main`), and `release` is now 2 commits ahead of `main` while `main` is 9 ahead of
-`release`, so the two have diverged.
-
-**Not yet adopted: run gibson-setup first.** Until it installs the claim gate, the review-evidence
-gate and branch protection, steps 1 to 6 of this skill have nothing to read on this repo, and
-"merged" means whatever the merger decided. What gibson-ship can do today on Agent Kontrol is
-step 7 and 8 only: a `main → release` PR per `docs/DEPLOY.md`, verify the `release` deployment
-READY with `fleet.peripety.com` aliased, curl the dashboard login. Fields on the card marked
-`null` could not be filled from the repo: required contexts, trust file, merge captain, schema
-process (it runs `scripts/apply-schema.mjs` in the build and as the Fly release command; that is
-not a reviewed-migration path).
-
 ## What this prevents (conference-os#2357, 2026-10-21)
 
 Body without claim fields (quality failed); owner attestation on owner-authored commits
