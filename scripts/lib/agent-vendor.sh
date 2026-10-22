@@ -74,19 +74,38 @@ agent_vendor_repo_slug() {
 # Read with `git show <base>:config/review-evidence.v1.json` — never from the
 # candidate's tree, which the lane can edit (Codex round four on #525). Cached
 # per repo + base commit. Unreadable → AGENT_VENDOR_TABLE_OK=0: nothing exempt.
+#
+# Governed target repositories carry no identity table of their own: the
+# evaluator's table lives in the Gibson harness. AGENT_VENDOR_TABLE_FALLBACK
+# (loop.sh sets it to $GIBSON/config/review-evidence.v1.json) is read when the
+# base has no table. It is the harness's own file in a different repository,
+# which the candidate lane cannot edit — the same trust loop.sh already places in
+# the harness code it executes. Unset → no fallback, nothing resolves.
 AGENT_VENDOR_TABLE=""
 AGENT_VENDOR_TABLE_FOR=""
 AGENT_VENDOR_TABLE_OK=0
+AGENT_VENDOR_TABLE_FALLBACK="${AGENT_VENDOR_TABLE_FALLBACK:-}"
+agent_vendor_table_json() { # repo base_sha — the table's JSON on stdout, or 1
+  if [[ -n "$2" ]] && git -C "$1" cat-file -e "${2}:config/review-evidence.v1.json" 2>/dev/null; then
+    git -C "$1" show "${2}:config/review-evidence.v1.json" 2>/dev/null
+    return $?
+  fi
+  if [[ -n "$AGENT_VENDOR_TABLE_FALLBACK" && -r "$AGENT_VENDOR_TABLE_FALLBACK" ]]; then
+    cat "$AGENT_VENDOR_TABLE_FALLBACK"
+    return $?
+  fi
+  return 1
+}
 agent_vendor_author_table() { # repo base — prints the table; 1 when unreadable
   local repo="$1" base="${2:-}" base_sha key
   base_sha=$(git -C "$repo" rev-parse --verify --quiet "${base}^{commit}" 2>/dev/null || true)
-  key="$repo@$base_sha"
+  key="$repo@$base_sha@$AGENT_VENDOR_TABLE_FALLBACK"
   if [[ "$AGENT_VENDOR_TABLE_FOR" != "$key" ]]; then
     AGENT_VENDOR_TABLE_FOR="$key"
     AGENT_VENDOR_TABLE=""
     AGENT_VENDOR_TABLE_OK=0
-    if [[ -n "$base_sha" ]] && command -v node >/dev/null 2>&1; then
-      if AGENT_VENDOR_TABLE=$(git -C "$repo" show "${base_sha}:config/review-evidence.v1.json" 2>/dev/null | node -e '
+    if command -v node >/dev/null 2>&1; then
+      if AGENT_VENDOR_TABLE=$(agent_vendor_table_json "$repo" "$base_sha" | node -e '
         let src = ""; process.stdin.on("data", (d) => { src += d; }); process.stdin.on("end", () => {
           const c = JSON.parse(src);
           if (!Array.isArray(c.identities)) process.exit(3);

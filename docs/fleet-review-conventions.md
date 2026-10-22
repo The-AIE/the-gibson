@@ -128,7 +128,9 @@ to a login the trusted base's identity table does not list as an author (or list
 has no `Agent-Vendor:` trailer, names more than one vendor, or names one the evaluator does not
 know; `scripts/prepush.sh` reports the same walk over
 `origin/main..HEAD` (FAIL on a declared lane, WARN on an undeclared checkout, where an owner
-commit resolves through independent review instead). The rule lives once, in
+commit resolves through independent review instead). The identity table comes from the trusted
+base (a governed target repository, which carries none, uses the harness's own copy); the walk
+runs only when origin is a `GH_HOST` repository, since review-evidence is GitHub-only. The rule lives once, in
 `scripts/lib/agent-vendor.sh`. A lane created by `claim.sh` before the declaration existed is
 declared from its own reservation commit with `scripts/setup-hooks.sh --vendor from-reservation`
 (the commit after the merge-base with `origin/main` carrying `Gibson-Reservation: v1` whose

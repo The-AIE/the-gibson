@@ -17,7 +17,8 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
   GitHub login (a noreply address carries its login; any other address is proven only through
   GitHub's commit search by email in the repository, else `login-unresolved`), a login not listed
   as an author in `config/review-evidence.v1.json` at the trusted base ref (never the lane's own
-  copy; no readable table, nothing resolves), a listed identity outside its `authorCommits`
+  copy; a governed target repository with no table falls back to the harness's own
+  `config/review-evidence.v1.json`; no readable table, nothing resolves), a listed identity outside its `authorCommits`
   allowlist, and, for an owner identity, no `Agent-Vendor:`
   trailer, more than one vendor, an unknown vendor, or a `.invalid` author/committer email — and
   blocks the supervisor handoff naming the SHAs and the fix, beside the existing Signed-off-by

@@ -561,6 +561,12 @@ why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" notable)
 [[ "$why" == "identity-table-unreadable:aie-agent-lanes-grok[bot]" ]] && ok "no identity table at the base → identity-table-unreadable, fail closed" || bad "no-table reason was '$why'"
 why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" refs/heads/does-not-exist)
 [[ "$why" == "identity-table-unreadable:aie-agent-lanes-grok[bot]" ]] && ok "unresolvable base → identity-table-unreadable, fail closed" || bad "bad-base reason was '$why'"
+# A governed target repository has no table of its own: the harness's copy is
+# the fallback (loop.sh sets it), read only when the base has none.
+why=$(AGENT_VENDOR_TABLE_FALLBACK="$GIBSON/config/review-evidence.v1.json" agent_vendor_commit_problem "$REPO" "$(head_sha)" notable)
+[[ -z "$why" ]] && ok "no table at the base + harness fallback → resolves from the harness's table" || bad "fallback reason was '$why'"
+why=$(AGENT_VENDOR_TABLE_FALLBACK="$ROOT/does-not-exist.json" agent_vendor_commit_problem "$REPO" "$(head_sha)" notable)
+[[ "$why" == "identity-table-unreadable:aie-agent-lanes-grok[bot]" ]] && ok "an unreadable fallback is still fail closed" || bad "bad-fallback reason was '$why'"
 # Probe: run from inside the lane branch, undeclared → 3 (report only), declared → 1, fixed → 0, bad base → 2.
 setup_repo unvendored
 SHA=$(head_sha)

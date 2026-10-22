@@ -2492,9 +2492,11 @@ EOF
 # (empty or not), 1 when it cannot be walked. The rule lives in
 # scripts/lib/agent-vendor.sh, shared with prepush.sh's report-only probe.
 vendor_unresolved_shas() {
-  # Table at the pinned remote base; logins proven in the repository this loop
-  # was told it drives (--repo-slug), the same slug review-evidence will read.
-  agent_vendor_unresolved_shas "$1" "$2" "$3" "$2" "$EXPECTED_REPO_SLUG"
+  # Table at the pinned remote base, falling back to this harness's own copy
+  # (target repositories carry none); logins proven in origin's GitHub slug,
+  # which is also the one review-evidence reads.
+  AGENT_VENDOR_TABLE_FALLBACK="$GIBSON/config/review-evidence.v1.json" \
+    agent_vendor_unresolved_shas "$1" "$2" "$3" "$2" "$ORIGIN_HALT_SLUG"
 }
 
 # File-handoff protocol: pin and pass the head SHA so a later push cannot
@@ -2560,8 +2562,15 @@ supervisor_handoff() {
   # listed lane bot resolves by identity, an owner identity needs exactly one
   # known Agent-Vendor trailer. Unprovable identities fail closed.
   # Catches lanes declared before #523 and commits made with --no-verify.
+  # Same gate as the remote kill switch: review-evidence evaluates GitHub
+  # repositories, and proving a login means asking gh about origin's slug. A
+  # GitLab/Bitbucket/unparseable/other-host origin never touches gh (it would
+  # answer for an unrelated same-named github.com repository), so the walk is
+  # skipped there, loudly, exactly as the remote halt check is.
   local unvendored
-  if unvendored=$(vendor_unresolved_shas "$REPO" "$base_sha" "$sha"); then
+  if ! origin_remote_halt_slug; then
+    info "Agent-Vendor walk skipped: ${ORIGIN_HALT_SKIP_REASON} — review-evidence is GitHub-only, so there is nothing to pre-empt (zero gh queries)"
+  elif unvendored=$(vendor_unresolved_shas "$REPO" "$base_sha" "$sha"); then
     if [[ -n "$unvendored" ]]; then
       unvendored=$(printf '%s' "$unvendored" | tr '\n' ';' | sed 's/;/; /g')
       block "commit(s) in $base_sha..$sha would be identity-unresolved at review time (no resolvable Agent-Vendor trailer): $unvendored. Fix: $(agent_vendor_fix_hint), then re-queue."
