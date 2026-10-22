@@ -106,7 +106,9 @@ cp_agent_vendor_walk() {
   head=$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null) || { echo "HEAD is unborn"; return 2; }
   git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 || { echo "base ref not found: $base"; return 2; }
   mb=$(git merge-base "$head" "$base" 2>/dev/null) || { echo "no merge base between HEAD and $base"; return 2; }
-  out=$(agent_vendor_unresolved_shas . "$mb" "$head"); rc=$?
+  # Range from the merge-base; the lane-bot identity table from the trusted
+  # BASE ref itself, never from this checkout's own copy.
+  out=$(agent_vendor_unresolved_shas . "$mb" "$head" "$base"); rc=$?
   [[ "$rc" -eq 0 ]] || { echo "cannot walk $mb..$head"; return 2; }
   [[ -n "$out" ]] || return 0
   printf '%s\n' "$out"

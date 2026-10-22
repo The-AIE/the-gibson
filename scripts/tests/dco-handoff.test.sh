@@ -387,27 +387,55 @@ else bad "mini-bot: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$
 # data here: errexit off.
 set +e
 . "$GIBSON/scripts/lib/agent-vendor.sh"
-agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" "$ALLOWED"; rc=$?
+agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" main "$ALLOWED"; rc=$?
 [[ "$rc" -eq 0 ]] && ok "mini-bot: an allowlisted SHA from the table is exempt" || bad "allowlisted SHA rc=$rc"
-agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" "${ALLOWED:0:12}"; rc=$?
+agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" main "${ALLOWED:0:12}"; rc=$?
 [[ "$rc" -eq 2 ]] && ok "mini-bot: a prefix of an allowlisted SHA is not a match (exact 40-hex only)" || bad "prefix rc=$rc"
-agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" "$SHA"; rc=$?
+agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" main "$SHA"; rc=$?
 [[ "$rc" -eq 2 ]] && ok "mini-bot: a SHA outside the allowlist returns 2 (commit-not-allowed)" || bad "outside rc=$rc"
-agent_vendor_lane_bot_email "$BOT_EMAIL" "$REPO" "$SHA"; rc=$?
+agent_vendor_lane_bot_email "$BOT_EMAIL" "$REPO" main "$SHA"; rc=$?
 [[ "$rc" -eq 0 ]] && ok "grok bot (no allowlist): any SHA is exempt" || bad "unrestricted bot rc=$rc"
-# And through the walk: put this commit's SHA in the fixture table's allowlist
-# (the walk reads the working-tree table) → the same commit now resolves and is handed off.
+# And through the walk: allowlist this commit's SHA in the table ON THE BASE
+# (committed to main and pushed, which is what the loop reads) → the same
+# commit now resolves and is handed off.
 node -e 'const fs=require("fs");const p=process.argv[1];const c=JSON.parse(fs.readFileSync(p,"utf8"));const i=c.identities.find(x=>x.login==="aie-agent-lanes-mini[bot]");i.authorCommits=[process.argv[2]];fs.writeFileSync(p,JSON.stringify(c,null,2)+"\n")' "$REPO/config/review-evidence.v1.json" "$SHA"
+$GIT -C "$REPO" commit -q -am "allowlist the mini bot's commit on the base" && git -C "$REPO" push -q origin main
 AGENT_VENDOR_AUTHOR_LOGINS_FOR=""
-why=$(agent_vendor_commit_problem "$REPO" "$SHA")
-[[ -z "$why" ]] && ok "mini-bot: once the table allowlists this SHA, the commit resolves" || bad "allowlisted commit reason '$why'"
+why=$(agent_vendor_commit_problem "$REPO" "$SHA" main)
+[[ -z "$why" ]] && ok "mini-bot: once the BASE table allowlists this SHA, the commit resolves" || bad "allowlisted commit reason '$why'"
 write_state "$BRANCH" "$SHA"
 : > "$CALLS/devin.cmds"
 rm -f "$REPO/gibson/journal.md"
 run_loop "$ROOT/loop-mini-bot-ok.err"
 if handoff_invoked; then ok "mini-bot: the allowlisted commit is handed off"
 else bad "mini-bot: allowlisted commit blocked (journal=$([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent))"; fi
-git -C "$REPO" checkout -q -- config/review-evidence.v1.json
+
+echo "Agent-Vendor walk: a lane cannot list its own bot — the table is read at the trusted base (Codex round four)"
+setup_repo fake-bot
+# The lane edits ITS OWN copy of the identity table to list the fake bot, and
+# commits that edit on the branch, then commits as the fake bot without a trailer.
+git -C "$REPO" checkout -q "$BRANCH"
+node -e 'const fs=require("fs");const p=process.argv[1];const c=JSON.parse(fs.readFileSync(p,"utf8"));c.identities.push({login:"aie-agent-lanes-fake[bot]",appSlug:"aie-agent-lanes-fake",appId:1,vendor:"grok",roles:["author"]});fs.writeFileSync(p,JSON.stringify(c,null,2)+"\n")' "$REPO/config/review-evidence.v1.json"
+GIT_AUTHOR_EMAIL="$FAKE_BOT_EMAIL" GIT_COMMITTER_EMAIL="$FAKE_BOT_EMAIL" $GIT -C "$REPO" commit -q -s -am "lane lists its own bot"
+echo more >> "$REPO/README.md"
+work_commit "$FAKE_BOT_EMAIL" -m "trailerless work as the self-listed bot"
+git -C "$REPO" checkout -q main
+git -C "$REPO" push -q origin "$BRANCH"
+SHA=$(head_sha)
+if node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.exit(c.identities.some(x=>x.login==="aie-agent-lanes-fake[bot]")?0:1)' <(git -C "$REPO" show "$SHA:config/review-evidence.v1.json"); then ok "fixture: the branch's own table lists aie-agent-lanes-fake[bot]"
+else bad "fixture bug: branch table does not list the fake bot"; fi
+write_state "$BRANCH" "$SHA"
+: > "$CALLS/devin.cmds"
+rm -f "$REPO/gibson/journal.md"
+run_loop "$ROOT/loop-self-listed.err"
+if handoff_invoked; then bad "self-listed bot: loop trusted the lane's own identity table"
+else ok "self-listed bot: loop does not invoke the supervisor"; fi
+if grep -q "unlisted-login:aie-agent-lanes-fake\[bot\]" "$REPO/gibson/journal.md"; then ok "self-listed bot: journal says unlisted-login (base table decides, not the lane's copy)"
+else bad "self-listed bot: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
+why=$(agent_vendor_commit_problem "$REPO" "$SHA" main)
+[[ "$why" == "unlisted-login:aie-agent-lanes-fake[bot]" ]] && ok "self-listed bot: lib reads the base table (unlisted-login)" || bad "self-listed lib reason '$why'"
+why=$(agent_vendor_commit_problem "$REPO" "$SHA" "$SHA")
+[[ -z "$why" ]] && ok "control: reading the table at the lane's own head WOULD exempt it (which is why the base is used)" || bad "control reason '$why'"
 
 echo "Agent-Vendor walk: the bare user@invalid form is refused like .invalid (#523 round five)"
 setup_repo bare-invalid
@@ -460,21 +488,29 @@ out=$(agent_vendor_unresolved_shas "$REPO" "$BASE" "$BASE"); rc=$?
 if agent_vendor_unresolved_shas "$REPO" "$BASE" deadbeef >/dev/null 2>&1; then bad "unreadable head must return 1"
 else ok "agent_vendor_unresolved_shas: unreadable head returns 1 (caller fails closed)"; fi
 setup_repo bot
-agent_vendor_lane_bot_email "$BOT_EMAIL" "$REPO" && ok "lane-bot email listed as author in the repo's identity table: exempt" || bad "listed lane-bot email not recognised"
-agent_vendor_lane_bot_email "$FAKE_BOT_EMAIL" "$REPO" && bad "unlisted lane-bot-shaped email was exempted" || ok "lane-bot shape alone (aie-agent-lanes-fake[bot]) is not exempt"
-agent_vendor_lane_bot_email "$BOT_EMAIL" && bad "exempt without a repo to read the identity table from" || ok "no repo given → no exemption"
+agent_vendor_lane_bot_email "$BOT_EMAIL" "$REPO" main && ok "lane-bot email listed as author in the base's identity table: exempt" || bad "listed lane-bot email not recognised"
+agent_vendor_lane_bot_email "$FAKE_BOT_EMAIL" "$REPO" main && bad "unlisted lane-bot-shaped email was exempted" || ok "lane-bot shape alone (aie-agent-lanes-fake[bot]) is not exempt"
+agent_vendor_lane_bot_email "$BOT_EMAIL" && bad "exempt without a repo/base to read the identity table from" || ok "no repo/base given → no exemption"
 [[ "$(agent_vendor_login_of_noreply "$BOT_EMAIL")" == "aie-agent-lanes-grok[bot]" ]] && ok "login parsed from <id>+login@users.noreply.github.com" || bad "login parse: $(agent_vendor_login_of_noreply "$BOT_EMAIL")"
-why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)")
-[[ -z "$why" ]] && ok "listed bot commit resolves with the table present" || bad "listed bot reason '$why'"
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" main)
+[[ -z "$why" ]] && ok "listed bot commit resolves with the table at the base" || bad "listed bot reason '$why'"
+# The working tree is never consulted: deleting the lane's copy changes nothing.
 rm -f "$REPO/config/review-evidence.v1.json"
-why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)")
-[[ "$why" == "unlisted-login:aie-agent-lanes-grok[bot]" ]] && ok "identity table unreadable → fail closed, no exemption (unlisted-login)" || bad "missing-table reason was '$why'"
+AGENT_VENDOR_AUTHOR_LOGINS_FOR=""
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" main)
+[[ -z "$why" ]] && ok "identity table read at the base ref, not the working tree (deleted copy, still resolves)" || bad "working-tree deletion changed the verdict: '$why'"
 git -C "$REPO" checkout -q -- config/review-evidence.v1.json
+# A base with no table: nothing is exempt, and the reason says why.
+git -C "$REPO" checkout -q -b notable main && git -C "$REPO" rm -q -r config && $GIT -C "$REPO" commit -q -m "no table" && git -C "$REPO" checkout -q main
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" notable)
+[[ "$why" == "identity-table-unreadable:aie-agent-lanes-grok[bot]" ]] && ok "no identity table at the base → identity-table-unreadable, fail closed" || bad "no-table reason was '$why'"
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" refs/heads/does-not-exist)
+[[ "$why" == "identity-table-unreadable:aie-agent-lanes-grok[bot]" ]] && ok "unresolvable base → identity-table-unreadable, fail closed" || bad "bad-base reason was '$why'"
 setup_repo bot-invalid-committer
-why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)")
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" main)
 [[ "$why" == "invalid-email:sensor@gibson.invalid" ]] && ok "agent_vendor_commit_problem: bot author + .invalid committer → invalid-email (identities before the bot fast path)" || bad "mixed identity reason was '$why'"
 setup_repo bot
-why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)")
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" main)
 [[ -z "$why" ]] && ok "agent_vendor_commit_problem: bot author + bot committer, no trailer → resolves" || bad "bot commit reason was '$why'"
 agent_vendor_lane_bot_email "$LANE_EMAIL" && bad "lane email mistaken for a bot" || ok "a lane email is not a bot"
 agent_vendor_lane_bot_email "x+dependabot[bot]@users.noreply.github.com" && bad "another bot mistaken for a lane bot" || ok "a non-lane bot is not a lane bot"

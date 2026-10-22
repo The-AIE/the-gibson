@@ -21,8 +21,8 @@
 #     read (`no-login`, #503/#504); checked first, for every commit, lane-bot
 #     authored or not;
 #   - then, authored by a lane-bot login (`<id>+aie-agent-lanes-*[bot]@users.
-#     noreply.github.com`) that <repo>/config/review-evidence.v1.json lists
-#     with role "author" (and, when that identity has an authorCommits
+#     noreply.github.com`) that config/review-evidence.v1.json AT THE TRUSTED
+#     BASE REF (never the lane's own copy) lists with role "author" (and, when that identity has an authorCommits
 #     allowlist, only for those exact SHAs): resolves by identity, no trailer
 #     needed. The shape alone is not enough, and an unreadable config exempts
 #     nothing;
@@ -46,35 +46,47 @@ agent_vendor_known() {
 }
 
 # Lane-bot author logins the evaluator resolves without a trailer: the entries
-# of <repo>/config/review-evidence.v1.json with role "author" (the evaluator's
-# own identity table), read from the repository the walk runs in. Cached per
-# config path. Unreadable config (missing file, no node, bad JSON) → empty set:
-# fail closed, no exemption (Codex review of #525: an address merely SHAPED like
-# a lane bot, e.g. aie-agent-lanes-fake[bot], is not one the evaluator knows).
+# of config/review-evidence.v1.json with role "author" (the evaluator's own
+# identity table), read from the TRUSTED BASE REF the walk is given — never from
+# the candidate's working tree or branch, which the lane can edit to list a bot
+# of its own (Codex round four on #525). Cached per repo + base commit.
+# Unreadable (no such blob at the base, no node, bad JSON) → empty set and
+# AGENT_VENDOR_TABLE_OK=0: fail closed, no exemption.
 AGENT_VENDOR_AUTHOR_LOGINS=""
 AGENT_VENDOR_AUTHOR_LOGINS_FOR=""
-agent_vendor_author_logins() { # repo — prints "<login>\t<allowlist>" per author identity
-  local repo="$1" cfg
-  cfg="$repo/config/review-evidence.v1.json"
-  if [[ "$AGENT_VENDOR_AUTHOR_LOGINS_FOR" != "$cfg" ]]; then
-    AGENT_VENDOR_AUTHOR_LOGINS_FOR="$cfg"
+AGENT_VENDOR_TABLE_OK=0
+agent_vendor_author_logins() { # repo base — prints "<login>\t<allowlist>" per author identity; 1 when unreadable
+  local repo="$1" base="${2:-}" base_sha key
+  base_sha=$(git -C "$repo" rev-parse --verify --quiet "${base}^{commit}" 2>/dev/null || true)
+  key="$repo@$base_sha"
+  if [[ "$AGENT_VENDOR_AUTHOR_LOGINS_FOR" != "$key" ]]; then
+    AGENT_VENDOR_AUTHOR_LOGINS_FOR="$key"
     AGENT_VENDOR_AUTHOR_LOGINS=""
-    if [[ -f "$cfg" ]] && command -v node >/dev/null 2>&1; then
-      # One line per author identity: "<login>\t<sha,sha,...>". The second field
-      # is the identity's authorCommits allowlist (empty = unrestricted). The
-      # evaluator rejects a listed login's commit outside its allowlist as
-      # commit-not-allowed, so the cache must carry it (Codex round three on #525).
-      AGENT_VENDOR_AUTHOR_LOGINS=$(node -e '
-        const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-        for (const i of Array.isArray(c.identities) ? c.identities : []) {
-          if (typeof i.login !== "string" || !Array.isArray(i.roles) || !i.roles.includes("author")) continue;
-          const allow = Array.isArray(i.authorCommits) ? i.authorCommits.filter((x) => typeof x === "string").map((x) => x.toLowerCase()) : [];
-          if (Array.isArray(i.authorCommits) && allow.length === 0) allow.push("-");
-          console.log(i.login.toLowerCase() + "\t" + allow.join(","));
-        }' "$cfg" 2>/dev/null) || AGENT_VENDOR_AUTHOR_LOGINS=""
+    AGENT_VENDOR_TABLE_OK=0
+    if [[ -n "$base_sha" ]] && command -v node >/dev/null 2>&1; then
+      # One line per author identity: "<login>\t<sha,sha,...>". The second
+      # field is the identity's authorCommits allowlist ("-" when the list is
+      # present but empty, "" when unrestricted); the evaluator rejects a listed
+      # login's commit outside its allowlist as commit-not-allowed.
+      if AGENT_VENDOR_AUTHOR_LOGINS=$(git -C "$repo" show "${base_sha}:config/review-evidence.v1.json" 2>/dev/null | node -e '
+        let src = ""; process.stdin.on("data", (d) => { src += d; }); process.stdin.on("end", () => {
+          const c = JSON.parse(src);
+          if (!Array.isArray(c.identities)) process.exit(3);
+          for (const i of c.identities) {
+            if (typeof i.login !== "string" || !Array.isArray(i.roles) || !i.roles.includes("author")) continue;
+            const allow = Array.isArray(i.authorCommits) ? i.authorCommits.filter((x) => typeof x === "string").map((x) => x.toLowerCase()) : [];
+            if (Array.isArray(i.authorCommits) && allow.length === 0) allow.push("-");
+            console.log(i.login.toLowerCase() + "\t" + allow.join(","));
+          }
+        });' 2>/dev/null) && [[ -n "$AGENT_VENDOR_AUTHOR_LOGINS" ]]; then
+        AGENT_VENDOR_TABLE_OK=1
+      else
+        AGENT_VENDOR_AUTHOR_LOGINS=""
+      fi
     fi
   fi
-  [[ -z "$AGENT_VENDOR_AUTHOR_LOGINS" ]] || printf '%s\n' "$AGENT_VENDOR_AUTHOR_LOGINS"
+  [[ "$AGENT_VENDOR_TABLE_OK" -eq 1 ]] || return 1
+  printf '%s\n' "$AGENT_VENDOR_AUTHOR_LOGINS"
 }
 
 # agent_vendor_login_of_noreply EMAIL — the GitHub login a noreply address
@@ -94,24 +106,25 @@ agent_vendor_login_of_noreply() {
   printf '%s\n' "$local_part"
 }
 
-# agent_vendor_lane_bot_email EMAIL [REPO [SHA]] — 0 when EMAIL is a lane-bot
-# login's noreply address that the evaluator resolves by identity: the login
-# must have the evaluator's LANE_BOT_LOGIN shape (aie-agent-lanes-*[bot]) AND be
-# listed with role "author" in REPO's config/review-evidence.v1.json AND, when
-# that identity carries an authorCommits allowlist, SHA must be one of them
-# (full 40-hex, exact). Returns 1 when not exempt, 2 when the login is listed
-# but SHA is outside its allowlist (the evaluator's commit-not-allowed). Without
-# a readable table nothing is exempt.
+# agent_vendor_lane_bot_email EMAIL [REPO BASE [SHA]] — 0 when EMAIL is a
+# lane-bot login's noreply address that the evaluator resolves by identity: the
+# login must have the evaluator's LANE_BOT_LOGIN shape (aie-agent-lanes-*[bot])
+# AND be listed with role "author" in config/review-evidence.v1.json AT BASE in
+# REPO AND, when that identity carries an authorCommits allowlist, SHA must be
+# one of them (full 40-hex, exact). Returns 1 when not exempt, 2 when the login
+# is listed but SHA is outside its allowlist (commit-not-allowed), 3 when the
+# table at BASE is unreadable (nothing is exempt).
 agent_vendor_lane_bot_email() {
-  local login entry known allow sha a
+  local login entry known allow sha a table
   login=$(agent_vendor_login_of_noreply "$1")
   [[ -n "$login" ]] || return 1
   case "$login" in
     aie-agent-lanes-*\[bot\]) ;;
     *) return 1 ;;
   esac
-  [[ -n "${2:-}" ]] || return 1
-  sha=$(printf '%s' "${3:-}" | tr '[:upper:]' '[:lower:]')
+  [[ -n "${2:-}" && -n "${3:-}" ]] || return 3
+  table=$(agent_vendor_author_logins "$2" "$3") || return 3
+  sha=$(printf '%s' "${4:-}" | tr '[:upper:]' '[:lower:]')
   while IFS= read -r entry; do
     [[ -n "$entry" ]] || continue
     known="${entry%%	*}"
@@ -127,20 +140,22 @@ $(printf '%s' "$allow" | tr ',' '\n')
 EOF3
     return 2
   done <<EOF2
-$(agent_vendor_author_logins "$2")
+$table
 EOF2
   return 1
 }
 
-# agent_vendor_commit_problem REPO SHA — prints ONE reason review-evidence would
-# give for this commit, or nothing when it resolves. Always returns 0; a commit
+# agent_vendor_commit_problem REPO SHA [BASE] — prints ONE reason review-evidence
+# would give for this commit, or nothing when it resolves. BASE is the trusted
+# ref whose config/review-evidence.v1.json decides the lane-bot exemption. Always returns 0; a commit
 # that cannot be read prints `unreadable`. Reasons: lane-bot (resolves, prints
 # nothing), invalid-email:<addr>, unlisted-login:<login> (lane-bot shape not in
 # the evaluator's identity table), commit-not-allowed:<login> (listed, but the
 # SHA is outside its authorCommits allowlist), no-trailer, multi-vendor:<a,b>,
-# unknown-vendor:<v>.
+# unknown-vendor:<v>, identity-table-unreadable:<login> (lane-bot shape, but no
+# readable identity table at BASE: nothing exempt).
 agent_vendor_commit_problem() {
-  local repo="$1" sha="$2" ae ce body line v vendors="" n=0 login full_sha bot_rc
+  local repo="$1" sha="$2" base="${3:-}" ae ce body line v vendors="" n=0 login full_sha bot_rc
   ae=$(git -C "$repo" log -1 --format=%ae "$sha" 2>/dev/null) || { echo unreadable; return 0; }
   ce=$(git -C "$repo" log -1 --format=%ce "$sha" 2>/dev/null) || { echo unreadable; return 0; }
   # Both identities first, on every path: review-evidence resolves the author
@@ -152,15 +167,20 @@ agent_vendor_commit_problem() {
     esac
   done
   full_sha=$(git -C "$repo" rev-parse --verify --quiet "${sha}^{commit}" 2>/dev/null || true)
-  agent_vendor_lane_bot_email "$ae" "$repo" "$full_sha"
+  agent_vendor_lane_bot_email "$ae" "$repo" "$base" "$full_sha"
   bot_rc=$?
   [[ "$bot_rc" -ne 0 ]] || return 0
   login=$(agent_vendor_login_of_noreply "$ae")
   case "$login" in
     aie-agent-lanes-*\[bot\])
-      # Listed, but this SHA is outside the identity's authorCommits allowlist:
-      # the evaluator's commit-not-allowed. Unlisted: it resolves no login.
-      if [[ "$bot_rc" -eq 2 ]]; then echo "commit-not-allowed:${login}"; else echo "unlisted-login:${login}"; fi
+      # 3: the table at BASE could not be read, nothing is exempt. 2: listed, but
+      # this SHA is outside the identity's authorCommits allowlist (the
+      # evaluator's commit-not-allowed). 1: unlisted, it resolves no login.
+      case "$bot_rc" in
+        3) echo "identity-table-unreadable:${login}" ;;
+        2) echo "commit-not-allowed:${login}" ;;
+        *) echo "unlisted-login:${login}" ;;
+      esac
       return 0
       ;;
   esac
@@ -187,20 +207,22 @@ EOF2
   return 0
 }
 
-# agent_vendor_unresolved_shas REPO BASE HEAD — prints `<sha> <reason>` one per
-# line for every commit in BASE..HEAD review-evidence would not resolve.
+# agent_vendor_unresolved_shas REPO BASE HEAD [TABLE_BASE] — prints `<sha> <reason>`
+# one per line for every commit in BASE..HEAD review-evidence would not resolve.
+# The lane-bot identity table is read at TABLE_BASE (default BASE): the trusted
+# base ref, never the candidate's own tree.
 # Returns 0 when the range is readable (including an empty range, and including
 # findings); 1 when the range cannot be walked. Same contract as
 # dco_unsigned_shas in scripts/loop.sh, so the two walks sit side by side.
 agent_vendor_unresolved_shas() {
-  local repo="$1" base="$2" head="$3" sha log_out why
+  local repo="$1" base="$2" head="$3" table_base="${4:-$2}" sha log_out why
   git -C "$repo" rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 || return 1
   git -C "$repo" rev-parse --verify --quiet "${head}^{commit}" >/dev/null 2>&1 || return 1
   log_out=$(git -C "$repo" log --format=%H "${base}..${head}" 2>/dev/null) || return 1
   [[ -n "$log_out" ]] || return 0
   while IFS= read -r sha; do
     [[ -n "$sha" ]] || continue
-    why=$(agent_vendor_commit_problem "$repo" "$sha")
+    why=$(agent_vendor_commit_problem "$repo" "$sha" "$table_base")
     [[ -n "$why" ]] || continue
     printf '%s %s\n' "$sha" "$why"
   done <<EOF2
