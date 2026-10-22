@@ -42,17 +42,32 @@ make_repo() {
 const a = process.argv.slice(2);
 if (a.some((x) => x.startsWith("--"))) { console.error(`unknown flag: ${a[0]}`); process.exit(2); }
 EOF
+  mkdir -p "$d/config"
+  cp "$REPO_ROOT/config/review-evidence.v1.json" "$d/config/"
   mkdir -p "$d/playbooks/recipes"
   printf '# builder\n' > "$d/playbooks/builder.md"
   printf '# playbook: playbooks/builder.md\n# playbook-sha256: %s\n' "$(shasum -a 256 "$d/playbooks/builder.md" | awk '{print $1}')" > "$d/playbooks/recipes/builder.yaml"
   git -C "$d" init -q -b main && git -C "$d" add -A && git -C "$d" commit -q -m base
+  # A GitHub-shaped origin so the Agent-Vendor probe has a slug to prove logins in.
+  git -C "$d" remote add origin https://github.com/acme/app.git
   echo "$d"
 }
+# gh stub for the Agent-Vendor probe's email → login proof: lane@gibson.test is
+# the owner mrhinkle; every other address is unknown to GitHub.
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'GH'
+#!/usr/bin/env bash
+case "$*" in
+  *search/commits*) case "$*" in *lane@gibson.test*) echo mrhinkle ;; esac; exit 0 ;;
+esac
+exit 1
+GH
+chmod +x "$ROOT/bin/gh"
 
 # run_prepush DIR [args...] — sets OUT, RC.
 run_prepush() {
   local d="$1"; shift
-  OUT=$(cd "$d" && bash scripts/prepush.sh --base HEAD "$@" 2>&1); RC=$?
+  OUT=$(cd "$d" && PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base HEAD "$@" 2>&1); RC=$?
 }
 last_line() { printf '%s\n' "$OUT" | tail -n 1; }
 
@@ -111,26 +126,29 @@ git -C "$d" checkout -q -b feat/1-x
 printf 'x\n' > "$d/x.txt"
 git -C "$d" add x.txt && git -C "$d" commit -q -s -m "work without a resolvable vendor"
 VSHA=$(git -C "$d" rev-parse HEAD)
-OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+OUT=$(cd "$d" && PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
 [[ "$RC" -eq 0 && "$OUT" == *"WARN     agent-vendor"* && "$OUT" == *"$VSHA invalid-email:"* && "$OUT" == *"setup-hooks.sh --vendor from-reservation"* ]] \
   && ok "undeclared checkout: unresolvable commit is WARN with SHA, reason and fix; exit stays 0 (report only)" || bad "vendorwalk undeclared rc=$RC: $OUT"
 # A --local-only gibson.agentVendor is not a declaration (hooks read worktree
 # scope only, gated on extensions.worktreeConfig): still WARN.
 git -C "$d" config gibson.agentVendor claude
-OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+OUT=$(cd "$d" && PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
 [[ "$RC" -eq 0 && "$OUT" == *"WARN     agent-vendor"* ]] && ok "--local-only gibson.agentVendor: still WARN, not a declaration" || bad "vendorwalk local-only rc=$RC: $OUT"
 git -C "$d" config --unset gibson.agentVendor
 git -C "$d" config extensions.worktreeConfig true
 git -C "$d" config --worktree gibson.agentVendor claude
-OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+OUT=$(cd "$d" && PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
 [[ "$RC" -eq 1 && "$(last_line)" == *"FAILED agent-vendor"* && "$OUT" == *"$VSHA invalid-email:"* ]] \
   && ok "declared lane (worktree scope, extension on): the same commit is FAIL, exit 1, name is last line" || bad "vendorwalk declared rc=$RC: $OUT"
 git -C "$d" config --worktree --unset gibson.agentVendor
 git -C "$d" config --unset extensions.worktreeConfig
 GIT_AUTHOR_EMAIL=lane@gibson.test GIT_COMMITTER_EMAIL=lane@gibson.test git -C "$d" commit -q --amend --reset-author --no-edit -m "work" -m "Agent-Vendor: claude" -s
-OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+OUT=$(cd "$d" && PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
 [[ "$RC" -eq 0 && "$OUT" == *"PASS     agent-vendor"* ]] && ok "one known trailer under a resolvable email: PASS" || bad "vendorwalk fixed rc=$RC: $OUT"
-OUT=$(cd "$d" && bash scripts/prepush.sh --base refs/heads/does-not-exist --no-tests 2>&1); RC=$?
+GIT_AUTHOR_EMAIL=stranger@gibson.test GIT_COMMITTER_EMAIL=stranger@gibson.test git -C "$d" commit -q --amend --reset-author --no-edit
+OUT=$(cd "$d" && PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+[[ "$RC" -eq 0 && "$OUT" == *"WARN     agent-vendor"* && "$OUT" == *"login-unresolved:stranger@gibson.test"* ]] && ok "an address GitHub maps to no login is reported login-unresolved (trailer or not)" || bad "vendorwalk stranger rc=$RC: $OUT"
+OUT=$(cd "$d" && PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base refs/heads/does-not-exist --no-tests 2>&1); RC=$?
 [[ "$RC" -eq 2 ]] && ok "unresolvable base is still the usage error (probe never guesses a range)" || bad "vendorwalk badbase rc=$RC"
 
 # --- invalid --base is a usage error, not a silent all-clear ----------------

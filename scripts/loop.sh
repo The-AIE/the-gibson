@@ -2492,7 +2492,9 @@ EOF
 # (empty or not), 1 when it cannot be walked. The rule lives in
 # scripts/lib/agent-vendor.sh, shared with prepush.sh's report-only probe.
 vendor_unresolved_shas() {
-  agent_vendor_unresolved_shas "$1" "$2" "$3"
+  # Table at the pinned remote base; logins proven in the repository this loop
+  # was told it drives (--repo-slug), the same slug review-evidence will read.
+  agent_vendor_unresolved_shas "$1" "$2" "$3" "$2" "$EXPECTED_REPO_SLUG"
 }
 
 # File-handoff protocol: pin and pass the head SHA so a later push cannot
@@ -2553,8 +2555,10 @@ supervisor_handoff() {
 
   # Agent-Vendor (the-gibson#503/#504/#506): refuse work review-evidence would
   # report identity-unresolved before spending a reviewer or the supervisor.
-  # Lane-bot commits resolve by identity and are skipped; everything else needs
-  # exactly one known Agent-Vendor trailer under an email GitHub maps to a login.
+  # Author and committer must each prove a GitHub login (noreply form, or GitHub
+  # commit search by email) that the trusted base's identity table lists; a
+  # listed lane bot resolves by identity, an owner identity needs exactly one
+  # known Agent-Vendor trailer. Unprovable identities fail closed.
   # Catches lanes declared before #523 and commits made with --no-verify.
   local unvendored
   if unvendored=$(vendor_unresolved_shas "$REPO" "$base_sha" "$sha"); then

@@ -360,5 +360,24 @@ rm -rf "$ROOT/lanes/wt-gone"
 out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" 2>&1)
 lacks    "undeclared lanes: a worktree whose directory is gone is not listed" "$out" "feat/3-gone"
 
+echo "undeclared lanes · a git that cannot list worktrees fails closed (Codex round five on #525)"
+REAL_GIT=$(command -v git)
+mkdir -p "$ROOT/lanes/gitbin"
+cat > "$ROOT/lanes/gitbin/git" <<GITSTUB
+#!/usr/bin/env bash
+if [[ "\${1:-}" == worktree && "\${2:-}" == list ]]; then
+  echo "fatal: simulated: cannot read the common git directory" >&2
+  exit 128
+fi
+exec "$REAL_GIT" "\$@"
+GITSTUB
+chmod +x "$ROOT/lanes/gitbin/git"
+out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/gitbin:$ROOT/lanes/bin:$PATH" "$CS" 2>&1); rc=$?
+check    "worktree enumeration failure: exit 1" "$rc" "1"
+contains "worktree enumeration failure: names the cause" "$out" "cannot list this repository's worktrees"
+lacks    "worktree enumeration failure: never reads as 'every lane declared' (no claims table printed)" "$out" "no live claims"
+out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/gitbin:$ROOT/lanes/bin:$PATH" "$CS" --markdown 2>&1); rc=$?
+check    "worktree enumeration failure: --markdown (no lane sweep) is unaffected" "$rc" "0"
+
 echo "claims-status.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

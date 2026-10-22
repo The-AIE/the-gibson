@@ -362,7 +362,7 @@ unset _legacy_table _legacy_ls _legacy_ls_err
   echo "claims-status.sh: ERROR: cannot source $SCRIPT_DIR/lib/agent-vendor.sh — refusing to list lane declarations with a reader that may differ from the hooks" >&2
   exit 1
 }
-undeclared_lanes() {
+undeclared_lanes() { # reads $_wt_list (git worktree list --porcelain, already checked)
   local wt="" branch="" prunable=0 line main_wt="" base_branch vendor
   base_branch="${REF##*/}"
   while IFS= read -r line; do
@@ -390,12 +390,21 @@ undeclared_lanes() {
         ;;
     esac
   done <<EOF
-$(git worktree list --porcelain 2>/dev/null; echo)
+${_wt_list}
+
 EOF
 }
 UNDECLARED=""
 if [[ -z "$ONLY_ISSUE" && "$MARKDOWN" -eq 0 ]]; then
+  # The enumeration itself must succeed: a git that cannot list worktrees is
+  # "I could not find out", never "every lane is declared" (Codex round five on
+  # #525). Status captured separately from the output, no `; echo` masking.
+  if ! _wt_list=$(git worktree list --porcelain 2>&1); then
+    echo "claims-status.sh: ERROR: cannot list this repository's worktrees (git worktree list --porcelain failed) — ${_wt_list}; refusing to report lane declarations on an unread inventory" >&2
+    exit 1
+  fi
   UNDECLARED=$(undeclared_lanes)
+  unset _wt_list
 fi
 print_undeclared() {
   [[ -n "$UNDECLARED" ]] || return 0

@@ -110,6 +110,14 @@ if [[ -n "$log" ]]; then
   printf '%s\n' "$*" >> "$log"
 fi
 
+# Agent-Vendor walk (follow-up to #523): email → login proof through GitHub's
+# commit search. The lane identity lane@gibson.test is the owner, mrhinkle.
+case "$*" in
+  *search/commits*)
+    case "$*" in *lane@gibson.test*) echo mrhinkle ;; esac
+    exit 0 ;;
+esac
+
 # Validate the exact API target so a broken origin parser cannot pass.
 validate_repo_target() {
   local kind="$1"   # issue | api

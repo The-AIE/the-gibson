@@ -13,9 +13,12 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 ### Undeclared lanes and `--no-verify` commits are caught before review time (follow-up to #523)
 
 - **What changed:** `scripts/loop.sh` walks the handed-off range for commits `review-evidence`
-  would report `identity-unresolved` — not from a lane-bot login listed as an author in
-  `config/review-evidence.v1.json` at the trusted base ref (never the lane's own copy; no
-  readable table, no exemption), and with no `Agent-Vendor:`
+  would report `identity-unresolved`: author or committer email that does not provably map to a
+  GitHub login (a noreply address carries its login; any other address is proven only through
+  GitHub's commit search by email in the repository, else `login-unresolved`), a login not listed
+  as an author in `config/review-evidence.v1.json` at the trusted base ref (never the lane's own
+  copy; no readable table, nothing resolves), a listed identity outside its `authorCommits`
+  allowlist, and, for an owner identity, no `Agent-Vendor:`
   trailer, more than one vendor, an unknown vendor, or a `.invalid` author/committer email — and
   blocks the supervisor handoff naming the SHAs and the fix, beside the existing Signed-off-by
   walk. `scripts/prepush.sh` reports the same walk over `origin/main..HEAD` (`agent-vendor`

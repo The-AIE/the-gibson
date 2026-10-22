@@ -121,9 +121,12 @@ by hand from a declared worktree inherits that declaration until re-declared.
 The hooks only run where a lane is declared, and `git commit --no-verify` skips them anywhere, so
 two backstops apply the same decision rule the evaluator will: `scripts/loop.sh` walks the
 handed-off range before queueing a supervisor handoff (beside its Signed-off-by walk) and blocks,
-naming the SHAs and the fix, on any commit not authored by a lane-bot login that has no
-`Agent-Vendor:` trailer, names more than one vendor, names one the evaluator does not know, or is
-authored or committed under a `.invalid` email; `scripts/prepush.sh` reports the same walk over
+naming the SHAs and the fix, on any commit whose author or committer email cannot be proven to
+map to a GitHub login (noreply form, or GitHub's commit search by email in the repository), maps
+to a login the trusted base's identity table does not list as an author (or lists with an
+`authorCommits` allowlist the SHA is outside), is a `.invalid` address, or, for an owner identity,
+has no `Agent-Vendor:` trailer, names more than one vendor, or names one the evaluator does not
+know; `scripts/prepush.sh` reports the same walk over
 `origin/main..HEAD` (FAIL on a declared lane, WARN on an undeclared checkout, where an owner
 commit resolves through independent review instead). The rule lives once, in
 `scripts/lib/agent-vendor.sh`. A lane created by `claim.sh` before the declaration existed is

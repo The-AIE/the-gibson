@@ -55,8 +55,19 @@ cat > "$BIN/curl" <<'STUB'
 echo "curl stub: live network forbidden: $*" >&2
 exit 55
 STUB
+# gh stub: the Agent-Vendor walk proves email → login through GitHub's commit
+# search by email (`gh api search/commits`). The fixture maps lane@gibson.test
+# to the owner login mrhinkle (listed in the identity table); every other
+# address is unknown to GitHub (empty result). Everything else gh fails.
 cat > "$BIN/gh" <<'STUB'
 #!/usr/bin/env bash
+case "$*" in
+  *search/commits*)
+    case "$*" in
+      *lane@gibson.test*) echo mrhinkle ;;
+    esac
+    exit 0 ;;
+esac
 exit 1
 STUB
 chmod +x "$BIN/curl" "$BIN/gh"
@@ -88,6 +99,7 @@ work_commit() { # email [git-commit args...] — signed, -a
 #   two-vendors    signed, two distinct Agent-Vendor trailers
 #   unknown-vendor signed, Agent-Vendor: bogus
 #   bot            signed, lane-bot email, no trailer       (resolves by login)
+#   stranger       signed, trailer, author/committer an address GitHub maps to no login
 #   bot-invalid-committer  lane-bot author, .invalid committer, no trailer
 #   bare-invalid   signed, trailer, author/committer `codex@invalid` (bare form)
 #   fake-bot       signed, lane-bot-shaped email the evaluator does not list, no trailer
@@ -115,6 +127,7 @@ setup_repo() { # setup_repo <mode>
     two-vendors)    work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: claude" -m "Agent-Vendor: codex" ;;
     unknown-vendor) work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: bogus" ;;
     bot)            work_commit "$BOT_EMAIL" -m "work" ;;
+    stranger)       work_commit stranger@gibson.test -m "work" -m "Agent-Vendor: claude" ;;
     bare-invalid)   work_commit codex@invalid -m "work" -m "Agent-Vendor: codex" ;;
     fake-bot)       work_commit "$FAKE_BOT_EMAIL" -m "work" ;;
     mini-bot)       work_commit "$MINI_BOT_EMAIL" -m "work" ;;
@@ -382,25 +395,28 @@ if handoff_invoked; then bad "mini-bot: loop handed off a commit outside the ide
 else ok "mini-bot: non-allowlisted SHA is not exempt; loop does not invoke the supervisor"; fi
 if grep -q "$SHA commit-not-allowed:aie-agent-lanes-mini\[bot\]" "$REPO/gibson/journal.md"; then ok "mini-bot: journal names commit-not-allowed and the login"
 else bad "mini-bot: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
-# The allowlisted side, through the lib: an allowlisted SHA from the table is
-# exempt; a prefix of it, or a SHA outside the list, is not. Return codes are
-# data here: errexit off.
+# The allowlisted side, through the lib: the identity carries the allowlist,
+# and the verdict for a SHA outside it is commit-not-allowed; a prefix is not a
+# match (the walk compares the full 40-hex SHA). Return codes are data: errexit off.
 set +e
 . "$GIBSON/scripts/lib/agent-vendor.sh"
-agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" main "$ALLOWED"; rc=$?
-[[ "$rc" -eq 0 ]] && ok "mini-bot: an allowlisted SHA from the table is exempt" || bad "allowlisted SHA rc=$rc"
-agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" main "${ALLOWED:0:12}"; rc=$?
-[[ "$rc" -eq 2 ]] && ok "mini-bot: a prefix of an allowlisted SHA is not a match (exact 40-hex only)" || bad "prefix rc=$rc"
-agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" main "$SHA"; rc=$?
-[[ "$rc" -eq 2 ]] && ok "mini-bot: a SHA outside the allowlist returns 2 (commit-not-allowed)" || bad "outside rc=$rc"
-agent_vendor_lane_bot_email "$BOT_EMAIL" "$REPO" main "$SHA"; rc=$?
-[[ "$rc" -eq 0 ]] && ok "grok bot (no allowlist): any SHA is exempt" || bad "unrestricted bot rc=$rc"
+ident=$(agent_vendor_identity "$REPO" main "aie-agent-lanes-mini[bot]"); rc=$?
+[[ "$rc" -eq 0 && "${ident%%	*}" == "codex" && "${ident#*	}" == *"$ALLOWED"* ]] && ok "identity table: aie-agent-lanes-mini[bot] → vendor codex with its allowlist (${ALLOWED:0:7}…)" || bad "identity mini rc=$rc '$ident'"
+[[ "${ident#*	}" != *"${ALLOWED:0:12},"* || "${ident#*	}" == *"$ALLOWED"* ]] && ok "allowlist entries are full SHAs, matched exactly (no prefix)" || bad "allowlist shape '$ident'"
+why=$(agent_vendor_commit_problem "$REPO" "$SHA" main)
+[[ "$why" == "commit-not-allowed:aie-agent-lanes-mini[bot]" ]] && ok "mini-bot: a SHA outside the allowlist → commit-not-allowed" || bad "outside reason '$why'"
+setup_repo bot
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" main)
+[[ -z "$why" ]] && ok "grok bot (no allowlist): any SHA resolves" || bad "unrestricted bot reason '$why'"
+setup_repo mini-bot
+SHA=$(head_sha)
 # And through the walk: allowlist this commit's SHA in the table ON THE BASE
 # (committed to main and pushed, which is what the loop reads) → the same
 # commit now resolves and is handed off.
 node -e 'const fs=require("fs");const p=process.argv[1];const c=JSON.parse(fs.readFileSync(p,"utf8"));const i=c.identities.find(x=>x.login==="aie-agent-lanes-mini[bot]");i.authorCommits=[process.argv[2]];fs.writeFileSync(p,JSON.stringify(c,null,2)+"\n")' "$REPO/config/review-evidence.v1.json" "$SHA"
 $GIT -C "$REPO" commit -q -am "allowlist the mini bot's commit on the base" && git -C "$REPO" push -q origin main
-AGENT_VENDOR_AUTHOR_LOGINS_FOR=""
+# shellcheck disable=SC2034  # resets the sourced lib's cache
+AGENT_VENDOR_TABLE_FOR=""
 why=$(agent_vendor_commit_problem "$REPO" "$SHA" main)
 [[ -z "$why" ]] && ok "mini-bot: once the BASE table allowlists this SHA, the commit resolves" || bad "allowlisted commit reason '$why'"
 write_state "$BRANCH" "$SHA"
@@ -448,6 +464,39 @@ else ok "bare-invalid: loop does not invoke the supervisor"; fi
 if grep -q "$SHA invalid-email:codex@invalid" "$REPO/gibson/journal.md"; then ok "bare-invalid: journal names codex@invalid"
 else bad "bare-invalid: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
 
+echo "Agent-Vendor walk: an email GitHub maps to no login is not resolvable, trailer or not (Codex round five)"
+setup_repo stranger
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+: > "$CALLS/devin.cmds"
+run_loop "$ROOT/loop-stranger.err"
+if handoff_invoked; then bad "stranger: loop handed off a commit whose author email proves no login"
+else ok "stranger: loop does not invoke the supervisor"; fi
+if grep -q "$SHA login-unresolved:stranger@gibson.test" "$REPO/gibson/journal.md"; then ok "stranger: journal names login-unresolved and the address"
+else bad "stranger: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
+# Mixed: a proven author with an unprovable committer is still unresolved.
+setup_repo signed
+SIGNED_SHA=$(head_sha)
+git -C "$REPO" checkout -q "$BRANCH"
+GIT_AUTHOR_EMAIL="$LANE_EMAIL" GIT_COMMITTER_EMAIL=stranger@gibson.test $GIT -C "$REPO" commit -q --allow-empty -s -m "proven author, unknown committer" -m "Agent-Vendor: claude"
+git -C "$REPO" checkout -q main
+SHA=$(head_sha)
+set +e
+. "$GIBSON/scripts/lib/agent-vendor.sh"
+why=$(agent_vendor_commit_problem "$REPO" "$SHA" main acme/widget)
+[[ "$why" == "login-unresolved:stranger@gibson.test" ]] && ok "stranger committer: both sides must prove a login (committer named)" || bad "mixed committer reason '$why'"
+# No slug to prove against (no GitHub origin) → nothing but a noreply address can resolve.
+git -C "$REPO" remote rename origin upstream
+why=$(agent_vendor_commit_problem "$REPO" "$SIGNED_SHA" main "")
+git -C "$REPO" remote rename upstream origin
+[[ "$why" == "login-unresolved:${LANE_EMAIL}" ]] && ok "no repository slug: a plain address cannot be proven (fail closed)" || bad "no-slug reason '$why'"
+why=$(agent_vendor_commit_problem "$REPO" "$SIGNED_SHA" main acme/widget)
+[[ -z "$why" ]] && ok "same commit with the slug: owner login proven + one trailer → resolves" || bad "proven reason '$why'"
+[[ "$(agent_vendor_login_for_email acme/widget "$LANE_EMAIL")" == "mrhinkle" ]] && ok "login_for_email: GitHub commit search maps lane@gibson.test → mrhinkle (cached)" || bad "login_for_email lane"
+[[ -z "$(agent_vendor_login_for_email acme/widget stranger@gibson.test)" ]] && ok "login_for_email: unknown address → nothing" || bad "login_for_email stranger"
+[[ "$(agent_vendor_login_for_email "" "$BOT_EMAIL")" == "aie-agent-lanes-grok[bot]" ]] && ok "login_for_email: noreply form carries its login without a lookup" || bad "login_for_email noreply"
+[[ "$(agent_vendor_repo_slug "$REPO")" == "acme/widget" ]] && ok "repo_slug: derived from the GitHub origin URL" || bad "repo_slug '$(agent_vendor_repo_slug "$REPO")'"
+
 echo "Agent-Vendor walk: a lane-bot author does not excuse a .invalid committer (mixed identity)"
 setup_repo bot-invalid-committer
 SHA=$(head_sha)
@@ -488,15 +537,21 @@ out=$(agent_vendor_unresolved_shas "$REPO" "$BASE" "$BASE"); rc=$?
 if agent_vendor_unresolved_shas "$REPO" "$BASE" deadbeef >/dev/null 2>&1; then bad "unreadable head must return 1"
 else ok "agent_vendor_unresolved_shas: unreadable head returns 1 (caller fails closed)"; fi
 setup_repo bot
-agent_vendor_lane_bot_email "$BOT_EMAIL" "$REPO" main && ok "lane-bot email listed as author in the base's identity table: exempt" || bad "listed lane-bot email not recognised"
-agent_vendor_lane_bot_email "$FAKE_BOT_EMAIL" "$REPO" main && bad "unlisted lane-bot-shaped email was exempted" || ok "lane-bot shape alone (aie-agent-lanes-fake[bot]) is not exempt"
-agent_vendor_lane_bot_email "$BOT_EMAIL" && bad "exempt without a repo/base to read the identity table from" || ok "no repo/base given → no exemption"
-[[ "$(agent_vendor_login_of_noreply "$BOT_EMAIL")" == "aie-agent-lanes-grok[bot]" ]] && ok "login parsed from <id>+login@users.noreply.github.com" || bad "login parse: $(agent_vendor_login_of_noreply "$BOT_EMAIL")"
 why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" main)
-[[ -z "$why" ]] && ok "listed bot commit resolves with the table at the base" || bad "listed bot reason '$why'"
+[[ -z "$why" ]] && ok "listed lane-bot author+committer, no trailer → resolves (identity table at the base)" || bad "listed bot reason '$why'"
+setup_repo fake-bot
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" main)
+[[ "$why" == "unlisted-login:aie-agent-lanes-fake[bot]" ]] && ok "lane-bot shape alone (aie-agent-lanes-fake[bot]) is not exempt: unlisted-login" || bad "fake bot reason '$why'"
+[[ "$(agent_vendor_login_of_noreply "$BOT_EMAIL")" == "aie-agent-lanes-grok[bot]" ]] && ok "login parsed from <id>+login@users.noreply.github.com" || bad "login parse: $(agent_vendor_login_of_noreply "$BOT_EMAIL")"
+ident=$(agent_vendor_identity "$REPO" main "aie-agent-lanes-grok[bot]"); rc=$?
+[[ "$rc" -eq 0 && "${ident%%	*}" == "grok" ]] && ok "identity table: aie-agent-lanes-grok[bot] → vendor grok, unrestricted" || bad "identity grok rc=$rc '$ident'"
+agent_vendor_identity "$REPO" main "aie-agent-lanes-fake[bot]" >/dev/null; rc=$?
+[[ "$rc" -eq 1 ]] && ok "identity table: an unlisted login returns 1" || bad "identity fake rc=$rc"
+setup_repo bot
 # The working tree is never consulted: deleting the lane's copy changes nothing.
 rm -f "$REPO/config/review-evidence.v1.json"
-AGENT_VENDOR_AUTHOR_LOGINS_FOR=""
+# shellcheck disable=SC2034  # resets the sourced lib's cache
+AGENT_VENDOR_TABLE_FOR=""
 why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" main)
 [[ -z "$why" ]] && ok "identity table read at the base ref, not the working tree (deleted copy, still resolves)" || bad "working-tree deletion changed the verdict: '$why'"
 git -C "$REPO" checkout -q -- config/review-evidence.v1.json
@@ -506,14 +561,6 @@ why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" notable)
 [[ "$why" == "identity-table-unreadable:aie-agent-lanes-grok[bot]" ]] && ok "no identity table at the base → identity-table-unreadable, fail closed" || bad "no-table reason was '$why'"
 why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" refs/heads/does-not-exist)
 [[ "$why" == "identity-table-unreadable:aie-agent-lanes-grok[bot]" ]] && ok "unresolvable base → identity-table-unreadable, fail closed" || bad "bad-base reason was '$why'"
-setup_repo bot-invalid-committer
-why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" main)
-[[ "$why" == "invalid-email:sensor@gibson.invalid" ]] && ok "agent_vendor_commit_problem: bot author + .invalid committer → invalid-email (identities before the bot fast path)" || bad "mixed identity reason was '$why'"
-setup_repo bot
-why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" main)
-[[ -z "$why" ]] && ok "agent_vendor_commit_problem: bot author + bot committer, no trailer → resolves" || bad "bot commit reason was '$why'"
-agent_vendor_lane_bot_email "$LANE_EMAIL" && bad "lane email mistaken for a bot" || ok "a lane email is not a bot"
-agent_vendor_lane_bot_email "x+dependabot[bot]@users.noreply.github.com" && bad "another bot mistaken for a lane bot" || ok "a non-lane bot is not a lane bot"
 # Probe: run from inside the lane branch, undeclared → 3 (report only), declared → 1, fixed → 0, bad base → 2.
 setup_repo unvendored
 SHA=$(head_sha)
