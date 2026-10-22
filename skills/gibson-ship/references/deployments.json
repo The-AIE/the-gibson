@@ -6,7 +6,12 @@
       "repo": "The-AIE/conference-os",
       "defaultBranch": "main",
       "productionBranch": "release",
-      "requiredContexts": ["quality", "build-e2e-required", "DCO", "review-evidence"],
+      "requiredContexts": [
+        "quality",
+        "build-e2e-required",
+        "DCO",
+        "review-evidence"
+      ],
       "deploy": {
         "provider": "vercel",
         "team": "the-aie",
@@ -23,7 +28,9 @@
       },
       "syncFrom": null,
       "postDeployConfig": null,
-      "stalePaths": ["ata/release (last real promote 8ed2c1da, 2026-10-12; nothing deploys from it)"],
+      "stalePaths": [
+        "ata/release (last real promote 8ed2c1da, 2026-10-12; nothing deploys from it)"
+      ],
       "verified": "2026-10-21"
     },
     {
@@ -40,24 +47,35 @@
         "projectId": "prj_t24vsP1kOklbmse8E53xR3pTej9d",
         "source": "cli",
         "command": "vercel deploy --prod --scope the-aie   # from the merged main checkout of ata-events-site, linked to conference-os-ata; record the SHA in the sync PR",
-        "aliases": ["events.allthingsai.org", "conference-os-ata.vercel.app", "conference-os-ata-the-aie.vercel.app"],
+        "aliases": [
+          "events.allthingsai.org",
+          "conference-os-ata.vercel.app",
+          "conference-os-ata-the-aie.vercel.app"
+        ],
         "notes": "Project docs say Production Branch = release, but the repo has no release branch, so merging to main yields a Preview only. The last two production deployments (2026-10-18, 2026-10-21) were source=cli by mrhinkle-theaie with no git metadata."
       },
       "syncFrom": {
         "repo": "The-AIE/conference-os",
         "method": "worktree from origin/main, branch sync/<topic>-<core-pr>, git cherry-pick -x <core merge sha>",
         "title": "chore(core): sync ConferenceOS #NNNN (<summary>)",
-        "examples": ["ata-events-site#31", "ata-events-site#37", "ata-events-site#46", "ata-events-site#52"]
+        "examples": [
+          "ata-events-site#31",
+          "ata-events-site#37",
+          "ata-events-site#46",
+          "ata-events-site#52"
+        ]
       },
       "reviewEvidence": {
         "trustFile": ".github/review-evidence-trust.json (same as core)",
         "miniWatches": false,
         "notes": "Owner attestation at the exact head was accepted on #46 (2026-10-15); same evaluator as core, so expect the same-actor rule. Get a cross-vendor read of the cherry-pick diff first."
       },
-      "schema": "Production migrations via core Actions → production-migrate with install=conference-os-ata (docs/RELEASING.md step 3); Mark's call.",
+      "schema": "Production migrations via core Actions \u2192 production-migrate with install=conference-os-ata (docs/RELEASING.md step 3); Mark's call.",
       "postDeployConfig": "Install MCP at /api/mcp on the public host (cos_admin key) or /organizer admin. Example: update_site_announcement after the deploy is READY.",
       "verify": "get_deployment(withGitRepoInfo) or vercel inspect <url> --scope the-aie: READY, target production, alias includes events.allthingsai.org; then curl the affected route.",
-      "stalePaths": ["conference-os branch ata/release"],
+      "stalePaths": [
+        "conference-os branch ata/release"
+      ],
       "verified": "2026-10-21"
     },
     {
@@ -65,7 +83,11 @@
       "repo": "The-AIE/the-gibson",
       "defaultBranch": "main",
       "productionBranch": null,
-      "requiredContexts": ["claim-isolation", "sensors", "review-evidence"],
+      "requiredContexts": [
+        "claim-isolation",
+        "sensors",
+        "review-evidence"
+      ],
       "deploy": {
         "provider": "github-pages",
         "source": "git",
@@ -80,6 +102,46 @@
       "syncFrom": null,
       "postDeployConfig": null,
       "stalePaths": [],
+      "verified": "2026-10-21"
+    },
+    {
+      "name": "Agent Kontrol (fleet.peripety.com)",
+      "repo": "mrhinkle/agent-kontrol",
+      "gibsonAdopted": false,
+      "adoptionNote": "NOT YET ADOPTED: run gibson-setup first. No .agents/, no check-active-work.mjs, no review-evidence workflow or trust file, no DCO/Agent-Vendor convention, no branch protection on main or release. Only ci.yml (typecheck, Postgres tests, Docker build + /login probe). gibson-ship can run steps 7-8 only.",
+      "defaultBranch": "main",
+      "productionBranch": "release",
+      "branchProtection": "none on main or release (GitHub 404)",
+      "requiredContexts": null,
+      "mergeCaptain": null,
+      "deploy": {
+        "provider": "vercel",
+        "team": "the-aie",
+        "teamId": "team_uY30O2yqZCvo3E2BptyJQmXi",
+        "productionProject": "mission-control",
+        "projectId": "prj_xnHHMCgc4b9Y0xVbp77EbuaMGEZW",
+        "source": "git",
+        "promotion": "PR with base release, compare main (docs/DEPLOY.md 'Releasing on Vercel'); production deploys from that merge",
+        "aliases": [
+          "fleet.peripety.com",
+          "mission-control-the-aie.vercel.app",
+          "mission-control-dusky-zeta.vercel.app",
+          "mission-control-git-release-the-aie.vercel.app"
+        ],
+        "notes": "Last two production deployments (2026-10-17) git-triggered from release at 1e0b052e (#39). Project name predates the rename from Mission Control. Fly.io (fly.toml) and Docker paths exist in the repo but are not the author's production."
+      },
+      "reviewEvidence": {
+        "trustFile": null,
+        "miniWatches": false,
+        "notes": "No review-evidence gate. #39 was authored and merged by aie-agent-lanes-grok[bot] straight into release (self-merge, bypassing main)."
+      },
+      "schema": null,
+      "schemaNote": "scripts/apply-schema.mjs runs in the Vercel build and as the Fly release_command (idempotent supabase/schema.sql); not a reviewed-migration path. Could not fill a safe schema process from the repo.",
+      "syncFrom": null,
+      "postDeployConfig": null,
+      "verify": "get_deployment(withGitRepoInfo) on project mission-control: READY, target production, githubCommitRef release, alias includes fleet.peripety.com; then curl https://fleet.peripety.com/login.",
+      "stalePaths": [],
+      "driftNote": "2026-10-21: release is 2 commits ahead of main and main is 9 ahead of release (git log origin/main..origin/release / reverse). Reconcile before the next promote.",
       "verified": "2026-10-21"
     }
   ]
