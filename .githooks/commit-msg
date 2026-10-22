@@ -106,8 +106,11 @@ esac
 # extensions.worktreeConfig off, `--worktree` silently falls back to --local
 # (git-config(1)), so the declaration counts only when the extension is on;
 # claim.sh and setup-hooks.sh --vendor always enable it when they declare.
+# Git activates config.worktree only from the REPOSITORY config (--local, the
+# shared config in a linked worktree) and accepts any boolean spelling, so read
+# it with --bool --local (Codex round 5).
 lane_vendor=""
-if [[ "$(git config --get extensions.worktreeConfig 2>/dev/null || true)" == "true" ]]; then
+if [[ "$(git config --bool --local --get extensions.worktreeConfig 2>/dev/null || true)" == "true" ]]; then
   lane_vendor="$(lower "$(git config --worktree --get gibson.agentVendor 2>/dev/null || true)")"
 fi
 env_vendor="$(lower "${GIBSON_AGENT_VENDOR:-}")"
