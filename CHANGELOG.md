@@ -10,6 +10,22 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### gibson-ship: PR open → live without tripping the gates (#512)
+
+- **New skill `skills/gibson-ship`.** Stage 6 of the pipeline. Reads the target repo's installed
+  Gibson config (`.agents/gibson-delivery.json`), its own PR-body claim parser and required
+  contexts (branch protection as fallback), and whichever review-evidence trust file it ships;
+  install promotion facts are data in `references/deployments.json`, not skill text. Two scripts:
+  `gibson-ship-preflight.sh` (claim lines, DCO, one authoring vendor, schema block, head contains
+  base tip) and `gibson-ship-status.sh` (required contexts, evidence blocks, Mini journal when the
+  Mini watches the repo).
+- **Rules it adds:** never merge another PR to the default branch while a review you are waiting
+  on is running (the Mini snapshot pins the base sha; ADR-0001); never push during a review; never
+  owner-attest an owner-authored head; CLI reviews are advisory; promote only through a card row
+  whose live deploy path was just verified.
+- **Documented:** Mini coverage of the-gibson needs controller changes (global `requiredContexts`,
+  conference-os-only gate adapter), not a `policy.json` edit. Grounded in conference-os#2357.
+
 ### New brand: ring logo and tagline (#406)
 
 - **New mark:** a G made of two rings around an amber core. The outer ring is the
