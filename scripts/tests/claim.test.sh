@@ -3112,6 +3112,31 @@ contains "reservation commit failed before any push" "$out" "claim commit failed
 [[ ! -d "$ROOT/lane2/wt-46-nologin" ]] && ok "worktree rolled back" || bad "worktree left behind"
 lacks "no PR was opened" "$(cat "$GH_PR_FILE")" "issue-46-nologin"
 
+echo "Codex review of #523 · a hooks path that does not hold the Gibson hooks is a bypass, not a declared lane"
+new_repo "$ROOT/lane3"
+git -C "$ROOT/lane3/canon" config core.hooksPath /dev/null
+out=$(cd "$ROOT/lane3/canon" && GIT_AUTHOR_EMAIL=lane@gibson.test GIT_COMMITTER_EMAIL=lane@gibson.test \
+  env -u GIBSON_AGENT_VENDOR "$CLAIM" 47 bypass 'app/v/**' --vendor=claude 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "claim with core.hooksPath=/dev/null exits nonzero" || bad "claim with core.hooksPath=/dev/null succeeded: $out"
+contains "names the unusable hooks path" "$out" "does not resolve to a directory"
+[[ ! -d "$ROOT/lane3/wt-47-bypass" ]] && ok "worktree rolled back" || bad "worktree left behind"
+lacks "no PR was opened" "$(cat "$GH_PR_FILE")" "issue-47-bypass"
+new_repo "$ROOT/lane4"
+(
+  cd "$ROOT/lane4/canon" || exit 1
+  mkdir -p .githooks && printf '#!/usr/bin/env bash\nexit 0\n' > .githooks/prepare-commit-msg && cp "$HOOKS_SRC/commit-msg" .githooks/ && chmod +x .githooks/*
+  git add -A && git commit -qm "hooks that stamp nothing" && git push -q origin main
+) >/dev/null 2>&1
+out=$(cd "$ROOT/lane4/canon" && GIT_AUTHOR_EMAIL=lane@gibson.test GIT_COMMITTER_EMAIL=lane@gibson.test \
+  env -u GIBSON_AGENT_VENDOR "$CLAIM" 48 noprobe 'app/u/**' --vendor=claude 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a prepare-commit-msg that stamps nothing is refused by the probe" || bad "a no-op prepare-commit-msg was accepted: $out"
+contains "names the failed probe" "$out" "did not stamp 'Agent-Vendor: claude' on a probe"
+[[ ! -d "$ROOT/lane4/wt-48-noprobe" ]] && ok "worktree rolled back" || bad "worktree left behind"
+new_repo "$ROOT/lane5"
+out=$(cd "$ROOT/lane5/canon" && env -u GIBSON_AGENT_VENDOR "$CLAIM" 49 nohooks 'app/t/**' --vendor=claude 2>&1); rc=$?
+check "a repository with no hooks at all still claims (adopters are not blocked)" "$rc" "0"
+contains "and names the enforcement gap" "$out" "ENFORCEMENT GAP"
+
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

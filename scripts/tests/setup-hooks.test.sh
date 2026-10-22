@@ -240,6 +240,20 @@ else
   else bad "commit-msg refusal of a bogus vendor was unclear: $(cat "$ROOT/bogus.err")"; fi
 fi
 
+printf 'subject\n\nAgent-Vendor: claude extra\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-malformed"
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-malformed") 2>"$ROOT/malformed.err"; then
+  bad "commit-msg accepted 'Agent-Vendor: claude extra' on an undeclared checkout"
+else
+  if grep -q 'malformed Agent-Vendor line' "$ROOT/malformed.err"; then ok "a malformed Agent-Vendor line is refused even on an undeclared checkout (Codex #523 finding 1)"
+  else bad "malformed-line refusal unclear: $(cat "$ROOT/malformed.err")"; fi
+fi
+printf 'subject\n\nAgent-Vendor:\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-empty"
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-empty") 2>/dev/null; then
+  bad "commit-msg accepted an empty Agent-Vendor line"
+else
+  ok "an empty Agent-Vendor line is refused"
+fi
+
 echo "setup-hooks.sh --vendor declares the worktree and validates the name"
 if (cd "$REPO" && "$SETUP" --vendor bogus) >/dev/null 2>"$ROOT/vbogus.err"; then
   bad "--vendor bogus must not succeed"
