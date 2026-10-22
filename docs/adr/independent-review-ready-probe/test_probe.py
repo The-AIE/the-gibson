@@ -137,8 +137,15 @@ class ReadyHeads(unittest.TestCase):
         self.assertEqual(self.ready([pull(2357, HEAD, pending)]), [])
 
     def test_terminal_review_evidence_is_not_ready(self):
-        done = GREEN[:3] + [check("review-evidence", "COMPLETED", "FAILURE")]
-        self.assertEqual(self.ready([pull(2357, HEAD, done)]), [])
+        for outcome in ("SUCCESS", "FAILURE", "CANCELLED", "TIMED_OUT", "NEUTRAL", "SKIPPED", "ACTION_REQUIRED"):
+            done = GREEN[:3] + [check("review-evidence", "COMPLETED", outcome)]
+            self.assertEqual(self.ready([pull(2357, HEAD, done)]), [], outcome)
+        for state in ("SUCCESS", "FAILURE", "ERROR"):
+            done = GREEN[:3] + [status("review-evidence", state)]
+            self.assertEqual(self.ready([pull(2357, HEAD, done)]), [], state)
+        for state in ("PENDING", "EXPECTED"):
+            live = GREEN[:3] + [status("review-evidence", state)]
+            self.assertEqual(self.ready([pull(2357, HEAD, live)]), [(2357, HEAD)], state)
 
     def test_graphql_error_raises(self):
         github = FakeGitHub({"errors": [{"message": "nope"}]})
