@@ -241,7 +241,7 @@ esac
 # canonical checkout keeps whatever the owner chose. Every write is read back;
 # a declaration that cannot be proven is a refusal, not a warning.
 lane_vendor_declare() { # wt-dir vendor
-  local wt="$1" vendor="$2" ext got hooks hooks_dir probe
+  local wt="$1" vendor="$2" ext got hooks hooks_dir probe other err
   ext=$(git -C "$wt" config --get extensions.worktreeConfig 2>/dev/null || true)
   if [[ "$ext" != "true" ]]; then
     if git -C "$wt" config --get core.worktree >/dev/null 2>&1; then
@@ -297,8 +297,23 @@ lane_vendor_declare() { # wt-dir vendor
     rm -f "$probe"
     die "the hooks at core.hooksPath=$hooks did not stamp 'Agent-Vendor: $vendor' on a probe message — they are not the Gibson hooks, or the declaration is not visible to them; refusing to continue"
   fi
-  rm -f "$probe"
-  info "lane vendor declared: gibson.agentVendor=$vendor on $wt (hooks: $hooks, probe stamped)"
+  # And the reject half must reject: the same probe with the WRONG vendor must
+  # fail commit-msg, and the stamped one must pass it (Codex round 2: a genuine
+  # prepare hook beside a no-op commit-msg would otherwise pass as declared).
+  other=claude; [[ "$vendor" == "claude" ]] && other=codex
+  printf 'probe: lane declaration\n\nAgent-Vendor: %s\nSigned-off-by: probe <probe@gibson.test>\n' "$other" > "$probe.bad"
+  if (cd "$wt" && env -u GIBSON_AGENT_VENDOR "$hooks_dir/commit-msg" "$probe.bad") >/dev/null 2>&1; then
+    rm -f "$probe" "$probe.bad"
+    die "the commit-msg hook at core.hooksPath=$hooks accepted a probe trailered 'Agent-Vendor: $other' on a '$vendor' lane — it is not the Gibson reject hook; refusing to continue"
+  fi
+  rm -f "$probe.bad"
+  if ! (cd "$wt" && env -u GIBSON_AGENT_VENDOR "$hooks_dir/commit-msg" "$probe") >"$probe.err" 2>&1; then
+    err=$(cat "$probe.err" 2>/dev/null || true)
+    rm -f "$probe" "$probe.err"
+    die "the commit-msg hook at core.hooksPath=$hooks refused this lane's own stamped probe — fix what it names before claiming: ${err}"
+  fi
+  rm -f "$probe" "$probe.err"
+  info "lane vendor declared: gibson.agentVendor=$vendor on $wt (hooks: $hooks, both probes passed)"
 }
 
 # --- local scope-token grammar (#331) ---------------------------------------

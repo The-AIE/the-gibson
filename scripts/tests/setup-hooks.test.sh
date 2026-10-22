@@ -247,6 +247,12 @@ else
   if grep -q 'malformed Agent-Vendor line' "$ROOT/malformed.err"; then ok "a malformed Agent-Vendor line is refused even on an undeclared checkout (Codex #523 finding 1)"
   else bad "malformed-line refusal unclear: $(cat "$ROOT/malformed.err")"; fi
 fi
+printf 'subject\n\nAgent-Vendor:\013claude\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-vtab"
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-vtab") 2>/dev/null; then
+  bad "commit-msg accepted 'Agent-Vendor:<VT>claude', which the evaluator's [ \\t] matcher would not resolve"
+else
+  ok "a vertical-tab separator is refused: only space/tab count, as in pr-review-evidence.mjs (Codex round 2)"
+fi
 printf 'subject\n\nAgent-Vendor:\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-empty"
 if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-empty") 2>/dev/null; then
   bad "commit-msg accepted an empty Agent-Vendor line"

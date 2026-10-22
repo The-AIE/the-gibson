@@ -131,7 +131,7 @@ fi
 # its own paragraph ABOVE the Gibson-* block (claim-provenance reads only the
 # final block and treats an extra key there as malformed), so look at the whole
 # message exactly as review-evidence does, never only at the final block.
-if grep -qiE '^Agent-Vendor:[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*$' "$msg_file" 2>/dev/null; then
+if grep -qiE '^Agent-Vendor:[[:blank:]]*[A-Za-z0-9_-]+[[:blank:]]*$' "$msg_file" 2>/dev/null; then
   exit 0
 fi
 
