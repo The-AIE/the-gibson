@@ -85,6 +85,7 @@ work_commit() { # email [git-commit args...] — signed, -a
 #   unknown-vendor signed, Agent-Vendor: bogus
 #   bot            signed, lane-bot email, no trailer       (resolves by login)
 #   bot-invalid-committer  lane-bot author, .invalid committer, no trailer
+#   bare-invalid   signed, trailer, author/committer `codex@invalid` (bare form)
 setup_repo() { # setup_repo <mode>
   local mode="${1:-signed}"
   rm -rf "$REPO" "$REMOTE"
@@ -104,6 +105,7 @@ setup_repo() { # setup_repo <mode>
     two-vendors)    work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: claude" -m "Agent-Vendor: codex" ;;
     unknown-vendor) work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: bogus" ;;
     bot)            work_commit "$BOT_EMAIL" -m "work" ;;
+    bare-invalid)   work_commit codex@invalid -m "work" -m "Agent-Vendor: codex" ;;
     bot-invalid-committer)
       # Lane-bot author, .invalid committer, no trailer: review-evidence fails
       # committer:<sha>:no-login, so the walk must not take the bot fast path
@@ -344,6 +346,17 @@ grep -q "$SHA multi-vendor:claude,codex" "$REPO/gibson/journal.md" && ok "two-ve
 setup_repo unknown-vendor; SHA=$(head_sha); write_state "$BRANCH" "$SHA"; run_loop "$ROOT/r4.err"
 grep -q "$SHA unknown-vendor:bogus" "$REPO/gibson/journal.md" && ok "unknown-vendor: reason names bogus" || bad "unknown-vendor reason: $(cat "$REPO/gibson/journal.md")"
 
+echo "Agent-Vendor walk: the bare user@invalid form is refused like .invalid (#523 round five)"
+setup_repo bare-invalid
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+: > "$CALLS/devin.cmds"
+run_loop "$ROOT/loop-bare-invalid.err"
+if handoff_invoked; then bad "bare-invalid: loop handed off a codex@invalid commit"
+else ok "bare-invalid: loop does not invoke the supervisor"; fi
+if grep -q "$SHA invalid-email:codex@invalid" "$REPO/gibson/journal.md"; then ok "bare-invalid: journal names codex@invalid"
+else bad "bare-invalid: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
+
 echo "Agent-Vendor walk: a lane-bot author does not excuse a .invalid committer (mixed identity)"
 setup_repo bot-invalid-committer
 SHA=$(head_sha)
@@ -398,10 +411,19 @@ SHA=$(head_sha)
 git -C "$REPO" checkout -q "$BRANCH"
 out=$(cd "$REPO" && cp_agent_vendor_walk main); rc=$?
 [[ "$rc" -eq 3 && "$out" == *"$SHA no-trailer"* && "$out" == *"fix: "* && "$out" == *"report only"* ]] && ok "cp_agent_vendor_walk: undeclared checkout → 3 with SHA, reason, fix" || bad "probe undeclared rc=$rc: $out"
+# A --local-only value is not a declaration (the hooks read worktree scope only,
+# gated on extensions.worktreeConfig): still report-only.
 git -C "$REPO" config gibson.agentVendor claude
 out=$(cd "$REPO" && cp_agent_vendor_walk main); rc=$?
-[[ "$rc" -eq 1 && "$out" == *"$SHA no-trailer"* ]] && ok "cp_agent_vendor_walk: declared lane → 1" || bad "probe declared rc=$rc: $out"
+[[ "$rc" -eq 3 ]] && ok "cp_agent_vendor_walk: --local-only gibson.agentVendor is not a declaration → still 3" || bad "probe local-only rc=$rc: $out"
 git -C "$REPO" config --unset gibson.agentVendor
+git -C "$REPO" config extensions.worktreeConfig true
+git -C "$REPO" config --worktree gibson.agentVendor claude
+[[ "$(agent_vendor_declared "$REPO")" == "claude" ]] && ok "agent_vendor_declared: worktree scope + extension on → claude" || bad "agent_vendor_declared read '$(agent_vendor_declared "$REPO")'"
+out=$(cd "$REPO" && cp_agent_vendor_walk main); rc=$?
+[[ "$rc" -eq 1 && "$out" == *"$SHA no-trailer"* ]] && ok "cp_agent_vendor_walk: declared lane (worktree scope, extension on) → 1" || bad "probe declared rc=$rc: $out"
+git -C "$REPO" config --worktree --unset gibson.agentVendor
+git -C "$REPO" config --unset extensions.worktreeConfig
 out=$(cd "$REPO" && cp_agent_vendor_walk refs/heads/nope); rc=$?
 [[ "$rc" -eq 2 ]] && ok "cp_agent_vendor_walk: unresolvable base → 2 (cannot run), never a pass" || bad "probe bad base rc=$rc: $out"
 setup_repo signed

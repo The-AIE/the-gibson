@@ -36,7 +36,8 @@ UNDECLARED LANES
   After the table (not with --issue or --markdown), a second list: every
   registered worktree of this repository (`git worktree list`) that is on a
   branch other than the ledger base and has no `gibson.agentVendor` in its
-  worktree config. Such a lane was made before claim.sh declared vendors
+  worktree-scoped config (extensions.worktreeConfig on; a --local-only value is
+  not a declaration, exactly as the hooks read it). Such a lane was made before claim.sh declared vendors
   (the-gibson#523) or by hand, so its commits carry no Agent-Vendor trailer and
   review-evidence reports identity-unresolved at review time. The fix is printed
   with each row: `scripts/setup-hooks.sh --vendor from-reservation` inside it.
@@ -352,9 +353,15 @@ unset _legacy_table _legacy_ls _legacy_ls_err
 # A lane made before claim.sh declared vendors, or by hand, is one whose later
 # commits carry no Agent-Vendor trailer: the sweep over existing lanes is this
 # one list. Linked worktrees only (never the main one), on a branch that is not
-# the ledger base, with a path that still exists; `git config --worktree` reads
-# config.worktree when extensions.worktreeConfig is on and the shared config
-# otherwise, so an undeclared lane reads empty either way.
+# the ledger base, with a path that still exists. Declared means a worktree-
+# scoped gibson.agentVendor with extensions.worktreeConfig on, the only form the
+# hooks honour; with the extension off `--worktree` falls back to --local, so a
+# shared value would read as a declaration for every lane, and is ignored.
+# shellcheck source=lib/agent-vendor.sh
+. "$SCRIPT_DIR/lib/agent-vendor.sh" 2>/dev/null || {
+  echo "claims-status.sh: ERROR: cannot source $SCRIPT_DIR/lib/agent-vendor.sh — refusing to list lane declarations with a reader that may differ from the hooks" >&2
+  exit 1
+}
 undeclared_lanes() {
   local wt="" branch="" prunable=0 line main_wt="" base_branch vendor
   base_branch="${REF##*/}"
@@ -371,7 +378,10 @@ undeclared_lanes() {
           case "$branch" in
             main|master|"$base_branch") ;;
             *)
-              vendor=$(git -C "$wt" config --worktree --get gibson.agentVendor 2>/dev/null || true)
+              # Worktree scope only, gated on extensions.worktreeConfig, as the
+              # hooks read it (scripts/lib/agent-vendor.sh): a --local-only
+              # value is shared by every worktree and is NOT a declaration.
+              vendor=$(agent_vendor_declared "$wt")
               [[ -n "$vendor" ]] || printf '%s\t%s\n' "$branch" "$wt"
               ;;
           esac

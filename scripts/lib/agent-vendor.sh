@@ -16,9 +16,10 @@
 #   push, with the same decision rule the evaluator applies later.
 #
 # RULE (per commit in BASE..HEAD; the base commit itself is outside the range)
-#   - author or committer email in the reserved `.invalid` domain: GitHub maps
-#     it to no login, the trailer is never read (`no-login`, #503/#504); this is
-#     checked first, for every commit, lane-bot authored or not;
+#   - author or committer email in the reserved `.invalid` domain (or the bare
+#     `user@invalid` form): GitHub maps it to no login, the trailer is never
+#     read (`no-login`, #503/#504); checked first, for every commit, lane-bot
+#     authored or not;
 #   - then, authored by a lane-bot login (`<id>+aie-agent-lanes-*[bot]@users.
 #     noreply.github.com`): resolves by identity, no trailer needed;
 #   - no `Agent-Vendor:` trailer anywhere in the message (`owner-unvendored`,
@@ -64,7 +65,7 @@ agent_vendor_commit_problem() {
   # still fails `committer:<sha>:no-login` (Codex review of #525).
   for v in "$ae" "$ce"; do
     case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
-      *.invalid) echo "invalid-email:${v}"; return 0 ;;
+      *.invalid|*@invalid) echo "invalid-email:${v}"; return 0 ;;
     esac
   done
   if agent_vendor_lane_bot_email "$ae"; then
@@ -113,6 +114,19 @@ agent_vendor_unresolved_shas() {
 $log_out
 EOF2
   return 0
+}
+
+# agent_vendor_declared [DIR] — prints the vendor DIR's worktree declares, or
+# nothing. Worktree scope ONLY, and only when extensions.worktreeConfig is true:
+# with the extension off, `git config --worktree` silently falls back to --local,
+# so a shared-config value would read as a declaration for every worktree of the
+# repository (#523 round five). Same gate as .githooks/commit-msg; a reader that
+# differs from the hooks declares lanes the hooks do not.
+agent_vendor_declared() {
+  local dir="${1:-.}" ext
+  ext=$(git -C "$dir" config --get extensions.worktreeConfig 2>/dev/null || true)
+  [[ "$ext" == "true" ]] || return 0
+  git -C "$dir" config --worktree --get gibson.agentVendor 2>/dev/null | tr '[:upper:]' '[:lower:]' || true
 }
 
 # agent_vendor_fix_hint — the one-line remedy every caller prints with a finding.

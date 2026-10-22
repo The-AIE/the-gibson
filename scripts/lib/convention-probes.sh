@@ -90,7 +90,8 @@ cp_recipe_hash_all() {
 # Default BASE origin/main. Run from inside the repo. Prints "<sha> <reason>"
 # per offender plus the fix. Returns 0 clean, 2 cannot run (no git, BASE or
 # HEAD unresolvable, lib missing), 1 findings on a DECLARED lane
-# (gibson.agentVendor set: every commit there must carry the trailer), and 3
+# (worktree-scoped gibson.agentVendor with extensions.worktreeConfig on, as the
+# hooks read it: every commit there must carry the trailer), and 3
 # findings on an undeclared checkout — report only, because an owner commit on
 # the owner's own branch resolves through independent review instead; loop.sh
 # is where the same findings block, since a lane handoff has no such review yet.
@@ -110,7 +111,9 @@ cp_agent_vendor_walk() {
   [[ -n "$out" ]] || return 0
   printf '%s\n' "$out"
   echo "fix: $(agent_vendor_fix_hint)"
-  if [[ -n "$(git config --get gibson.agentVendor 2>/dev/null || true)" ]]; then
+  # Declared means worktree scope with extensions.worktreeConfig on, exactly as
+  # the hooks read it; a --local-only value is not a declaration.
+  if [[ -n "$(agent_vendor_declared .)" ]]; then
     return 1
   fi
   echo "(undeclared checkout: report only; an owner commit resolves through independent review)"

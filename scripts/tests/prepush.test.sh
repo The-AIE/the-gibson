@@ -114,11 +114,19 @@ VSHA=$(git -C "$d" rev-parse HEAD)
 OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
 [[ "$RC" -eq 0 && "$OUT" == *"WARN     agent-vendor"* && "$OUT" == *"$VSHA invalid-email:"* && "$OUT" == *"setup-hooks.sh --vendor from-reservation"* ]] \
   && ok "undeclared checkout: unresolvable commit is WARN with SHA, reason and fix; exit stays 0 (report only)" || bad "vendorwalk undeclared rc=$RC: $OUT"
+# A --local-only gibson.agentVendor is not a declaration (hooks read worktree
+# scope only, gated on extensions.worktreeConfig): still WARN.
 git -C "$d" config gibson.agentVendor claude
 OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
-[[ "$RC" -eq 1 && "$(last_line)" == *"FAILED agent-vendor"* && "$OUT" == *"$VSHA invalid-email:"* ]] \
-  && ok "declared lane: the same commit is FAIL, exit 1, name is last line" || bad "vendorwalk declared rc=$RC: $OUT"
+[[ "$RC" -eq 0 && "$OUT" == *"WARN     agent-vendor"* ]] && ok "--local-only gibson.agentVendor: still WARN, not a declaration" || bad "vendorwalk local-only rc=$RC: $OUT"
 git -C "$d" config --unset gibson.agentVendor
+git -C "$d" config extensions.worktreeConfig true
+git -C "$d" config --worktree gibson.agentVendor claude
+OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+[[ "$RC" -eq 1 && "$(last_line)" == *"FAILED agent-vendor"* && "$OUT" == *"$VSHA invalid-email:"* ]] \
+  && ok "declared lane (worktree scope, extension on): the same commit is FAIL, exit 1, name is last line" || bad "vendorwalk declared rc=$RC: $OUT"
+git -C "$d" config --worktree --unset gibson.agentVendor
+git -C "$d" config --unset extensions.worktreeConfig
 GIT_AUTHOR_EMAIL=lane@gibson.test GIT_COMMITTER_EMAIL=lane@gibson.test git -C "$d" commit -q --amend --reset-author --no-edit -m "work" -m "Agent-Vendor: claude" -s
 OUT=$(cd "$d" && bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
 [[ "$RC" -eq 0 && "$OUT" == *"PASS     agent-vendor"* ]] && ok "one known trailer under a resolvable email: PASS" || bad "vendorwalk fixed rc=$RC: $OUT"

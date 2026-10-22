@@ -344,6 +344,12 @@ out_md=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" --markdown
 lacks    "undeclared lanes: --markdown output keeps the table format only" "$out_md" "undeclared lanes"
 out_issue=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" --issue 1 2>&1)
 lacks    "undeclared lanes: --issue is a filtered view, no lane sweep" "$out_issue" "undeclared lanes"
+# A --local-only value is shared by every worktree and is not a declaration
+# (the hooks read worktree scope only): wt-a stays listed.
+git -C "$ROOT/lanes/canon" config --local gibson.agentVendor grok
+out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" 2>&1)
+contains "undeclared lanes: a --local-only gibson.agentVendor does not declare a lane (still listed)" "$out" "feat/1-a"
+git -C "$ROOT/lanes/canon" config --unset gibson.agentVendor
 (cd "$ROOT/lanes/wt-a" && "$SETUP" --vendor grok) >/dev/null 2>&1
 out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" 2>&1); rc=$?
 check    "undeclared lanes: exit 0 once every lane is declared" "$rc" "0"
