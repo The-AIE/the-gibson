@@ -366,3 +366,21 @@ full scan every 60 s (~86k REST calls/day); a "review-ready" status set in CI
 (still needs a poller, adds a repo change).
 Revisit when: probe-started runs review nothing for a week, or App rate-limit
 headroom drops below 1,000 points.
+
+## D-019 · 2026-10-22 · The independent reviewer keeps pinning the base sha, and survives a base-only move when the diff is provably the same
+Decided: `_snapshot` keeps the base sha and adds the SHA-256 of the patch the
+reviewers read. In `_recheck`, a snapshot that differs only in the base sha is
+still accepted when the old base is an ancestor of the new one (compare status
+`ahead`) and none of the paths main changed in that advance is a reviewed path;
+every other difference still discards the review. An accepted move is journaled
+as `base-moved`. Measured on the Mini journal (2026-10-04 → 10-22, 27 reviews):
+4 snapshot-changed skips, 1 base-only (#2357, ~15 min of paid review), 1 head
+push, 2 PRs merged mid-review. Full record and the unapplied controller diff:
+docs/adr/0002-independent-review-base-pin.md. Owner applies; nothing is on the
+Mini yet.
+Rejected: dropping the base sha from the pin (accepts a force-pushed main or a
+main that rewrote a reviewed file, saves nothing more); pinning the merge base
+(same blind spot); re-fetching base files after the vendors returned (changes
+nothing they saw).
+Revisit when: a `base-moved` verdict is disputed because of main's change, or
+merged-mid-review skips outnumber base-only moves.

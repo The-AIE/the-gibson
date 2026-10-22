@@ -1,0 +1,102 @@
+--- neuro-independent-review.py	2026-10-21 21:49:53
++++ neuro-independent-review.patched.py	2026-10-21 21:50:35
+@@ -153,6 +153,7 @@
+ import argparse
+ import base64
+ import fcntl
++import hashlib
+ import json
+ import os
+ import re
+@@ -1153,7 +1154,15 @@
+         files.append(entry)
+     if len(files) == 0 or diff_text.strip() == "":
+         return {"complete": False, "reason": "diff-incomplete", "commits": commits, "files": files, "diff": diff_text}
+-    return {"complete": True, "reason": None, "commits": commits, "files": files, "diff": diff_text}
++    status = payload.get("status") if isinstance(payload.get("status"), str) else None
++    return {
++        "complete": True,
++        "reason": None,
++        "commits": commits,
++        "files": files,
++        "diff": diff_text,
++        "status": status,
++    }
+ 
+ 
+ def _latest(items, name_field):
+@@ -2783,11 +2792,51 @@
+         "head_repo": _head_repo(pull),
+         "commits": [commit["sha"] for commit in compare["commits"]],
+         "files": sorted(review_paths(compare["files"])),
++        "diff_sha256": hashlib.sha256(compare["diff"].encode("utf-8")).hexdigest(),
+         "labels": sorted(pr_labels),
+         "linked": sorted(linked_labels),
+     }
+ 
+ 
++def _base_only_move(github, repo, pinned, fresh):
++    """True when the only pinned field that moved is the base sha and the
++    reviewed change is byte-identical.
++
++    ``compare`` is three-dot (merge-base...head), so a default branch that
++    advanced past the merge base leaves commits, files and the patch unchanged;
++    ``diff_sha256`` proves it rather than assuming it. The reviewers also read
++    every touched file at the pinned base, so the advance must be a fast-forward
++    that touched none of the reviewed paths. Anything unreadable is a change.
++    """
++    if not isinstance(pinned, dict) or not isinstance(fresh, dict):
++        return False
++    if set(pinned) != set(fresh) or pinned.get("base") == fresh.get("base"):
++        return False
++    for key in pinned:
++        if key != "base" and pinned[key] != fresh[key]:
++            return False
++    old_base = pinned.get("base")
++    new_base = fresh.get("base")
++    if not isinstance(old_base, str) or not isinstance(new_base, str):
++        return False
++    if SHA_RE.fullmatch(old_base) is None or SHA_RE.fullmatch(new_base) is None:
++        return False
++    try:
++        advance = github.compare(repo, old_base, new_base)
++    except IncompleteRead:
++        return False
++    if not isinstance(advance, dict) or advance.get("complete") is not True:
++        return False
++    if advance.get("status") != "ahead":
++        return False
++    moved = set()
++    for item in advance["files"]:
++        moved.add(item.get("filename"))
++        if item.get("previous_filename") is not None:
++            moved.add(item.get("previous_filename"))
++    return moved.isdisjoint(set(fresh.get("files") or []))
++
++
+ def _held_credentials(github):
+     """Installation token and App JWT currently held in memory. Never log these."""
+     found = []
+@@ -3313,7 +3362,21 @@
+             raise SkipPull("snapshot-changed")
+     fresh = _snapshot(pull, compare, pr_labels, linked_labels)
+     if fresh != pinned:
+-        raise SkipPull("snapshot-changed")
++        if not _base_only_move(github, repo, pinned, fresh):
++            raise SkipPull("snapshot-changed")
++        _journal(
++            state_dir,
++            {
++                "time": _now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"),
++                "repo": repo,
++                "number": number,
++                "head": head,
++                "result": "base-moved",
++                "base_from": pinned["base"],
++                "base_to": fresh["base"],
++                "seconds": 0,
++            },
++        )
+     classification = gate.classify(
+         {
+             "files": review_paths(compare["files"]),
