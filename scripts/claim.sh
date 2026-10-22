@@ -222,11 +222,57 @@ die() { echo "claim.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "claim.sh: $*" >&2; }
 
 # #467: refuse before any inventory read or mutation when the vendor is unknown.
+# Same list as .githooks/{prepare-commit-msg,commit-msg} and setup-hooks.sh
+# (AUTHOR_COMMIT_VENDORS in pr-review-evidence.mjs); setup-hooks.test.sh
+# fails when they drift.
 case "$VENDOR" in
   claude|codex|grok|devin) ;;
   "") die "no agent vendor: pass --vendor=<claude|codex|grok|devin> or set GIBSON_AGENT_VENDOR (an unvendored reservation commit blocks review-evidence, #467)" ;;
   *) die "unknown agent vendor '$VENDOR': use one of claude, codex, grok, devin (#467)" ;;
 esac
+
+# Declare VENDOR on worktree WT so the repo hooks stamp and check the
+# Agent-Vendor trailer on every commit made there. Worktree-scoped config only
+# (`git config --worktree`, which needs extensions.worktreeConfig; enabling that
+# is a one-time, inert change to the shared config that git documents as safe
+# unless core.worktree is set or core.bare is true — both refused here rather
+# than moved behind the owner's back). core.hooksPath is set for THIS worktree
+# only when nothing already wires hooks, never in the shared config: the
+# canonical checkout keeps whatever the owner chose. Every write is read back;
+# a declaration that cannot be proven is a refusal, not a warning.
+lane_vendor_declare() { # wt-dir vendor
+  local wt="$1" vendor="$2" ext got hooks
+  ext=$(git -C "$wt" config --get extensions.worktreeConfig 2>/dev/null || true)
+  if [[ "$ext" != "true" ]]; then
+    if git -C "$wt" config --get core.worktree >/dev/null 2>&1; then
+      die "cannot declare the lane vendor: extensions.worktreeConfig is off and core.worktree is set in the shared config — move core.worktree to the main worktree's config.worktree (git-config(1), extensions.worktreeConfig) and re-run"
+    fi
+    if [[ "$(git -C "$wt" config --get core.bare 2>/dev/null || true)" == "true" ]]; then
+      die "cannot declare the lane vendor: extensions.worktreeConfig is off and core.bare is true in the shared config — refusing to enable the extension on a bare-marked repository"
+    fi
+    git -C "$wt" config extensions.worktreeConfig true ||
+      die "cannot enable extensions.worktreeConfig — refusing to continue without a worktree-scoped vendor declaration"
+  fi
+  git -C "$wt" config --worktree gibson.agentVendor "$vendor" ||
+    die "cannot write gibson.agentVendor=$vendor on $wt — refusing to continue with an undeclared lane"
+  got=$(git -C "$wt" config --worktree --get gibson.agentVendor 2>/dev/null || true)
+  [[ "$got" == "$vendor" ]] ||
+    die "lane vendor read-back mismatch on $wt: wrote '$vendor', read '${got:-<unset>}' — refusing to continue with an unproven declaration"
+  hooks=$(git -C "$wt" config --get core.hooksPath 2>/dev/null || true)
+  if [[ -z "$hooks" ]]; then
+    if [[ -d "$wt/.githooks" ]]; then
+      git -C "$wt" config --worktree core.hooksPath .githooks ||
+        die "cannot wire .githooks for $wt — refusing to leave a lane whose commits are not checked for Agent-Vendor"
+      hooks=.githooks
+    else
+      info "WARNING: no .githooks/ in this repository — later commits on $wt are NOT checked for an Agent-Vendor trailer (only the reservation carries one); copy the Gibson .githooks/ into the repository and re-run to close this"
+    fi
+  fi
+  if [[ -n "$hooks" && -d "$wt/$hooks" ]]; then
+    chmod +x "$wt/$hooks"/* 2>/dev/null || true
+  fi
+  info "lane vendor declared: gibson.agentVendor=$vendor on $wt${hooks:+ (hooks: $hooks)}"
+}
 
 # --- local scope-token grammar (#331) ---------------------------------------
 # Cheap, no inventory, no network. A glob like `*.test.sh` must refuse here
@@ -1083,6 +1129,18 @@ CLAIM_EXPECTED_OID=$(git rev-parse --verify --quiet "$DEFAULT_REMOTE_BRANCH^{com
 info "creating worktree $WT_DIR branch $BRANCH"
 git worktree add "$WT_DIR" -b "$BRANCH" "$DEFAULT_REMOTE_BRANCH"
 WORKTREE_CREATED=1
+
+# Declare the lane's vendor ON THE WORKTREE, before its first commit, so every
+# commit made here — not only the reservation below — carries the Agent-Vendor
+# trailer (.githooks/prepare-commit-msg adds it, .githooks/commit-msg refuses a
+# commit without it, with another vendor's, or under a `.invalid` identity).
+# The 2026-10-21 closures all failed review-evidence on later, hand-made
+# commits the reservation's trailer did not cover: #506 had none, #503/#504
+# had it but were authored as codex@openai.invalid (GitHub: no login, so the
+# trailer was never read). Everything written here is worktree-scoped
+# (`git config --worktree`): the canonical checkout and sibling lanes are not
+# touched, and the settings vanish with the worktree on rollback or release.
+lane_vendor_declare "$WT_DIR" "$VENDOR"
 
 # Pin the original branch point before the empty reservation commit. The v2
 # PR body and v1 trailers bind this exact SHA; re-reading the ref later would

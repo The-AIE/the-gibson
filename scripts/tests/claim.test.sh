@@ -3055,6 +3055,63 @@ out=$(cd "$ROOT/v2/canon" && GIBSON_AGENT_VENDOR=claude "$CLAIM" 44 flagwins 'ap
 check "--vendor overrides GIBSON_AGENT_VENDOR: claim succeeds" "$rc" "0"
 contains "--vendor overrides GIBSON_AGENT_VENDOR: trailer is the flag's" "$(git -C "$ROOT/v2/wt-44-flagwins" log -1 --format=%B)" "Agent-Vendor: grok"
 
+echo "2026-10-21 closures · the lane itself is declared, so every later commit carries the trailer"
+# new_repo repos have no .githooks, so claim.sh's hooks wiring is a warning
+# there; this fixture commits the real hooks into the repo first. The hermetic
+# identity above is sensor@gibson.invalid, which the commit-msg hook refuses on
+# a declared lane (GitHub maps `.invalid` to no login: #503/#504), so the lane
+# that must succeed commits as lane@gibson.test and the one that must fail
+# keeps the default.
+HOOKS_SRC="$SCRIPT_DIR/../../.githooks"
+new_repo "$ROOT/lane"
+(
+  cd "$ROOT/lane/canon" || exit 1
+  mkdir -p .githooks && cp "$HOOKS_SRC/prepare-commit-msg" "$HOOKS_SRC/commit-msg" .githooks/ && chmod +x .githooks/*
+  git add -A && git commit -qm "hooks" && git push -q origin main
+) >/dev/null 2>&1
+out=$(cd "$ROOT/lane/canon" && GIT_AUTHOR_EMAIL=lane@gibson.test GIT_COMMITTER_EMAIL=lane@gibson.test \
+  env -u GIBSON_AGENT_VENDOR "$CLAIM" 45 laned 'app/z/**' --vendor=codex 2>&1); rc=$?
+check "claim succeeds with the hooks in the repo" "$rc" "0"
+contains "claim reports the lane declaration" "$out" "lane vendor declared: gibson.agentVendor=codex"
+LANE_WT="$ROOT/lane/wt-45-laned"
+check "worktree-scoped gibson.agentVendor is the claim's vendor" "$(git -C "$LANE_WT" config --worktree --get gibson.agentVendor 2>/dev/null)" "codex"
+check "hooks are wired for the lane (worktree scope)" "$(git -C "$LANE_WT" config --worktree --get core.hooksPath 2>/dev/null)" ".githooks"
+[[ -z "$(git -C "$ROOT/lane/canon" config --get gibson.agentVendor 2>/dev/null)" ]] \
+  && ok "canonical checkout stays undeclared" || bad "canonical checkout inherited the lane's vendor"
+[[ -z "$(git -C "$ROOT/lane/canon" config --local --get core.hooksPath 2>/dev/null)" ]] \
+  && ok "canonical checkout's shared config has no core.hooksPath (nothing installed on the owner's checkout)" \
+  || bad "claim.sh wrote core.hooksPath into the shared config"
+contains "reservation commit still carries the trailer" "$(git -C "$LANE_WT" log -1 --format=%B)" "Agent-Vendor: codex"
+if (cd "$LANE_WT" && GIT_AUTHOR_EMAIL=lane@gibson.test GIT_COMMITTER_EMAIL=lane@gibson.test \
+      env -u GIBSON_AGENT_VENDOR git commit -q --allow-empty -m "feat(#45): hand-made lane commit") 2>"$ROOT/lane/commit.err"; then
+  ok "a plain git commit on the lane succeeds"
+else
+  bad "a plain git commit on the lane failed: $(cat "$ROOT/lane/commit.err")"
+fi
+contains "that commit carries Agent-Vendor: codex without anyone typing it" "$(git -C "$LANE_WT" log -1 --format=%B)" "Agent-Vendor: codex"
+check "and exactly once" "$(git -C "$LANE_WT" log -1 --format=%B | grep -c '^Agent-Vendor:')" "1"
+if (cd "$LANE_WT" && GIT_AUTHOR_EMAIL=lane@gibson.test GIT_COMMITTER_EMAIL=lane@gibson.test \
+      env -u GIBSON_AGENT_VENDOR git commit -q --allow-empty -m $'fix: wrong vendor\n\nAgent-Vendor: claude') 2>/dev/null; then
+  bad "the lane accepted a commit trailered as another vendor"
+else
+  ok "the lane refuses a commit trailered as another vendor at commit time"
+fi
+
+echo "2026-10-21 closures · a lane whose identity GitHub cannot map is refused at the reservation, and rolled back"
+new_repo "$ROOT/lane2"
+(
+  cd "$ROOT/lane2/canon" || exit 1
+  mkdir -p .githooks && cp "$HOOKS_SRC/prepare-commit-msg" "$HOOKS_SRC/commit-msg" .githooks/ && chmod +x .githooks/*
+  git add -A && git commit -qm "hooks" && git push -q origin main
+) >/dev/null 2>&1
+out=$(cd "$ROOT/lane2/canon" && GIT_AUTHOR_EMAIL=codex@openai.invalid GIT_COMMITTER_EMAIL=codex@openai.invalid \
+  env -u GIBSON_AGENT_VENDOR "$CLAIM" 46 nologin 'app/w/**' --vendor=codex 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "claim as codex@openai.invalid exits nonzero" || bad "claim as codex@openai.invalid succeeded: $out"
+contains "names the .invalid identity and no-login" "$out" "reserved .invalid domain"
+contains "reservation commit failed before any push" "$out" "claim commit failed"
+[[ ! -d "$ROOT/lane2/wt-46-nologin" ]] && ok "worktree rolled back" || bad "worktree left behind"
+lacks "no PR was opened" "$(cat "$GH_PR_FILE")" "issue-46-nologin"
+
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
