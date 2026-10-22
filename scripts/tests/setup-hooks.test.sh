@@ -273,6 +273,14 @@ set +e
 vnone_rc=$?
 set -e
 if [[ "$vnone_rc" -eq 2 ]]; then ok "--vendor without a value exits 2"; else bad "--vendor without a value exited $vnone_rc"; fi
+set +e
+(cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$SETUP" --vendor=) >/dev/null 2>"$ROOT/veq.err"
+veq_rc=$?
+set -e
+if [[ "$veq_rc" -eq 2 ]] && grep -q 'empty vendor' "$ROOT/veq.err"; then ok "--vendor= (empty value) exits 2 instead of silently declaring nothing (Codex round 3)"
+else bad "--vendor= exited $veq_rc: $(cat "$ROOT/veq.err")"; fi
+if ! git -C "$REPO" config --worktree --get gibson.agentVendor >/dev/null 2>&1; then ok "--vendor= left no declaration behind"
+else bad "--vendor= declared '$(git -C "$REPO" config --worktree --get gibson.agentVendor)'"; fi
 if (cd "$REPO" && "$SETUP" --vendor Claude) >"$ROOT/vok.out" 2>"$ROOT/vok.err"; then
   ok "--vendor Claude succeeds"
 else

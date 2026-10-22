@@ -94,6 +94,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --vendor=*)
       VENDOR="${1#--vendor=}"
+      if [[ -z "$VENDOR" ]]; then
+        echo "setup-hooks.sh: --vendor= needs a value (one of: ${AGENT_VENDORS}); an empty vendor is not 'no vendor'" >&2
+        exit 2
+      fi
       shift
       ;;
     *)
