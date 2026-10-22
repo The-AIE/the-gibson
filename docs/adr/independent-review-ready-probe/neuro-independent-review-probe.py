@@ -285,7 +285,8 @@ def main(argv=None):
     controller = _load_controller(args.controller)
     policy = controller.load_policy(args.policy)
     state_dir = Path(args.state_dir)
-    state_dir.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run:
+        state_dir.mkdir(parents=True, exist_ok=True)
 
     lock = None if args.dry_run else _acquire(state_dir / "probe.lock")
     if not args.dry_run and lock is None:
@@ -325,6 +326,13 @@ def main(argv=None):
             )
         except subprocess.TimeoutExpired as expired:
             sys.stdout.write(expired.stdout if isinstance(expired.stdout, str) else "")
+            # A timed-out run is settled for the probe's purposes: these heads go
+            # to the fallback scan only, so a hung wrapper cannot be re-fired by
+            # the probe every minute and starve the scheduled job of the lock.
+            now = _stamp(_now())
+            for repo, number, _head, key in candidates:
+                cache[key] = {"number": number, "triggered": now, "timeout": True}
+            _store_cache(cache_path, cache)
             _log("controller killed after {0}s; heads left for the fallback scan".format(expired.timeout))
             return 0
         output = completed.stdout or ""
