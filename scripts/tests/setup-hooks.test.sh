@@ -375,6 +375,27 @@ else
   bad "commit-msg rejected a correct lane commit"
 fi
 
+echo "declaration is read from worktree scope only; a global/local value is not a lane (Codex round 4)"
+GSCOPE="$ROOT/gscope"
+mkdir -p "$GSCOPE"
+$GIT init -q "$GSCOPE"
+git -C "$GSCOPE" config user.name gibson-sensor
+git -C "$GSCOPE" config user.email "$LANE_EMAIL"
+git -C "$GSCOPE" config --local gibson.agentVendor grok
+msg="$ROOT/msg-gscope"
+printf 'subject\n\nbody\n' > "$msg"
+(cd "$GSCOPE" && env -u GIBSON_AGENT_VENDOR "$PREPARE" "$msg")
+if ! grep -qi '^Agent-Vendor:' "$msg"; then ok "a --local gibson.agentVendor does not stamp a trailer"
+else bad "a --local gibson.agentVendor was treated as a lane: $(cat "$msg")"; fi
+if (cd "$GSCOPE" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-missing"); then ok "a --local gibson.agentVendor does not require a trailer"
+else bad "a --local gibson.agentVendor made commit-msg demand a trailer"; fi
+printf 'subject\n\nAgent-Vendor: claude\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-bareinvalid"
+if (cd "$REPO" && GIT_AUTHOR_EMAIL=codex@invalid GIT_COMMITTER_EMAIL=codex@invalid env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-bareinvalid") 2>/dev/null; then
+  bad "commit-msg accepted the bare codex@invalid identity on a declared lane"
+else
+  ok "the bare @invalid form is refused like .invalid (Codex round 4)"
+fi
+
 echo "end to end: a plain git commit on a declared lane carries the trailer; the main worktree does not"
 E2E="$ROOT/e2e"
 mkdir -p "$E2E"

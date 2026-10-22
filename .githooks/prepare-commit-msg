@@ -106,7 +106,16 @@ vendor_known() {
   return 1
 }
 
-lane_vendor="$(lower "$(git config --get gibson.agentVendor 2>/dev/null || true)")"
+# Worktree scope ONLY: the declaration lives on the lane (`git config --worktree`),
+# never in the local, global or system config, so a stray global value cannot
+# turn the owner's checkout into a lane (Codex round 4). With
+# extensions.worktreeConfig off, `--worktree` silently falls back to --local
+# (git-config(1)), so the declaration counts only when the extension is on;
+# claim.sh and setup-hooks.sh --vendor always enable it when they declare.
+lane_vendor=""
+if [[ "$(git config --get extensions.worktreeConfig 2>/dev/null || true)" == "true" ]]; then
+  lane_vendor="$(lower "$(git config --worktree --get gibson.agentVendor 2>/dev/null || true)")"
+fi
 env_vendor="$(lower "${GIBSON_AGENT_VENDOR:-}")"
 
 if [[ -n "$lane_vendor" && -n "$env_vendor" && "$lane_vendor" != "$env_vendor" ]]; then
