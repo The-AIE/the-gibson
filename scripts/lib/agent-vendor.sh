@@ -110,7 +110,14 @@ agent_vendor_repo_slug() {
 AGENT_VENDOR_TABLE=""
 AGENT_VENDOR_TABLE_FOR=""
 AGENT_VENDOR_TABLE_OK=0
+AGENT_VENDOR_TABLE_WHY=""
 AGENT_VENDOR_TABLE_FALLBACK="${AGENT_VENDOR_TABLE_FALLBACK:-}"
+# The evaluator itself, for its validateConfig(): the table is projected only
+# after the AUTHORITATIVE validator accepted it whole (duplicate normalized
+# logins, bad roles/vendors, malformed or duplicate authorCommits entries all
+# make the evaluator reject the entire configuration; a local projection that
+# kept the favourable rows would be a false green — Codex round eight on #525).
+AGENT_VENDOR_EVALUATOR="${AGENT_VENDOR_EVALUATOR:-$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../pr-review-evidence.mjs}"
 agent_vendor_table_json() { # repo base_sha — the table's JSON on stdout, or 1
   if [[ -n "$2" ]] && git -C "$1" cat-file -e "${2}:config/review-evidence.v1.json" 2>/dev/null; then
     git -C "$1" show "${2}:config/review-evidence.v1.json" 2>/dev/null
@@ -122,41 +129,57 @@ agent_vendor_table_json() { # repo base_sha — the table's JSON on stdout, or 1
   fi
   return 1
 }
-agent_vendor_author_table() { # repo base — prints the table; 1 when unreadable
-  local repo="$1" base="${2:-}" base_sha key
+agent_vendor_author_table() { # repo base — prints the table; 1 unreadable, 2 rejected by validateConfig
+  local repo="$1" base="${2:-}" base_sha key rc
   base_sha=$(git -C "$repo" rev-parse --verify --quiet "${base}^{commit}" 2>/dev/null || true)
   key="$repo@$base_sha@$AGENT_VENDOR_TABLE_FALLBACK"
   if [[ "$AGENT_VENDOR_TABLE_FOR" != "$key" ]]; then
     AGENT_VENDOR_TABLE_FOR="$key"
     AGENT_VENDOR_TABLE=""
     AGENT_VENDOR_TABLE_OK=0
-    if command -v node >/dev/null 2>&1; then
-      if AGENT_VENDOR_TABLE=$(agent_vendor_table_json "$repo" "$base_sha" | node -e '
-        let src = ""; process.stdin.on("data", (d) => { src += d; }); process.stdin.on("end", () => {
-          const c = JSON.parse(src);
-          if (!Array.isArray(c.identities)) process.exit(3);
+    AGENT_VENDOR_TABLE_WHY="unreadable"
+    if command -v node >/dev/null 2>&1 && [[ -f "$AGENT_VENDOR_EVALUATOR" ]]; then
+      # One line per author identity: "<login>\t<vendor>\t<sha,...>" (third
+      # field: the authorCommits allowlist, "" when unrestricted; after
+      # validateConfig it is never empty when present).
+      AGENT_VENDOR_TABLE=$(agent_vendor_table_json "$repo" "$base_sha" | AGENT_VENDOR_EVALUATOR="$AGENT_VENDOR_EVALUATOR" node -e '
+        const { pathToFileURL } = require("node:url");
+        let src = ""; process.stdin.on("data", (d) => { src += d; }); process.stdin.on("end", async () => {
+          let c; try { c = JSON.parse(src); } catch { process.exit(3); }
+          // The evaluator runs its CLI main when process.argv[1] is its own path, so
+          // the path travels in the environment, never as an argument.
+          try { const m = await import(pathToFileURL(process.env.AGENT_VENDOR_EVALUATOR).href); m.validateConfig(c); }
+          catch (e) { console.error(String(e && e.message || e)); process.exit(4); }
           for (const i of c.identities) {
-            if (typeof i.login !== "string" || !Array.isArray(i.roles) || !i.roles.includes("author")) continue;
-            const allow = Array.isArray(i.authorCommits) ? i.authorCommits.filter((x) => typeof x === "string").map((x) => x.toLowerCase()) : [];
-            if (Array.isArray(i.authorCommits) && allow.length === 0) allow.push("-");
-            console.log(i.login.toLowerCase() + "\t" + String(i.vendor || "unknown").toLowerCase() + "\t" + allow.join(","));
+            if (!i.roles.includes("author")) continue;
+            const allow = Array.isArray(i.authorCommits) ? i.authorCommits.map((x) => x.toLowerCase()) : [];
+            console.log(i.login.toLowerCase() + "\t" + String(i.vendor).toLowerCase() + "\t" + allow.join(","));
           }
-        });' 2>/dev/null) && [[ -n "$AGENT_VENDOR_TABLE" ]]; then
+        });' 2>/dev/null); rc=$?
+      if [[ "$rc" -eq 0 && -n "$AGENT_VENDOR_TABLE" ]]; then
         AGENT_VENDOR_TABLE_OK=1
+        AGENT_VENDOR_TABLE_WHY=""
       else
         AGENT_VENDOR_TABLE=""
+        [[ "$rc" -ne 4 ]] || AGENT_VENDOR_TABLE_WHY="invalid"
       fi
     fi
   fi
-  [[ "$AGENT_VENDOR_TABLE_OK" -eq 1 ]] || return 1
+  if [[ "$AGENT_VENDOR_TABLE_OK" -ne 1 ]]; then
+    [[ "$AGENT_VENDOR_TABLE_WHY" == "invalid" ]] && return 2
+    return 1
+  fi
   printf '%s\n' "$AGENT_VENDOR_TABLE"
 }
 
 # agent_vendor_identity REPO BASE LOGIN — prints "<vendor>\t<allowlist>" for a
-# listed author login; 1 when not listed; 3 when the table is unreadable.
+# listed author login; 1 when not listed; 3 when the table is unreadable; 4 when
+# the evaluator's validateConfig rejects the table.
 agent_vendor_identity() {
-  local table entry
-  table=$(agent_vendor_author_table "$1" "$2") || return 3
+  local table entry rc
+  table=$(agent_vendor_author_table "$1" "$2"); rc=$?
+  [[ "$rc" -ne 2 ]] || return 4
+  [[ "$rc" -eq 0 ]] || return 3
   while IFS= read -r entry; do
     [[ -n "$entry" ]] || continue
     [[ "${entry%%	*}" == "$3" ]] || continue
@@ -256,7 +279,9 @@ agent_vendor_login_for_email() {
 # prints `unreadable`. Reasons: invalid-email:<addr>, login-unresolved:<addr>,
 # identity-table-unreadable:<login>, unlisted-login:<login>,
 # commit-not-allowed:<login>, vendor-unknown:<login>, unverified-unattested:<login>,
-# no-trailer, multi-vendor:<a,b>, unknown-vendor:<v>.
+# identity-table-invalid:<login> (the evaluator's validateConfig rejects the
+# table at the base, so it would reject the whole PR), no-trailer,
+# multi-vendor:<a,b>, unknown-vendor:<v>.
 agent_vendor_commit_problem() {
   local repo="$1" sha="$2" base="${3:-}" slug="${4:-}" ae ce body line v vendors="" n=0
   local full_sha email login ident id_vendor allow a needs_trailer=0 side_email
@@ -279,6 +304,7 @@ agent_vendor_commit_problem() {
     [[ -n "$login" ]] || { echo "login-unresolved:${side_email}"; return 0; }
     ident=$(agent_vendor_identity "$repo" "$base" "$login")
     case $? in
+      4) echo "identity-table-invalid:${login}"; return 0 ;;
       3) echo "identity-table-unreadable:${login}"; return 0 ;;
       1) echo "unlisted-login:${login}"; return 0 ;;
     esac

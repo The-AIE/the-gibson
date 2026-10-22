@@ -618,6 +618,48 @@ why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" notable)
 [[ "$why" == "identity-table-unreadable:aie-agent-lanes-grok[bot]" ]] && ok "no identity table at the base → identity-table-unreadable, fail closed" || bad "no-table reason was '$why'"
 why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)" refs/heads/does-not-exist)
 [[ "$why" == "identity-table-unreadable:aie-agent-lanes-grok[bot]" ]] && ok "unresolvable base → identity-table-unreadable, fail closed" || bad "bad-base reason was '$why'"
+# The table is projected only after the evaluator's own validateConfig accepted
+# it whole (Codex round eight): a duplicate normalized login, or a malformed or
+# duplicate authorCommits entry beside a matching SHA, rejects the entire table.
+bad_table() { # branch node-mutation-expr — a base branch whose table is mutated
+  git -C "$REPO" checkout -q -b "$1" main
+  node -e 'const fs=require("fs");const p=process.argv[1];const c=JSON.parse(fs.readFileSync(p,"utf8"));const sha=process.argv[3];eval(process.argv[2]);fs.writeFileSync(p,JSON.stringify(c,null,2)+"\n")' "$REPO/config/review-evidence.v1.json" "$2" "$3"
+  $GIT -C "$REPO" commit -q -am "mutated table: $1" && git -C "$REPO" checkout -q main
+}
+setup_repo bot
+BOT_SHA=$(head_sha)
+bad_table dup-login 'c.identities.push({login:"MRHINKLE",appSlug:null,appId:null,vendor:"owner",roles:["author"]})' "$BOT_SHA"
+why=$(agent_vendor_commit_problem "$REPO" "$BOT_SHA" dup-login)
+[[ "$why" == "identity-table-invalid:aie-agent-lanes-grok[bot]" ]] && ok "duplicate case-normalized login in the base table → identity-table-invalid (nothing resolves)" || bad "dup-login reason '$why'"
+setup_repo mini-bot
+MINI_SHA=$(head_sha)
+bad_table bad-allow 'const i=c.identities.find(x=>x.login==="aie-agent-lanes-mini[bot]");i.authorCommits=[sha,"not-a-sha"]' "$MINI_SHA"
+why=$(agent_vendor_commit_problem "$REPO" "$MINI_SHA" bad-allow)
+[[ "$why" == "identity-table-invalid:aie-agent-lanes-mini[bot]" ]] && ok "malformed authorCommits entry beside the matching SHA → identity-table-invalid" || bad "bad-allow reason '$why'"
+bad_table dup-allow 'const i=c.identities.find(x=>x.login==="aie-agent-lanes-mini[bot]");i.authorCommits=[sha,sha]' "$MINI_SHA"
+why=$(agent_vendor_commit_problem "$REPO" "$MINI_SHA" dup-allow)
+[[ "$why" == "identity-table-invalid:aie-agent-lanes-mini[bot]" ]] && ok "duplicate authorCommits entry beside the matching SHA → identity-table-invalid" || bad "dup-allow reason '$why'"
+bad_table good-allow 'const i=c.identities.find(x=>x.login==="aie-agent-lanes-mini[bot]");i.authorCommits=[sha]' "$MINI_SHA"
+why=$(agent_vendor_commit_problem "$REPO" "$MINI_SHA" good-allow)
+[[ -z "$why" ]] && ok "control: the same allowlist, valid, resolves the commit" || bad "good-allow reason '$why'"
+# The same rejection on both callers: push the invalid table to the base the
+# loop pins (origin main) and probe from the branch.
+setup_repo bot
+BOT_SHA=$(head_sha)
+node -e 'const fs=require("fs");const p=process.argv[1];const c=JSON.parse(fs.readFileSync(p,"utf8"));c.identities.push({login:"MRHINKLE",appSlug:null,appId:null,vendor:"owner",roles:["author"]});fs.writeFileSync(p,JSON.stringify(c,null,2)+"\n")' "$REPO/config/review-evidence.v1.json"
+$GIT -C "$REPO" commit -q -am "invalid table on the base" && git -C "$REPO" push -q origin main
+write_state "$BRANCH" "$BOT_SHA"
+: > "$CALLS/devin.cmds"
+rm -f "$REPO/gibson/journal.md"
+run_loop "$ROOT/loop-invalid-table.err"
+if handoff_invoked; then bad "invalid base table: loop handed off a commit the evaluator would reject with the whole config"
+else ok "invalid base table: loop does not invoke the supervisor"; fi
+grep -q "identity-table-invalid:aie-agent-lanes-grok\[bot\]" "$REPO/gibson/journal.md" && ok "invalid base table: journal says identity-table-invalid" || bad "invalid-table journal: $(cat "$REPO/gibson/journal.md" 2>/dev/null)"
+git -C "$REPO" checkout -q "$BRANCH"
+. "$GIBSON/scripts/lib/convention-probes.sh"
+out=$(cd "$REPO" && cp_agent_vendor_walk main); rc=$?
+[[ "$rc" -eq 3 && "$out" == *"identity-table-invalid:aie-agent-lanes-grok[bot]"* ]] && ok "invalid base table: pre-push probe reports identity-table-invalid (report-only here, undeclared)" || bad "invalid-table probe rc=$rc: $out"
+git -C "$REPO" checkout -q main
 # A governed target repository has no table of its own: the harness's copy is
 # the fallback (loop.sh sets it), read only when the base has none.
 why=$(AGENT_VENDOR_TABLE_FALLBACK="$GIBSON/config/review-evidence.v1.json" agent_vendor_commit_problem "$REPO" "$(head_sha)" notable)

@@ -52,6 +52,10 @@ EOF
   git -C "$d" remote add origin https://github.com/acme/app.git
   echo "$d"
 }
+# The Agent-Vendor probe validates the identity table with the evaluator's own
+# validateConfig(); the fixtures carry only the libs, so point the probe at the
+# real evaluator (the same override a governed repository without it would use).
+export AGENT_VENDOR_EVALUATOR="$REPO_ROOT/scripts/pr-review-evidence.mjs"
 # gh stub for the Agent-Vendor probe's email → login proof: lane@gibson.test is
 # the owner mrhinkle; every other address is unknown to GitHub.
 mkdir -p "$ROOT/bin"
