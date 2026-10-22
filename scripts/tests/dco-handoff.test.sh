@@ -73,6 +73,8 @@ LANE_EMAIL=lane@gibson.test
 BOT_EMAIL='317307306+aie-agent-lanes-grok[bot]@users.noreply.github.com'
 # Lane-bot SHAPE, but no such login in config/review-evidence.v1.json.
 FAKE_BOT_EMAIL='1+aie-agent-lanes-fake[bot]@users.noreply.github.com'
+# Listed with role author, but restricted to an authorCommits allowlist.
+MINI_BOT_EMAIL='2+aie-agent-lanes-mini[bot]@users.noreply.github.com'
 work_commit() { # email [git-commit args...] — signed, -a
   local email="$1"; shift
   GIT_AUTHOR_EMAIL="$email" GIT_COMMITTER_EMAIL="$email" $GIT -C "$REPO" commit -q -s -a "$@"
@@ -89,6 +91,7 @@ work_commit() { # email [git-commit args...] — signed, -a
 #   bot-invalid-committer  lane-bot author, .invalid committer, no trailer
 #   bare-invalid   signed, trailer, author/committer `codex@invalid` (bare form)
 #   fake-bot       signed, lane-bot-shaped email the evaluator does not list, no trailer
+#   mini-bot       signed, listed bot with an authorCommits allowlist, no trailer
 setup_repo() { # setup_repo <mode>
   local mode="${1:-signed}"
   rm -rf "$REPO" "$REMOTE"
@@ -114,6 +117,7 @@ setup_repo() { # setup_repo <mode>
     bot)            work_commit "$BOT_EMAIL" -m "work" ;;
     bare-invalid)   work_commit codex@invalid -m "work" -m "Agent-Vendor: codex" ;;
     fake-bot)       work_commit "$FAKE_BOT_EMAIL" -m "work" ;;
+    mini-bot)       work_commit "$MINI_BOT_EMAIL" -m "work" ;;
     bot-invalid-committer)
       # Lane-bot author, .invalid committer, no trailer: review-evidence fails
       # committer:<sha>:no-login, so the walk must not take the bot fast path
@@ -364,6 +368,46 @@ if handoff_invoked; then bad "fake-bot: loop handed off a commit from an unliste
 else ok "fake-bot: loop does not invoke the supervisor"; fi
 if grep -q "$SHA unlisted-login:aie-agent-lanes-fake\[bot\]" "$REPO/gibson/journal.md"; then ok "fake-bot: journal names the unlisted login"
 else bad "fake-bot: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
+
+echo "Agent-Vendor walk: a listed bot with an authorCommits allowlist is exempt only for those exact SHAs"
+setup_repo mini-bot
+SHA=$(head_sha)
+ALLOWED=$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const i=c.identities.find(x=>x.login==="aie-agent-lanes-mini[bot]");console.log((i.authorCommits||[])[0]||"")' "$REPO/config/review-evidence.v1.json")
+if [[ "$ALLOWED" =~ ^[0-9a-f]{40}$ ]]; then ok "fixture: the identity table restricts aie-agent-lanes-mini[bot] to an allowlist (first: ${ALLOWED:0:7})"
+else bad "fixture bug: no authorCommits allowlist for aie-agent-lanes-mini[bot] in the table"; fi
+write_state "$BRANCH" "$SHA"
+: > "$CALLS/devin.cmds"
+run_loop "$ROOT/loop-mini-bot.err"
+if handoff_invoked; then bad "mini-bot: loop handed off a commit outside the identity's authorCommits allowlist"
+else ok "mini-bot: non-allowlisted SHA is not exempt; loop does not invoke the supervisor"; fi
+if grep -q "$SHA commit-not-allowed:aie-agent-lanes-mini\[bot\]" "$REPO/gibson/journal.md"; then ok "mini-bot: journal names commit-not-allowed and the login"
+else bad "mini-bot: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
+# The allowlisted side, through the lib: an allowlisted SHA from the table is
+# exempt; a prefix of it, or a SHA outside the list, is not. Return codes are
+# data here: errexit off.
+set +e
+. "$GIBSON/scripts/lib/agent-vendor.sh"
+agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" "$ALLOWED"; rc=$?
+[[ "$rc" -eq 0 ]] && ok "mini-bot: an allowlisted SHA from the table is exempt" || bad "allowlisted SHA rc=$rc"
+agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" "${ALLOWED:0:12}"; rc=$?
+[[ "$rc" -eq 2 ]] && ok "mini-bot: a prefix of an allowlisted SHA is not a match (exact 40-hex only)" || bad "prefix rc=$rc"
+agent_vendor_lane_bot_email "$MINI_BOT_EMAIL" "$REPO" "$SHA"; rc=$?
+[[ "$rc" -eq 2 ]] && ok "mini-bot: a SHA outside the allowlist returns 2 (commit-not-allowed)" || bad "outside rc=$rc"
+agent_vendor_lane_bot_email "$BOT_EMAIL" "$REPO" "$SHA"; rc=$?
+[[ "$rc" -eq 0 ]] && ok "grok bot (no allowlist): any SHA is exempt" || bad "unrestricted bot rc=$rc"
+# And through the walk: put this commit's SHA in the fixture table's allowlist
+# (the walk reads the working-tree table) → the same commit now resolves and is handed off.
+node -e 'const fs=require("fs");const p=process.argv[1];const c=JSON.parse(fs.readFileSync(p,"utf8"));const i=c.identities.find(x=>x.login==="aie-agent-lanes-mini[bot]");i.authorCommits=[process.argv[2]];fs.writeFileSync(p,JSON.stringify(c,null,2)+"\n")' "$REPO/config/review-evidence.v1.json" "$SHA"
+AGENT_VENDOR_AUTHOR_LOGINS_FOR=""
+why=$(agent_vendor_commit_problem "$REPO" "$SHA")
+[[ -z "$why" ]] && ok "mini-bot: once the table allowlists this SHA, the commit resolves" || bad "allowlisted commit reason '$why'"
+write_state "$BRANCH" "$SHA"
+: > "$CALLS/devin.cmds"
+rm -f "$REPO/gibson/journal.md"
+run_loop "$ROOT/loop-mini-bot-ok.err"
+if handoff_invoked; then ok "mini-bot: the allowlisted commit is handed off"
+else bad "mini-bot: allowlisted commit blocked (journal=$([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent))"; fi
+git -C "$REPO" checkout -q -- config/review-evidence.v1.json
 
 echo "Agent-Vendor walk: the bare user@invalid form is refused like .invalid (#523 round five)"
 setup_repo bare-invalid
