@@ -89,7 +89,8 @@ cp_recipe_hash_all() {
 # lanes declared before it, and `git commit --no-verify`, bypass the hooks).
 # Default BASE origin/main. Run from inside the repo. Prints "<sha> <reason>"
 # per offender plus the fix. Returns 0 clean, 2 cannot run (no git, BASE or
-# HEAD unresolvable, lib missing), 1 findings on a DECLARED lane
+# HEAD unresolvable, lib missing), 4 skipped (origin is not the GH_HOST
+# repository: review-evidence is GitHub-only, zero gh calls), 1 findings on a DECLARED lane
 # (worktree-scoped gibson.agentVendor with extensions.worktreeConfig on, as the
 # hooks read it: every commit there must carry the trailer), and 3
 # findings on an undeclared checkout — report only, because an owner commit on
@@ -103,12 +104,23 @@ cp_agent_vendor_walk() {
   # shellcheck source=agent-vendor.sh
   . "$lib" || return 2
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "not inside a git work tree"; return 2; }
+  # Same gate as loop.sh and the remote kill switch: review-evidence is
+  # GitHub-only and proving a login means asking gh about origin's slug, so an
+  # origin that is not the GH_HOST repository (GitLab, Bitbucket, an alias, an
+  # Enterprise host when GH_HOST says otherwise) is skipped, loudly, with zero
+  # gh calls — never reported as a failure (Codex round six on #525).
+  local slug
+  slug=$(agent_vendor_repo_slug .)
+  if [[ -z "$slug" ]]; then
+    echo "origin '$(git config --get remote.origin.url 2>/dev/null || echo '<none>')' is not a ${GH_HOST:-github.com} repository; review-evidence is GitHub-only, nothing to pre-empt (zero gh calls)"
+    return 4
+  fi
   head=$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null) || { echo "HEAD is unborn"; return 2; }
   git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 || { echo "base ref not found: $base"; return 2; }
   mb=$(git merge-base "$head" "$base" 2>/dev/null) || { echo "no merge base between HEAD and $base"; return 2; }
   # Range from the merge-base; the lane-bot identity table from the trusted
   # BASE ref itself, never from this checkout's own copy.
-  out=$(agent_vendor_unresolved_shas . "$mb" "$head" "$base"); rc=$?
+  out=$(agent_vendor_unresolved_shas . "$mb" "$head" "$base" "$slug"); rc=$?
   [[ "$rc" -eq 0 ]] || { echo "cannot walk $mb..$head"; return 2; }
   [[ -n "$out" ]] || return 0
   printf '%s\n' "$out"

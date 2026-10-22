@@ -57,8 +57,15 @@ EOF
 mkdir -p "$ROOT/bin"
 cat > "$ROOT/bin/gh" <<'GH'
 #!/usr/bin/env bash
+[[ -z "${GH_STUB_LOG:-}" ]] || printf '%s\n' "$*" >> "$GH_STUB_LOG"
 case "$*" in
-  *search/commits*) case "$*" in *lane@gibson.test*) echo mrhinkle ;; esac; exit 0 ;;
+  *search/commits*)
+    case "$*" in
+      *"author-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
+      *"committer-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
+      *) printf '\t\n' ;;
+    esac
+    exit 0 ;;
 esac
 exit 1
 GH
@@ -150,6 +157,25 @@ OUT=$(cd "$d" && PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base main --no
 [[ "$RC" -eq 0 && "$OUT" == *"WARN     agent-vendor"* && "$OUT" == *"login-unresolved:stranger@gibson.test"* ]] && ok "an address GitHub maps to no login is reported login-unresolved (trailer or not)" || bad "vendorwalk stranger rc=$RC: $OUT"
 OUT=$(cd "$d" && PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base refs/heads/does-not-exist --no-tests 2>&1); RC=$?
 [[ "$RC" -eq 2 ]] && ok "unresolvable base is still the usage error (probe never guesses a range)" || bad "vendorwalk badbase rc=$RC"
+# The GH_HOST origin gate (same as loop.sh): a non-GitHub or mismatched-host
+# origin is SKIPPED with zero gh calls, never a failure, even on a declared lane.
+git -C "$d" config extensions.worktreeConfig true
+git -C "$d" config --worktree gibson.agentVendor claude
+GIT_AUTHOR_EMAIL=stranger@gibson.test GIT_COMMITTER_EMAIL=stranger@gibson.test git -C "$d" commit -q --amend --reset-author --no-edit
+git -C "$d" remote set-url origin https://gitlab.com/acme/app.git
+: > "$ROOT/gh-calls.log"
+OUT=$(cd "$d" && GH_STUB_LOG="$ROOT/gh-calls.log" PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+[[ "$RC" -eq 0 && "$OUT" == *"SKIPPED  agent-vendor"* && "$OUT" == *"GitHub-only"* ]] && ok "GitLab same-slug origin: agent-vendor SKIPPED, exit 0, says review-evidence is GitHub-only" || bad "gitlab origin rc=$RC: $OUT"
+[[ ! -s "$ROOT/gh-calls.log" ]] && ok "GitLab same-slug origin: zero gh calls" || bad "gh called for a GitLab origin: $(cat "$ROOT/gh-calls.log")"
+git -C "$d" remote set-url origin https://github.com/acme/app.git
+: > "$ROOT/gh-calls.log"
+OUT=$(cd "$d" && GH_HOST=ghe.example.com GH_STUB_LOG="$ROOT/gh-calls.log" PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+[[ "$RC" -eq 0 && "$OUT" == *"SKIPPED  agent-vendor"* ]] && ok "github.com origin under GH_HOST=ghe.example.com: SKIPPED (host mismatch)" || bad "GHE mismatch rc=$RC: $OUT"
+[[ ! -s "$ROOT/gh-calls.log" ]] && ok "GH_HOST mismatch: zero gh calls" || bad "gh called under GH_HOST mismatch: $(cat "$ROOT/gh-calls.log")"
+OUT=$(cd "$d" && GH_STUB_LOG="$ROOT/gh-calls.log" PATH="$ROOT/bin:$PATH" bash scripts/prepush.sh --base main --no-tests 2>&1); RC=$?
+[[ "$RC" -eq 1 && "$(last_line)" == *"FAILED agent-vendor"* && "$OUT" == *"login-unresolved:stranger@gibson.test"* ]] && ok "back on the GitHub origin: the same declared lane FAILS on the unprovable address" || bad "github origin declared rc=$RC: $OUT"
+git -C "$d" config --worktree --unset gibson.agentVendor
+git -C "$d" config --unset extensions.worktreeConfig
 
 # --- invalid --base is a usage error, not a silent all-clear ----------------
 d=$(make_repo badbase)

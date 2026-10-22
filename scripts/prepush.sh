@@ -15,7 +15,9 @@ WHAT IT DOES
   shell scripts, the Agent-Vendor walk over BASE..HEAD (every non-lane-bot
   commit needs one known Agent-Vendor trailer under an email GitHub maps to a
   login — FAIL on a declared lane, WARN/report-only on an undeclared checkout,
-  where an owner commit resolves through independent review), and the test suites
+  where an owner commit resolves through independent review; SKIPPED with zero
+  gh calls when origin is not the GH_HOST repository, since review-evidence is
+  GitHub-only), and the test suites
   your diff touches (a changed scripts/tests/X.test.sh, or scripts/X.{sh,mjs}
   with a scripts/tests/X.test.sh beside it; at most 6, each capped at 25s via
   PREPUSH_TEST_TIMEOUT, all together within PREPUSH_BUDGET seconds, default 55;
@@ -81,6 +83,7 @@ run_probe() {
     2) echo "  NOT RUN  $name (a required tool is missing)"; note_fail "$name" ;;
     124) echo "  NOT RUN  $name (timed out after ${TEST_TIMEOUT_USED:-$TEST_TIMEOUT}s; run it directly or rely on CI)"; note_fail "$name" ;;
     3) echo "  WARN     $name (report only: findings on an undeclared checkout)"; printf '%s\n' "$out" | tail -n 8 | sed 's/^/           /' ;;
+    4) echo "  SKIPPED  $name ($(printf '%s' "$out" | head -1))" ;;
     *) echo "  FAIL     $name"; printf '%s\n' "$out" | tail -n 8 | sed 's/^/           /'; note_fail "$name" ;;
   esac
 }

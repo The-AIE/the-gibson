@@ -114,7 +114,11 @@ fi
 # commit search. The lane identity lane@gibson.test is the owner, mrhinkle.
 case "$*" in
   *search/commits*)
-    case "$*" in *lane@gibson.test*) echo mrhinkle ;; esac
+    case "$*" in
+      *"author-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
+      *"committer-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
+      *) printf '\t\n' ;;
+    esac
     exit 0 ;;
 esac
 

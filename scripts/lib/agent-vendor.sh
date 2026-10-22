@@ -51,9 +51,27 @@ agent_vendor_known() {
   return 1
 }
 
-# agent_vendor_repo_slug REPO — github.com owner/name of REPO's origin, or nothing.
+# agent_vendor_origin_host REPO — lower-cased host of REPO's origin URL, or nothing.
+agent_vendor_origin_host() {
+  local url rest host
+  url=$(git -C "$1" config --get remote.origin.url 2>/dev/null || true)
+  [[ -n "$url" ]] || return 0
+  case "$url" in
+    https://*|http://*|ssh://*|git://*) rest="${url#*://}"; rest="${rest#*@}" ;;
+    *@*:*) rest="${url#*@}"; rest="${rest%%:*}/${rest#*:}" ;;
+    *) return 0 ;;
+  esac
+  host=$(agent_vendor_lower "${rest%%/*}"); host="${host%%:*}"
+  [[ -n "$host" ]] || return 0
+  printf '%s\n' "$host"
+}
+
+# agent_vendor_repo_slug REPO — owner/name of REPO's origin when its host is the
+# GitHub host gh talks to (GH_HOST, default github.com; www./ssh. aliases of
+# github.com count), or nothing. A GitLab/Bitbucket/other-host origin yields no
+# slug: gh would answer for an unrelated same-named github.com repository.
 agent_vendor_repo_slug() {
-  local url rest host path
+  local url rest host path expected
   url=$(git -C "$1" config --get remote.origin.url 2>/dev/null || true)
   [[ -n "$url" ]] || return 0
   case "$url" in
@@ -63,8 +81,14 @@ agent_vendor_repo_slug() {
   esac
   host=$(agent_vendor_lower "${rest%%/*}"); host="${host%%:*}"
   path="${rest#*/}"; path="${path%/}"; path="${path%.git}"
-  case "$host" in github.com|www.github.com|ssh.github.com) ;; *) return 0 ;; esac
+  expected=$(agent_vendor_lower "${GH_HOST:-github.com}")
+  if [[ "$expected" == "github.com" ]]; then
+    case "$host" in github.com|www.github.com|ssh.github.com) ;; *) return 0 ;; esac
+  else
+    [[ "$host" == "$expected" ]] || return 0
+  fi
   [[ "$path" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 0
+  case "$path" in */.|*/..|./*|../*) return 0 ;; esac
   printf '%s\n' "$path"
 }
 
@@ -167,17 +191,26 @@ agent_vendor_login_of_noreply() {
 # (no slug, no gh, no hit, an API error such as a rate limit): the caller fails
 # closed. Never guessed from the address itself (Codex round five on #525).
 #
+# The email is commit-controlled text that would otherwise be interpolated into
+# GitHub's search-query language (Codex round six): only a plain address shape
+# (letters, digits, . _ % + -, one @, a dotted host; no whitespace, quotes or
+# operators) is ever sent, and a hit counts only when the commit the search
+# returned carries exactly that email on the queried side — the qualifier alone
+# is not trusted.
+#
 # Cache: a file, not a shell variable, because every caller runs this inside a
 # command substitution (a subshell), where a variable write is lost and each
 # commit would hit the search API twice — GitHub's secondary rate limit on
 # search then returns an error body, which must never be read as a login.
 AGENT_VENDOR_LOGIN_CACHE_FILE="${AGENT_VENDOR_LOGIN_CACHE_FILE:-$(mktemp "${TMPDIR:-/tmp}/agent-vendor-logins.XXXXXX" 2>/dev/null || echo /dev/null)}"
 agent_vendor_login_for_email() {
-  local slug="${1:-}" email login e key line side filter out rc
+  local slug="${1:-}" email login e key line side filter out rc got_email got_login
   email=$(agent_vendor_lower "$2")
   login=$(agent_vendor_login_of_noreply "$email")
   if [[ -n "$login" ]]; then printf '%s\n' "$login"; return 0; fi
   [[ -n "$slug" ]] || return 0
+  [[ "$email" =~ ^[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$ ]] || return 0
+  [[ "$slug" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 0
   key="$slug|$email"
   if [[ -r "$AGENT_VENDOR_LOGIN_CACHE_FILE" ]]; then
     while IFS= read -r line; do
@@ -190,19 +223,24 @@ agent_vendor_login_for_email() {
     done < "$AGENT_VENDOR_LOGIN_CACHE_FILE"
   fi
   login=""
+  rc=1
   if command -v gh >/dev/null 2>&1; then
     for side in author committer; do
-      filter=".items[0].${side}.login // empty"
+      # "<email on that side of the returned commit>\t<login on that side>"
+      filter="\"\\(.items[0].commit.${side}.email // \"\")\\t\\(.items[0].${side}.login // \"\")\""
       out=$(gh api -X GET search/commits -f "q=repo:${slug} ${side}-email:${email}" -f per_page=1 --jq "$filter" 2>/dev/null </dev/null); rc=$?
       [[ "$rc" -eq 0 ]] || { out=""; continue; }
-      out=$(agent_vendor_lower "$(printf '%s' "$out" | head -1 | tr -d '[:space:]')")
-      # Only a login-shaped answer counts; an error body or anything else is "unproven".
-      if [[ "$out" =~ ^[a-z0-9][a-z0-9-]*(\[bot\])?$ ]]; then login="$out"; break; fi
+      out=$(printf '%s' "$out" | head -1)
+      got_email=$(agent_vendor_lower "${out%%	*}")
+      got_login=$(agent_vendor_lower "$(printf '%s' "${out#*	}" | tr -d '[:space:]')")
+      [[ "$out" == *"	"* ]] || got_login=""
+      # Evidence only when the returned commit carries exactly this email and a login-shaped answer.
+      if [[ "$got_email" == "$email" && "$got_login" =~ ^[a-z0-9][a-z0-9-]*(\[bot\])?$ ]]; then login="$got_login"; break; fi
     done
   fi
   # Cache only a proven login or a definite "no mapping" from a successful call;
   # an API failure is retried next time rather than remembered as absence.
-  if [[ -n "$login" || "${rc:-1}" -eq 0 ]]; then
+  if [[ -n "$login" || "$rc" -eq 0 ]]; then
     printf '%s\t%s\n' "$key" "${login:--}" >> "$AGENT_VENDOR_LOGIN_CACHE_FILE" 2>/dev/null || true
   fi
   [[ -z "$login" ]] || printf '%s\n' "$login"

@@ -15,7 +15,7 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 - **What changed:** `scripts/loop.sh` walks the handed-off range for commits `review-evidence`
   would report `identity-unresolved`: author or committer email that does not provably map to a
   GitHub login (a noreply address carries its login; any other address is proven only through
-  GitHub's commit search by email in the repository, else `login-unresolved`), a login not listed
+  GitHub's commit search by email in the repository — only a plain address shape is ever sent, and a hit counts only when the returned commit carries exactly that email — else `login-unresolved`), a login not listed
   as an author in `config/review-evidence.v1.json` at the trusted base ref (never the lane's own
   copy; a governed target repository with no table falls back to the harness's own
   `config/review-evidence.v1.json`; no readable table, nothing resolves), a listed identity outside its `authorCommits`

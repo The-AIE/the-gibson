@@ -61,10 +61,15 @@ STUB
 # address is unknown to GitHub (empty result). Everything else gh fails.
 cat > "$BIN/gh" <<'STUB'
 #!/usr/bin/env bash
+# Logs every search so a sensor can prove "zero gh calls". Answers
+# "<email>\t<login>" exactly as the walk's jq filter shapes the real response.
+[[ -z "${GH_STUB_LOG:-}" ]] || printf '%s\n' "$*" >> "$GH_STUB_LOG"
 case "$*" in
   *search/commits*)
     case "$*" in
-      *lane@gibson.test*) echo mrhinkle ;;
+      *"author-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
+      *"committer-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
+      *) printf '\t\n' ;;
     esac
     exit 0 ;;
 esac
@@ -496,6 +501,32 @@ why=$(agent_vendor_commit_problem "$REPO" "$SIGNED_SHA" main acme/widget)
 [[ -z "$(agent_vendor_login_for_email acme/widget stranger@gibson.test)" ]] && ok "login_for_email: unknown address → nothing" || bad "login_for_email stranger"
 [[ "$(agent_vendor_login_for_email "" "$BOT_EMAIL")" == "aie-agent-lanes-grok[bot]" ]] && ok "login_for_email: noreply form carries its login without a lookup" || bad "login_for_email noreply"
 [[ "$(agent_vendor_repo_slug "$REPO")" == "acme/widget" ]] && ok "repo_slug: derived from the GitHub origin URL" || bad "repo_slug '$(agent_vendor_repo_slug "$REPO")'"
+# Commit-controlled email text is never interpolated into the search query:
+# an operator-bearing address is rejected before gh is called (Codex round six).
+INJ_EMAIL='x@y.test OR author:mrhinkle lane@gibson.test'
+export GH_STUB_LOG="$ROOT/gh-calls.log"; : > "$GH_STUB_LOG"
+[[ -z "$(agent_vendor_login_for_email acme/widget "$INJ_EMAIL")" ]] && ok "login_for_email: an address with whitespace/operators proves nothing" || bad "injection resolved a login"
+[[ ! -s "$GH_STUB_LOG" ]] && ok "login_for_email: the injected address never reached gh (zero calls)" || bad "gh was called with: $(cat "$GH_STUB_LOG")"
+[[ -z "$(agent_vendor_login_for_email acme/widget 'a"b@gibson.test')" && -z "$(agent_vendor_login_for_email acme/widget 'lane@gibson.test author:mrhinkle')" ]] && ok "login_for_email: quotes and trailing qualifiers are rejected too" || bad "metacharacter address resolved"
+[[ ! -s "$GH_STUB_LOG" ]] && ok "login_for_email: still zero gh calls" || bad "gh was called: $(cat "$GH_STUB_LOG")"
+# The qualifier alone is not trusted: a hit whose returned commit carries a
+# different email is not evidence (stub answers "<other>\tmrhinkle" for it).
+cat > "$BIN/gh-liar" <<'LIAR'
+#!/usr/bin/env bash
+case "$*" in *search/commits*) printf 'someone-else@gibson.test\tmrhinkle\n'; exit 0 ;; esac
+exit 1
+LIAR
+chmod +x "$BIN/gh-liar"
+mkdir -p "$ROOT/liarbin" && cp "$BIN/gh-liar" "$ROOT/liarbin/gh"
+[[ -z "$(PATH="$ROOT/liarbin:$PATH" AGENT_VENDOR_LOGIN_CACHE_FILE="$ROOT/liar-cache" agent_vendor_login_for_email acme/widget other@gibson.test)" ]] && ok "login_for_email: a search hit whose commit email differs from the query is not evidence" || bad "mismatched search hit was accepted"
+git -C "$REPO" remote set-url origin https://gitlab.com/acme/widget.git
+[[ -z "$(agent_vendor_repo_slug "$REPO")" ]] && ok "repo_slug: a GitLab origin yields no slug" || bad "gitlab slug '$(agent_vendor_repo_slug "$REPO")'"
+git -C "$REPO" remote set-url origin https://github.com/acme/widget.git
+[[ -z "$(GH_HOST=ghe.example.com agent_vendor_repo_slug "$REPO")" ]] && ok "repo_slug: github.com origin under GH_HOST=ghe.example.com yields no slug" || bad "GH_HOST mismatch slug"
+git -C "$REPO" remote set-url origin https://ghe.example.com/acme/widget.git
+[[ "$(GH_HOST=ghe.example.com agent_vendor_repo_slug "$REPO")" == "acme/widget" ]] && ok "repo_slug: an Enterprise origin matching GH_HOST yields its slug" || bad "GHE slug"
+git -C "$REPO" remote set-url origin https://github.com/acme/widget.git
+unset GH_STUB_LOG
 
 echo "Agent-Vendor walk: a lane-bot author does not excuse a .invalid committer (mixed identity)"
 setup_repo bot-invalid-committer
