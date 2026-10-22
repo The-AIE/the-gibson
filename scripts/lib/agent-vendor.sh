@@ -21,7 +21,9 @@
 #     read (`no-login`, #503/#504); checked first, for every commit, lane-bot
 #     authored or not;
 #   - then, authored by a lane-bot login (`<id>+aie-agent-lanes-*[bot]@users.
-#     noreply.github.com`): resolves by identity, no trailer needed;
+#     noreply.github.com`) that <repo>/config/review-evidence.v1.json lists
+#     with role "author": resolves by identity, no trailer needed. The shape
+#     alone is not enough, and an unreadable config exempts nothing;
 #   - no `Agent-Vendor:` trailer anywhere in the message (`owner-unvendored`,
 #     #506); more than one distinct vendor named; or a vendor outside
 #     AUTHOR_COMMIT_VENDORS in scripts/pr-review-evidence.mjs.
@@ -41,23 +43,78 @@ agent_vendor_known() {
   return 1
 }
 
-# agent_vendor_lane_bot_email EMAIL — 0 when EMAIL is a lane-bot login's
-# noreply address (the only identity review-evidence resolves without a trailer).
-agent_vendor_lane_bot_email() {
-  local e
+# Lane-bot author logins the evaluator resolves without a trailer: the entries
+# of <repo>/config/review-evidence.v1.json with role "author" (the evaluator's
+# own identity table), read from the repository the walk runs in. Cached per
+# config path. Unreadable config (missing file, no node, bad JSON) → empty set:
+# fail closed, no exemption (Codex review of #525: an address merely SHAPED like
+# a lane bot, e.g. aie-agent-lanes-fake[bot], is not one the evaluator knows).
+AGENT_VENDOR_AUTHOR_LOGINS=""
+AGENT_VENDOR_AUTHOR_LOGINS_FOR=""
+agent_vendor_author_logins() { # repo — prints the lower-cased logins, one per line
+  local repo="$1" cfg
+  cfg="$repo/config/review-evidence.v1.json"
+  if [[ "$AGENT_VENDOR_AUTHOR_LOGINS_FOR" != "$cfg" ]]; then
+    AGENT_VENDOR_AUTHOR_LOGINS_FOR="$cfg"
+    AGENT_VENDOR_AUTHOR_LOGINS=""
+    if [[ -f "$cfg" ]] && command -v node >/dev/null 2>&1; then
+      AGENT_VENDOR_AUTHOR_LOGINS=$(node -e '
+        const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+        for (const i of Array.isArray(c.identities) ? c.identities : []) {
+          if (typeof i.login === "string" && Array.isArray(i.roles) && i.roles.includes("author")) console.log(i.login.toLowerCase());
+        }' "$cfg" 2>/dev/null) || AGENT_VENDOR_AUTHOR_LOGINS=""
+    fi
+  fi
+  [[ -z "$AGENT_VENDOR_AUTHOR_LOGINS" ]] || printf '%s\n' "$AGENT_VENDOR_AUTHOR_LOGINS"
+}
+
+# agent_vendor_login_of_noreply EMAIL — the GitHub login a noreply address
+# encodes (`<id>+login@users.noreply.github.com`, or `login@users.noreply.
+# github.com`), lower-cased; nothing for any other address.
+agent_vendor_login_of_noreply() {
+  local e local_part
   e=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
   case "$e" in
-    *aie-agent-lanes-*\[bot\]@users.noreply.github.com) return 0 ;;
+    *@users.noreply.github.com) ;;
+    *) return 0 ;;
   esac
+  local_part="${e%@users.noreply.github.com}"
+  case "$local_part" in
+    *+*) local_part="${local_part#*+}" ;;
+  esac
+  printf '%s\n' "$local_part"
+}
+
+# agent_vendor_lane_bot_email EMAIL [REPO] — 0 when EMAIL is a lane-bot login's
+# noreply address that the evaluator resolves by identity: the login must have
+# the evaluator's LANE_BOT_LOGIN shape (aie-agent-lanes-*[bot]) AND be listed
+# with role "author" in REPO's config/review-evidence.v1.json. Both are
+# required; without a readable config nothing is exempt.
+agent_vendor_lane_bot_email() {
+  local login known
+  login=$(agent_vendor_login_of_noreply "$1")
+  [[ -n "$login" ]] || return 1
+  case "$login" in
+    aie-agent-lanes-*\[bot\]) ;;
+    *) return 1 ;;
+  esac
+  [[ -n "${2:-}" ]] || return 1
+  while IFS= read -r known; do
+    [[ -n "$known" ]] || continue
+    [[ "$known" == "$login" ]] && return 0
+  done <<EOF2
+$(agent_vendor_author_logins "$2")
+EOF2
   return 1
 }
 
 # agent_vendor_commit_problem REPO SHA — prints ONE reason review-evidence would
 # give for this commit, or nothing when it resolves. Always returns 0; a commit
 # that cannot be read prints `unreadable`. Reasons: lane-bot (resolves, prints
-# nothing), invalid-email:<addr>, no-trailer, multi-vendor:<a,b>, unknown-vendor:<v>.
+# nothing), invalid-email:<addr>, unlisted-login:<login> (lane-bot shape not in
+# the evaluator's identity table), no-trailer, multi-vendor:<a,b>, unknown-vendor:<v>.
 agent_vendor_commit_problem() {
-  local repo="$1" sha="$2" ae ce body line v vendors="" n=0
+  local repo="$1" sha="$2" ae ce body line v vendors="" n=0 login
   ae=$(git -C "$repo" log -1 --format=%ae "$sha" 2>/dev/null) || { echo unreadable; return 0; }
   ce=$(git -C "$repo" log -1 --format=%ce "$sha" 2>/dev/null) || { echo unreadable; return 0; }
   # Both identities first, on every path: review-evidence resolves the author
@@ -68,9 +125,15 @@ agent_vendor_commit_problem() {
       *.invalid|*@invalid) echo "invalid-email:${v}"; return 0 ;;
     esac
   done
-  if agent_vendor_lane_bot_email "$ae"; then
+  if agent_vendor_lane_bot_email "$ae" "$repo"; then
     return 0
   fi
+  # Lane-bot SHAPE without a listing: the evaluator resolves no login for it,
+  # so say which login was not found rather than only "no-trailer".
+  login=$(agent_vendor_login_of_noreply "$ae")
+  case "$login" in
+    aie-agent-lanes-*\[bot\]) echo "unlisted-login:${login}"; return 0 ;;
+  esac
   body=$(git -C "$repo" log -1 --format=%B "$sha" 2>/dev/null) || { echo unreadable; return 0; }
   # Every Agent-Vendor line anywhere in the message, exactly as the evaluator
   # matches them (case-insensitive key and value). Here-string, not a pipe into
@@ -124,7 +187,9 @@ EOF2
 # differs from the hooks declares lanes the hooks do not.
 agent_vendor_declared() {
   local dir="${1:-.}" ext
-  ext=$(git -C "$dir" config --get extensions.worktreeConfig 2>/dev/null || true)
+  # --bool --local: git booleans ("on", "yes", "1") count, and only the
+  # repository config activates config.worktree (#523 round six).
+  ext=$(git -C "$dir" config --bool --local --get extensions.worktreeConfig 2>/dev/null || true)
   [[ "$ext" == "true" ]] || return 0
   git -C "$dir" config --worktree --get gibson.agentVendor 2>/dev/null | tr '[:upper:]' '[:lower:]' || true
 }

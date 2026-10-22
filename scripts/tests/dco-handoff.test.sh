@@ -71,6 +71,8 @@ GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gp
 # trailer; a lane-bot address resolves by identity and needs no trailer.
 LANE_EMAIL=lane@gibson.test
 BOT_EMAIL='317307306+aie-agent-lanes-grok[bot]@users.noreply.github.com'
+# Lane-bot SHAPE, but no such login in config/review-evidence.v1.json.
+FAKE_BOT_EMAIL='1+aie-agent-lanes-fake[bot]@users.noreply.github.com'
 work_commit() { # email [git-commit args...] — signed, -a
   local email="$1"; shift
   GIT_AUTHOR_EMAIL="$email" GIT_COMMITTER_EMAIL="$email" $GIT -C "$REPO" commit -q -s -a "$@"
@@ -86,6 +88,7 @@ work_commit() { # email [git-commit args...] — signed, -a
 #   bot            signed, lane-bot email, no trailer       (resolves by login)
 #   bot-invalid-committer  lane-bot author, .invalid committer, no trailer
 #   bare-invalid   signed, trailer, author/committer `codex@invalid` (bare form)
+#   fake-bot       signed, lane-bot-shaped email the evaluator does not list, no trailer
 setup_repo() { # setup_repo <mode>
   local mode="${1:-signed}"
   rm -rf "$REPO" "$REMOTE"
@@ -93,7 +96,11 @@ setup_repo() { # setup_repo <mode>
   $GIT init -q "$REPO"
   git -C "$REPO" symbolic-ref HEAD refs/heads/main
   echo base > "$REPO/README.md"
-  $GIT -C "$REPO" add README.md
+  # The evaluator's identity table: the lane-bot exemption is only for logins
+  # listed there with role "author" (the walk reads it from the repo root).
+  mkdir -p "$REPO/config"
+  cp "$GIBSON/config/review-evidence.v1.json" "$REPO/config/"
+  $GIT -C "$REPO" add README.md config
   $GIT -C "$REPO" commit -q -m "base"
   $GIT -C "$REPO" checkout -q -b "$BRANCH"
   echo work >> "$REPO/README.md"
@@ -106,6 +113,7 @@ setup_repo() { # setup_repo <mode>
     unknown-vendor) work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: bogus" ;;
     bot)            work_commit "$BOT_EMAIL" -m "work" ;;
     bare-invalid)   work_commit codex@invalid -m "work" -m "Agent-Vendor: codex" ;;
+    fake-bot)       work_commit "$FAKE_BOT_EMAIL" -m "work" ;;
     bot-invalid-committer)
       # Lane-bot author, .invalid committer, no trailer: review-evidence fails
       # committer:<sha>:no-login, so the walk must not take the bot fast path
@@ -346,6 +354,17 @@ grep -q "$SHA multi-vendor:claude,codex" "$REPO/gibson/journal.md" && ok "two-ve
 setup_repo unknown-vendor; SHA=$(head_sha); write_state "$BRANCH" "$SHA"; run_loop "$ROOT/r4.err"
 grep -q "$SHA unknown-vendor:bogus" "$REPO/gibson/journal.md" && ok "unknown-vendor: reason names bogus" || bad "unknown-vendor reason: $(cat "$REPO/gibson/journal.md")"
 
+echo "Agent-Vendor walk: a lane-bot-shaped login the evaluator does not list is not exempt"
+setup_repo fake-bot
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+: > "$CALLS/devin.cmds"
+run_loop "$ROOT/loop-fake-bot.err"
+if handoff_invoked; then bad "fake-bot: loop handed off a commit from an unlisted aie-agent-lanes-fake[bot]"
+else ok "fake-bot: loop does not invoke the supervisor"; fi
+if grep -q "$SHA unlisted-login:aie-agent-lanes-fake\[bot\]" "$REPO/gibson/journal.md"; then ok "fake-bot: journal names the unlisted login"
+else bad "fake-bot: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
+
 echo "Agent-Vendor walk: the bare user@invalid form is refused like .invalid (#523 round five)"
 setup_repo bare-invalid
 SHA=$(head_sha)
@@ -396,7 +415,17 @@ out=$(agent_vendor_unresolved_shas "$REPO" "$BASE" "$BASE"); rc=$?
 [[ "$rc" -eq 0 && -z "$out" ]] && ok "agent_vendor_unresolved_shas: empty range is clean (the unsigned, .invalid base is outside it)" || bad "empty range rc=$rc out='$out'"
 if agent_vendor_unresolved_shas "$REPO" "$BASE" deadbeef >/dev/null 2>&1; then bad "unreadable head must return 1"
 else ok "agent_vendor_unresolved_shas: unreadable head returns 1 (caller fails closed)"; fi
-agent_vendor_lane_bot_email "$BOT_EMAIL" && ok "lane-bot email recognised" || bad "lane-bot email not recognised"
+setup_repo bot
+agent_vendor_lane_bot_email "$BOT_EMAIL" "$REPO" && ok "lane-bot email listed as author in the repo's identity table: exempt" || bad "listed lane-bot email not recognised"
+agent_vendor_lane_bot_email "$FAKE_BOT_EMAIL" "$REPO" && bad "unlisted lane-bot-shaped email was exempted" || ok "lane-bot shape alone (aie-agent-lanes-fake[bot]) is not exempt"
+agent_vendor_lane_bot_email "$BOT_EMAIL" && bad "exempt without a repo to read the identity table from" || ok "no repo given → no exemption"
+[[ "$(agent_vendor_login_of_noreply "$BOT_EMAIL")" == "aie-agent-lanes-grok[bot]" ]] && ok "login parsed from <id>+login@users.noreply.github.com" || bad "login parse: $(agent_vendor_login_of_noreply "$BOT_EMAIL")"
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)")
+[[ -z "$why" ]] && ok "listed bot commit resolves with the table present" || bad "listed bot reason '$why'"
+rm -f "$REPO/config/review-evidence.v1.json"
+why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)")
+[[ "$why" == "unlisted-login:aie-agent-lanes-grok[bot]" ]] && ok "identity table unreadable → fail closed, no exemption (unlisted-login)" || bad "missing-table reason was '$why'"
+git -C "$REPO" checkout -q -- config/review-evidence.v1.json
 setup_repo bot-invalid-committer
 why=$(agent_vendor_commit_problem "$REPO" "$(head_sha)")
 [[ "$why" == "invalid-email:sensor@gibson.invalid" ]] && ok "agent_vendor_commit_problem: bot author + .invalid committer → invalid-email (identities before the bot fast path)" || bad "mixed identity reason was '$why'"
