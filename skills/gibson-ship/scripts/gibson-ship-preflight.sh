@@ -35,7 +35,7 @@ console.log(r.errors.length ? "ERR " + r.errors.join(" | ") : "OK " + r.claimSlu
   case "$PARSE" in OK*) SLUG=$(echo "$PARSE" | awk '{print $2}'); ok "PR body (repo parser): claim=$SLUG isolation=$(echo "$PARSE" | cut -d" " -f3-)";; *) fail "PR body (repo parser): ${PARSE#ERR }";; esac
 else
   C=$(grep -Ec '^\s*-\s+Active-work claim:\s*\S' "$BODY"); I=$(grep -Ec '^\s*-\s+Isolation:\s*(dedicated worktree|isolated hosted checkout)\s*$' "$BODY")
-  SLUG=$(grep -E '^\s*-\s+Active-work claim:' "$BODY" | head -1 | sed -E 's/^\s*-\s+Active-work claim:\s*//; s/\s+$//')
+  SLUG=$(grep -E '^[[:space:]]*-[[:space:]]+Active-work claim:' "$BODY" | head -1 | sed -E 's/^[[:space:]]*-[[:space:]]+Active-work claim:[[:space:]]*//; s/[[:space:]]+$//')   # POSIX classes: BSD sed has no \s
   if [ "$C" -eq 1 ] && [ "$I" -eq 1 ] && echo "$SLUG" | grep -Eq '^[a-z0-9]+(-[a-z0-9]+)*$'; then ok "PR body (literal lines): claim=$SLUG"; else fail "PR body needs exactly one '- Active-work claim: <kebab-slug>' and one '- Isolation: dedicated worktree|isolated hosted checkout' (found $C / $I, slug='$SLUG')"; SLUG=""; fi
 fi
 for ph in '<exact-claim-slug>' '<claim-slug>' 'Head SHA:\s*$'; do grep -Eq "$ph" "$BODY" && fail "PR body still has placeholder: $ph"; done
