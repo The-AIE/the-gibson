@@ -350,3 +350,6 @@ UNKNOWN still fail the run.
 Revisit when: CodeQL default setup is turned off, GitHub makes the risk assessment
 recurring or removable, or the risk-assessment row goes IDLE (re-run it, do not widen
 the window).
+
+## D-020 · 2026-10-21 · Proposed: land routine PRs without the base-tip lock; verify post-merge and pre-deploy; roll back cheap
+Proposed, not decided. Mark asked on 2026-10-21 that the hypothesis from Anthropic's Scion/Antique post be documented and tested with rollback as the safety net. The hypothesis, design, rollback drills, metrics and pre-set decision rule are in `docs/adr/0003-post-merge-verification-cheap-rollback.md`. No gate changes until the owner sign-off line in that ADR is ticked (AGENTS.md: loosening a gate needs the owner). Scope is the `routine` class only; schema, Tier C, production data and control-plane files keep today's gates. Numbering note: D-018 and D-019 are taken by ADR-0001 (#511) and ADR-0002 (#513), which may merge before this.
