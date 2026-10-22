@@ -3,6 +3,8 @@ title: "ADR-0001: Independent reviewer starts on a 60-second ready probe"
 nav_exclude: true
 ---
 
+> **Authority:** Non-normative. Design record and rationale only; it adds no gate. Binding rules live in [`AGENTS.md`](../../AGENTS.md). The Mini job it describes is operated outside this repo.
+
 # ADR-0001 · 2026-10-22 · The independent reviewer starts on a 60-second ready probe, not the 15-minute tick
 
 **Status:** Proposed (PR open; nothing applied to the Mini).
