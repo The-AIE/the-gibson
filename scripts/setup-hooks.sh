@@ -185,8 +185,8 @@ if [[ "$FROM_RESERVATION" -eq 1 ]]; then
   while IFS= read -r sha; do
     [[ -n "$sha" ]] || continue
     body=$(git log -1 --format=%B "$sha" 2>/dev/null || true)
-    grep -E '^Gibson-Reservation: v1[[:space:]]*$' <<<"$body" >/dev/null || continue
-    res_branch=$(grep -E '^Gibson-Branch:[[:space:]]*' <<<"$body" | head -1 | sed 's/^Gibson-Branch:[[:space:]]*//; s/[[:space:]]*$//')
+    grep -E '^Gibson-Reservation: v1[[:blank:]]*$' <<<"$body" >/dev/null || continue
+    res_branch=$(grep -E '^Gibson-Branch:[[:blank:]]*' <<<"$body" | head -1 | sed 's/^Gibson-Branch:[[:blank:]]*//; s/[[:blank:]]*$//')
     if [[ "$res_branch" == "$cur_branch" ]]; then
       reservation="$sha"
       reservation_count=$((reservation_count + 1))
@@ -220,7 +220,7 @@ EOF3
       *) reservation_vendors="${reservation_vendors:+$reservation_vendors }$v" ;;
     esac
   done <<EOF3
-$(git log -1 --format=%B "$reservation" | grep -iE '^Agent-Vendor:[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*$' || true)
+$(git log -1 --format=%B "$reservation" | grep -iE '^Agent-Vendor:[[:blank:]]*[A-Za-z0-9_-]+[[:blank:]]*$' || true)
 EOF3
   if [[ -z "$reservation_vendors" ]]; then
     echo "setup-hooks.sh: --vendor from-reservation: reservation commit ${reservation} has no Agent-Vendor trailer (pre-#467 claim) — pass --vendor <name> explicitly" >&2

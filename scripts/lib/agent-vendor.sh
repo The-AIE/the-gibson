@@ -85,7 +85,7 @@ agent_vendor_commit_problem() {
       *) vendors="${vendors:+$vendors }$v"; n=$((n + 1)) ;;
     esac
   done <<EOF2
-$(grep -iE '^Agent-Vendor:[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*$' <<<"$body" || true)
+$(grep -iE '^Agent-Vendor:[[:blank:]]*[A-Za-z0-9_-]+[[:blank:]]*$' <<<"$body" || true)
 EOF2
   if [[ "$n" -eq 0 ]]; then echo no-trailer; return 0; fi
   if [[ "$n" -gt 1 ]]; then echo "multi-vendor:$(printf '%s' "$vendors" | tr ' ' ',')"; return 0; fi
