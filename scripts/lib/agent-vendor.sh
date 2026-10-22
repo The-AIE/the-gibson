@@ -29,10 +29,12 @@
 #      v1.json AT THE TRUSTED BASE REF (never the lane's own copy), and when
 #      that identity carries an authorCommits allowlist the commit's full SHA
 #      must be in it (exact, no prefix);
-#   4. a listed lane-bot login (aie-agent-lanes-*[bot]) or a `human` identity
-#      resolves by identity alone; an `owner` identity (and, conservatively, any
-#      other listed identity) resolves only through exactly one `Agent-Vendor:`
-#      trailer naming claude|codex|grok|devin (#506).
+#   4. a listed lane-bot login (aie-agent-lanes-*[bot]) with a known vendor, or
+#      a `human` identity, resolves by identity alone; an `owner` identity
+#      resolves only through exactly one `Agent-Vendor:` trailer naming
+#      claude|codex|grok|devin (#506); every other listed identity is
+#      `unverified-unattested` for a CLI-made commit (only GitHub verification
+#      or an exact-head attestation clears it, which no offline walk can see).
 
 # Same list as .githooks/{prepare-commit-msg,commit-msg}, scripts/claim.sh and
 # scripts/setup-hooks.sh (AUTHOR_COMMIT_VENDORS in scripts/pr-review-evidence.mjs);
@@ -253,8 +255,8 @@ agent_vendor_login_for_email() {
 # origin) is where email → login is proven. Always returns 0; an unreadable commit
 # prints `unreadable`. Reasons: invalid-email:<addr>, login-unresolved:<addr>,
 # identity-table-unreadable:<login>, unlisted-login:<login>,
-# commit-not-allowed:<login>, vendor-unknown:<login>, no-trailer,
-# multi-vendor:<a,b>, unknown-vendor:<v>.
+# commit-not-allowed:<login>, vendor-unknown:<login>, unverified-unattested:<login>,
+# no-trailer, multi-vendor:<a,b>, unknown-vendor:<v>.
 agent_vendor_commit_problem() {
   local repo="$1" sha="$2" base="${3:-}" slug="${4:-}" ae ce body line v vendors="" n=0
   local full_sha email login ident id_vendor allow a needs_trailer=0 side_email
@@ -293,14 +295,21 @@ $(printf '%s' "$allow" | tr ',' '\n')
 EOF2
       [[ "$found" -eq 1 ]] || { echo "commit-not-allowed:${login}"; return 0; }
     fi
+    # Mirrors resolveAuthors exactly (Codex round seven on #525): human and a
+    # listed lane bot with a known vendor resolve by identity; the owner resolves
+    # through the trailer; EVERY other listed identity (e.g. cognition-team) is
+    # unverified-unattested for a CLI-made commit — only GitHub verification or
+    # an exact-head owner attestation clears it, neither of which an offline
+    # walk can see, so it stays unresolved here whatever the trailer says.
     case "$id_vendor" in
       unknown) echo "vendor-unknown:${login}"; return 0 ;;
       human) ;;
+      owner) needs_trailer=1 ;;
       *)
         if [[ "$login" == aie-agent-lanes-*\[bot\] ]] && agent_vendor_known "$id_vendor"; then
           : # listed lane bot: resolves to its vendor by identity alone
         else
-          needs_trailer=1 # owner, and conservatively any other listed identity
+          echo "unverified-unattested:${login}"; return 0
         fi
         ;;
     esac

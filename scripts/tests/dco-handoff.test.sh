@@ -69,6 +69,8 @@ case "$*" in
     case "$*" in
       *"author-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
       *"committer-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
+      *"author-email:team@cognition.test"*) printf 'team@cognition.test\tcognition-team\n' ;;
+      *"committer-email:team@cognition.test"*) printf 'team@cognition.test\tcognition-team\n' ;;
       *) printf '\t\n' ;;
     esac
     exit 0 ;;
@@ -105,6 +107,7 @@ work_commit() { # email [git-commit args...] — signed, -a
 #   unknown-vendor signed, Agent-Vendor: bogus
 #   bot            signed, lane-bot email, no trailer       (resolves by login)
 #   stranger       signed, trailer, author/committer an address GitHub maps to no login
+#   cognition      signed, trailer, an address GitHub maps to cognition-team (listed, non-owner, non-bot)
 #   bot-invalid-committer  lane-bot author, .invalid committer, no trailer
 #   bare-invalid   signed, trailer, author/committer `codex@invalid` (bare form)
 #   fake-bot       signed, lane-bot-shaped email the evaluator does not list, no trailer
@@ -133,6 +136,7 @@ setup_repo() { # setup_repo <mode>
     unknown-vendor) work_commit "$LANE_EMAIL" -m "work" -m "Agent-Vendor: bogus" ;;
     bot)            work_commit "$BOT_EMAIL" -m "work" ;;
     stranger)       work_commit stranger@gibson.test -m "work" -m "Agent-Vendor: claude" ;;
+    cognition)      work_commit team@cognition.test -m "work" -m "Agent-Vendor: devin" ;;
     bare-invalid)   work_commit codex@invalid -m "work" -m "Agent-Vendor: codex" ;;
     fake-bot)       work_commit "$FAKE_BOT_EMAIL" -m "work" ;;
     mini-bot)       work_commit "$MINI_BOT_EMAIL" -m "work" ;;
@@ -468,6 +472,28 @@ if handoff_invoked; then bad "bare-invalid: loop handed off a codex@invalid comm
 else ok "bare-invalid: loop does not invoke the supervisor"; fi
 if grep -q "$SHA invalid-email:codex@invalid" "$REPO/gibson/journal.md"; then ok "bare-invalid: journal names codex@invalid"
 else bad "bare-invalid: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
+
+echo "Agent-Vendor walk: a listed non-owner, non-bot identity is unverified-unattested offline, trailer or not (Codex round seven)"
+setup_repo cognition
+SHA=$(head_sha)
+if node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const i=c.identities.find(x=>x.login==="cognition-team");process.exit(i&&i.roles.includes("author")&&i.vendor!=="owner"&&i.vendor!=="human"?0:1)' "$REPO/config/review-evidence.v1.json"; then ok "fixture: cognition-team is a listed author identity that is neither owner nor human nor a lane bot"
+else bad "fixture bug: cognition-team shape changed in the identity table"; fi
+write_state "$BRANCH" "$SHA"
+: > "$CALLS/devin.cmds"
+run_loop "$ROOT/loop-cognition.err"
+if handoff_invoked; then bad "cognition: loop handed off a commit the evaluator rejects as unverified-unattested"
+else ok "cognition: loop does not invoke the supervisor despite Agent-Vendor: devin"; fi
+if grep -q "$SHA unverified-unattested:cognition-team" "$REPO/gibson/journal.md"; then ok "cognition: journal names unverified-unattested and the login"
+else bad "cognition: journal reason: $([[ -f $REPO/gibson/journal.md ]] && cat "$REPO/gibson/journal.md" || echo absent)"; fi
+git -C "$REPO" checkout -q "$BRANCH"
+git -C "$REPO" config extensions.worktreeConfig true
+git -C "$REPO" config --worktree gibson.agentVendor devin
+. "$GIBSON/scripts/lib/convention-probes.sh"
+out=$(cd "$REPO" && cp_agent_vendor_walk main); rc=$?
+[[ "$rc" -eq 1 && "$out" == *"$SHA unverified-unattested:cognition-team"* ]] && ok "cognition: declared-lane pre-push probe FAILs the same commit" || bad "cognition probe rc=$rc: $out"
+git -C "$REPO" config --worktree --unset gibson.agentVendor
+git -C "$REPO" config --unset extensions.worktreeConfig
+git -C "$REPO" checkout -q main
 
 echo "Agent-Vendor walk: an email GitHub maps to no login is not resolvable, trailer or not (Codex round five)"
 setup_repo stranger

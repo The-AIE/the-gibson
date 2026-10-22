@@ -63,6 +63,8 @@ case "$*" in
     case "$*" in
       *"author-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
       *"committer-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
+      *"author-email:team@cognition.test"*) printf 'team@cognition.test\tcognition-team\n' ;;
+      *"committer-email:team@cognition.test"*) printf 'team@cognition.test\tcognition-team\n' ;;
       *) printf '\t\n' ;;
     esac
     exit 0 ;;
