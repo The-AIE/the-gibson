@@ -9,7 +9,8 @@ BODY="${1:-}"; PRNUM="${2:-${GIBSON_PR:-}}"
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "FAIL: not in a git worktree"; exit 1; }
 cd "$ROOT"
 fails=0; fail(){ echo "FAIL: $*"; fails=$((fails+1)); }; ok(){ echo "ok:   $*"; }; note(){ echo "note: $*"; }
-REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || echo "")
+# From the origin remote, not `gh repo view`: in a fork with an upstream remote gh answers with the upstream repo.
+REPO=$(git remote get-url origin 2>/dev/null | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')
 [ -n "$REPO" ] || fail "gh cannot resolve this checkout's repository"
 
 # 0. Installed Gibson config → default branch and required contexts; fall back to branch protection.
@@ -64,6 +65,7 @@ vendors=""
 canon(){ case "$1" in xai|x.ai|grok) echo grok;; openai|codex|mini) echo codex;; anthropic|claude) echo claude;; *) echo "$1";; esac; }
 while read -r sha; do
   msg=$(git log -1 --format=%B "$sha"); echo "$msg" | grep -Eq '^Signed-off-by: ' || fail "commit ${sha:0:8} has no Signed-off-by (DCO)"
+  aemail=$(git log -1 --format=%ae "$sha" | tr 'A-Z' 'a-z'); echo "$msg" | grep -Ei '^Signed-off-by: ' | grep -qi "<$aemail>" || fail "commit ${sha:0:8}: author <$aemail> has no matching Signed-off-by (DCO checks in this family require author email == sign-off; after a cherry-pick: git commit --amend --no-edit --author=\"<name> <email>\" -s)"
   v=$(echo "$msg" | grep -Eio '^[ \t]*Agent-Vendor:[ \t]*[A-Za-z0-9._-]+' | head -1 | awk -F: '{gsub(/[ \t]/,"",$2); print tolower($2)}')
   if [ -z "$v" ]; then for l in $(echo "$LOGINS" | awk -v s="$sha" '$1==s{print $2, $3}'); do m=$(echo "$l" | grep -Eio '(^|[-_])(grok|codex|claude|mini)(\[bot\])?$' | grep -Eio 'grok|codex|claude|mini' | head -1); [ -n "$m" ] && v="$m"; done; fi
   [ -n "$v" ] || fail "commit ${sha:0:8} has no vendor hint (Agent-Vendor trailer or lane-bot login); the Mini controller skips the PR: missing-vendor-hint"

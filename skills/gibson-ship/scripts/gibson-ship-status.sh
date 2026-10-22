@@ -2,7 +2,7 @@
 # gibson-ship status: what the gates see for one PR in any wired repo. Read-only.
 # Usage: gibson-ship-status.sh <pr-number> [owner/repo]   (repo defaults to the current checkout's)
 set -uo pipefail
-PR="${1:-}"; REPO="${2:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)}"
+PR="${1:-}"; REPO="${2:-$(git remote get-url origin 2>/dev/null | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')}"   # origin, not gh repo view (fork checkouts answer with upstream)
 [ -n "$PR" ] && [ -n "$REPO" ] || { echo "usage: $0 <pr-number> [owner/repo]"; exit 2; }
 J=$(gh pr view "$PR" -R "$REPO" --json state,headRefOid,baseRefName,labels,mergeable,mergeStateStatus,isDraft,mergedAt,mergeCommit) || exit 1
 HEAD=$(echo "$J" | jq -r .headRefOid); BASE=$(echo "$J" | jq -r .baseRefName)
@@ -12,7 +12,7 @@ echo "mergeable=$(echo "$J" | jq -r .mergeable) mergeState=$(echo "$J" | jq -r .
 BEHIND=$(gh api "repos/$REPO/compare/$BASE...$HEAD" --jq .behind_by 2>/dev/null); case "$BEHIND" in ''|*[!0-9]*) BEHIND="? (no common ancestor or compare failed)";; esac; echo "behind $BASE by: $BEHIND (captains need 0)"
 # Required contexts: installed config in the checkout if we are in that repo, else branch protection.
 CTX=""; SRC=""
-if [ -f .agents/gibson-delivery.json ] && [ "$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)" = "$REPO" ]; then CTX=$(jq -r '(.requiredContexts // [])[]' .agents/gibson-delivery.json | tr '\n' ' '); SRC=".agents/gibson-delivery.json"; fi
+if [ -f .agents/gibson-delivery.json ] && [ "$(git remote get-url origin 2>/dev/null | sed -E 's#^(https://github.com/|git@github.com:)##; s#\.git$##')" = "$REPO" ]; then CTX=$(jq -r '(.requiredContexts // [])[]' .agents/gibson-delivery.json | tr '\n' ' '); SRC=".agents/gibson-delivery.json"; fi
 if [ -z "$CTX" ]; then if PROT=$(gh api "repos/$REPO/branches/$BASE/protection" --jq '(.required_status_checks.contexts // [])[]' 2>/dev/null); then CTX=$(echo "$PROT" | tr '\n' ' '); SRC="branch protection on $BASE"; else SRC="none: $BASE has no branch protection (GitHub 404)"; fi; fi
 echo; echo "Required contexts at head (${SRC:-none found}): ${CTX:-none}"
 CR=$(gh api "repos/$REPO/commits/$HEAD/check-runs?per_page=100" --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion // "-")"')

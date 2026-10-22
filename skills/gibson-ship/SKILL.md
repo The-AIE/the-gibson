@@ -50,13 +50,18 @@ encoding anything new; this skill is only useful while it matches the machines.
 bash ~/.claude/skills/gibson-ship/scripts/gibson-ship-preflight.sh <pr-body.md> [pr-number]
 ```
 
-Run inside the PR's worktree. It exits non-zero on any miss. What it checks, from the repo:
+Run inside the PR's worktree. It exits non-zero on any miss. The repo is read from
+`git remote get-url origin`, never `gh repo view`: in a fork checkout with an `upstream` remote,
+`gh` answers with the upstream repo (observed in an ata-events-site worktree, 2026-10-21). What it
+checks, from the repo:
 
 1. **Claim lines.** Exactly one `- Active-work claim: <kebab-slug>` and one
    `- Isolation: dedicated worktree` (or `isolated hosted checkout`). conference-os parses them in
    CI `quality`; the-gibson's `claim.sh` writes them and the claim is the open PR itself. The slug
    must be unique across open PRs. Placeholders (`<exact-claim-slug>`, `none`, `tbd`) fail.
-2. **DCO.** `Signed-off-by` on every commit. Both repos require it; it must survive the squash.
+2. **DCO.** `Signed-off-by` on every commit, with the author email equal to the sign-off email
+   (the conference-os family's `check-dco.mjs` requires it; a cherry-pick breaks it). Must survive
+   the squash.
 3. **Vendor hint on every commit.** `Agent-Vendor:` trailer, or a lane-bot author login (read from
    GitHub when a PR number is given, because logins are not visible locally). The Mini controller
    skips a PR forever as `missing-vendor-hint` without one, and `mixed-authoring-vendors` when
@@ -165,14 +170,26 @@ Merging to the default branch ships nothing to a live site. Read
    the card, fix the card, then promote. The ATA path went stale silently in October 2026.
 2. **Sync PR** in a worktree of the install repo from its default branch:
    `git cherry-pick -x <core merge commit>` (several core merges may share one PR, listed
-   individually). Same claim lines as step 1; title `chore(core): sync <core> #NNNN (<summary>)`;
-   body names core PRs, merge SHAs, migrations yes/no, what ran locally.
+   individually). A cherry-pick keeps the core author; where the install's DCO check requires the
+   author email to equal the `Signed-off-by` email (conference-os forks do), amend each picked
+   commit with `git commit --amend --no-edit --author="<name> <email>" -s` before pushing. The
+   preflight fails on the mismatch. Same claim lines as step 1; title
+   `chore(core): sync <core> #NNNN (<summary>)`; body names core PRs, merge SHAs, migrations
+   yes/no, what ran locally.
 3. **Clear its gate** as in steps 2 to 4, with that repo's trust file.
 4. **Merge** per the row.
-5. **Deploy** per the row. Where the project's Production Branch is a branch the repo does not have,
-   production is a CLI deploy from the merged default-branch checkout; record the deployed SHA in
-   the sync PR, because a CLI deployment carries no git metadata. Delivery control applies:
-   audit, dry-run, explicit human apply.
+5. **Schema first, then code.** For a schema change, apply the production migration before the
+   code deploy: additive migration, old code tolerates it, new code never meets a missing table.
+   On conference-os that is Actions → `production-migrate`, a `workflow_dispatch` with `install`,
+   `payload_sha` (full 40-char SHA of the pinned migration payload) and optional
+   `rehearsal_target`. Owner's call to run it. Delivery control applies: audit, dry-run, explicit
+   human apply.
+6. **Deploy** per the row. Where the project's Production Branch is a branch the repo does not have,
+   production is a CLI deploy from the merged default-branch checkout. Use the exact command on
+   the card with the `deploy` verb: on Vercel CLI 59.23.1 a bare `vercel --prod` printed a
+   suggestion block and deployed nothing (observed 2026-10-21). If `vercel link` was needed,
+   delete the `.env.local` it wrote. Record the deployed SHA in the sync PR, because a CLI
+   deployment carries no git metadata.
 
 ## Step 8. Verify, then configure
 
@@ -182,8 +199,13 @@ Merging to the default branch ships nothing to a live site. Read
    was deployed.
 3. Only now the install-specific config: MCP call, admin setting, env var, seed. Separate and
    last, so a failed deploy never leaves config pointing at code that is not live. Record it on
-   the sync PR or the core PR.
-4. Write the outcome to Cortex (`cortex-write`): PR numbers, merge SHA, deployment id, config.
+   the sync PR or the core PR. Through an admin UI in Chrome: a React controlled checkbox does
+   not change state from `form_input`; click it and read the save toast (observed 2026-10-21:
+   "saved (off)" meant it did not take).
+4. **Known failure outside your control:** the per-installation GitHub API rate limit broke both
+   the review-evidence evaluator and preview-smoke on 2026-10-21. After the hourly reset, an edit
+   to the PR body re-triggers the evaluator; do not push to retrigger, that is a new head.
+5. Write the outcome to Cortex (`cortex-write`): PR numbers, merge SHA, deployment id, config.
 
 ## What this prevents (conference-os#2357, 2026-10-21)
 
