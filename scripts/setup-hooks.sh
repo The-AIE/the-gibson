@@ -248,7 +248,7 @@ git config core.hooksPath .githooks
 echo "setup-hooks: core.hooksPath set to .githooks"
 
 if [[ -n "$VENDOR" ]]; then
-  ext=$(git config --get extensions.worktreeConfig 2>/dev/null || true)
+  ext=$(git config --bool --local --get extensions.worktreeConfig 2>/dev/null || true)
   if [[ "$ext" != "true" ]]; then
     if git config --get core.worktree >/dev/null 2>&1; then
       echo "setup-hooks: ERROR: extensions.worktreeConfig is off and core.worktree is set — move core.worktree to the main worktree's config.worktree first (git-config(1), extensions.worktreeConfig)" >&2

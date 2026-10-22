@@ -242,7 +242,7 @@ esac
 # a declaration that cannot be proven is a refusal, not a warning.
 lane_vendor_declare() { # wt-dir vendor
   local wt="$1" vendor="$2" ext got hooks hooks_dir probe other err
-  ext=$(git -C "$wt" config --get extensions.worktreeConfig 2>/dev/null || true)
+  ext=$(git -C "$wt" config --bool --local --get extensions.worktreeConfig 2>/dev/null || true)
   if [[ "$ext" != "true" ]]; then
     if git -C "$wt" config --get core.worktree >/dev/null 2>&1; then
       die "cannot declare the lane vendor: extensions.worktreeConfig is off and core.worktree is set in the shared config — move core.worktree to the main worktree's config.worktree (git-config(1), extensions.worktreeConfig) and re-run"

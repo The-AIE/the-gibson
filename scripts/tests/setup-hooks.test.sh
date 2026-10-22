@@ -396,6 +396,42 @@ else
   ok "the bare @invalid form is refused like .invalid (Codex round 4)"
 fi
 
+echo "extension spelled 'on' still activates the declaration; a global-only extension does not (Codex round 5)"
+ONREPO="$ROOT/onrepo"
+mkdir -p "$ONREPO"
+$GIT init -q "$ONREPO"
+git -C "$ONREPO" config user.name gibson-sensor
+git -C "$ONREPO" config user.email "$LANE_EMAIL"
+git -C "$ONREPO" config extensions.worktreeConfig on
+git -C "$ONREPO" config --worktree gibson.agentVendor codex
+msg="$ROOT/msg-on"
+printf 'subject\n\nbody\n' > "$msg"
+(cd "$ONREPO" && env -u GIBSON_AGENT_VENDOR "$PREPARE" "$msg")
+if grep -qx 'Agent-Vendor: codex' "$msg"; then ok "extensions.worktreeConfig=on counts as true: trailer stamped"
+else bad "extensions.worktreeConfig=on was ignored: $(cat "$msg")"; fi
+if (cd "$ONREPO" && lane_env env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-missing") 2>/dev/null; then
+  bad "extensions.worktreeConfig=on: commit-msg did not require the trailer"
+else
+  ok "extensions.worktreeConfig=on: commit-msg requires the trailer"
+fi
+GLOBALREPO="$ROOT/globalrepo"
+mkdir -p "$GLOBALREPO"
+$GIT init -q "$GLOBALREPO"
+git -C "$GLOBALREPO" config user.name gibson-sensor
+git -C "$GLOBALREPO" config user.email "$LANE_EMAIL"
+git -C "$GLOBALREPO" config --local gibson.agentVendor grok
+printf '[extensions]\n\tworktreeConfig = true\n' > "$ROOT/global-gitconfig"
+msg="$ROOT/msg-global"
+printf 'subject\n\nbody\n' > "$msg"
+(cd "$GLOBALREPO" && GIT_CONFIG_GLOBAL="$ROOT/global-gitconfig" env -u GIBSON_AGENT_VENDOR "$PREPARE" "$msg")
+if ! grep -qi '^Agent-Vendor:' "$msg"; then ok "a global-only extensions.worktreeConfig does not activate a --local declaration"
+else bad "global-only extension + --local value was treated as a lane: $(cat "$msg")"; fi
+if (cd "$GLOBALREPO" && GIT_CONFIG_GLOBAL="$ROOT/global-gitconfig" lane_env env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-missing"); then
+  ok "global-only extension: commit-msg requires nothing"
+else
+  bad "global-only extension made commit-msg demand a trailer"
+fi
+
 echo "end to end: a plain git commit on a declared lane carries the trailer; the main worktree does not"
 E2E="$ROOT/e2e"
 mkdir -p "$E2E"
