@@ -141,11 +141,21 @@ def _green(entry):
     return status == "COMPLETED" and outcome == "SUCCESS"
 
 
+# Outcomes that mean "still running" for a completed status/check. Anything else
+# on a completed signal (SUCCESS, FAILURE, ERROR, CANCELLED, TIMED_OUT, NEUTRAL,
+# SKIPPED, ACTION_REQUIRED, STALE, STARTUP_FAILURE) is terminal for the probe.
+# This is stricter than the controller's own evidence test, which treats only
+# success/failure as terminal: the probe is a pre-filter, so being conservative
+# costs at most one fallback tick and can never start a run the controller would
+# not have started on its own.
+NOT_TERMINAL = frozenset(["PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"])
+
+
 def _terminal(entry):
     if entry is None:
         return False
     _kind, status, outcome = entry
-    return status == "COMPLETED" and outcome in ("SUCCESS", "FAILURE")
+    return status == "COMPLETED" and outcome is not None and outcome not in NOT_TERMINAL
 
 
 def ready_heads(controller, github, policy, repository, state):
@@ -296,7 +306,10 @@ def main(argv=None):
         state = controller.load_state(state_dir / "state.json")
         github = controller.GitHubClient(policy["appId"], policy["appSlug"], policy["privateKeyPath"])
         cache_path = state_dir / "probe.json"
-        cache = _prune(_load_cache(cache_path), _now())
+        loaded = _load_cache(cache_path)
+        cache = _prune(loaded, _now())
+        if cache != loaded and not args.dry_run:
+            _store_cache(cache_path, cache)
         candidates = []
         for repository in policy["repositories"]:
             for number, head in ready_heads(controller, github, policy, repository, state):
@@ -325,7 +338,10 @@ def main(argv=None):
                 timeout=_run_timeout(policy),
             )
         except subprocess.TimeoutExpired as expired:
-            sys.stdout.write(expired.stdout if isinstance(expired.stdout, str) else "")
+            partial = expired.stdout
+            if isinstance(partial, bytes):
+                partial = partial.decode("utf-8", "replace")
+            sys.stdout.write(partial or "")
             # A timed-out run is settled for the probe's purposes: these heads go
             # to the fallback scan only, so a hung wrapper cannot be re-fired by
             # the probe every minute and starve the scheduled job of the lock.
