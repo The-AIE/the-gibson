@@ -13,13 +13,17 @@ Single-flight is preserved three ways:
   * probe.lock stops two probes overlapping;
   * the controller's controller.lock stops a probe-started run overlapping a
     scheduled run (the loser prints "another instance holds the lock" and the
-    probe does NOT record the trigger, so it retries next minute);
-  * probe.json records each head the probe has already fired for, so a head the
-    controller then skips for an unrelated reason (missing-vendor-hint,
-    diff-too-large, ...) is fired at most once and otherwise left to the
-    fallback scan, exactly as today. A snapshot-changed skip in the journal
-    re-arms the head, because that skip discards a review after it started and
-    the head is usually still current and still green.
+    probe records nothing, so it retries next minute);
+  * probe.json records each head the controller has DECIDED after a probe run.
+    The wrapper prints one line per pull request it reached ("repo#N skip
+    <reason>" or "repo#N <sha> pass|fail"); a head is recorded only when its
+    line is present and the reason is not one that means "try again"
+    (required-context, snapshot-changed, snapshot-unreadable, halt). A head the
+    controller skips for a reason the probe cannot see (missing-vendor-hint,
+    diff-too-large, ...) is therefore fired once and then left to the fallback
+    scan, exactly as today. A head the controller never reached (halt,
+    vendor-state-not-plain, budget-run) is not recorded and fires again next
+    minute.
 
 The probe never writes the controller's journal or state.json. It imports the
 controller module only for its policy loader, GitHub App client and key
@@ -33,6 +37,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -41,6 +46,9 @@ from pathlib import Path
 
 LOCK_HELD_LINE = "another instance holds the lock"
 CACHE_TTL_DAYS = 14
+# Skip reasons after which the same head should fire again on the next probe.
+RETRY_REASONS = frozenset(["required-context", "snapshot-changed", "snapshot-unreadable", "halt"])
+DECISION_RE = re.compile(r"^(?P<repo>[^\s#]+)#(?P<number>\d+) (?P<rest>.+)$")
 
 READY_QUERY = (
     "query($owner:String!,$name:String!,$base:String!){"
@@ -50,8 +58,8 @@ READY_QUERY = (
     "nodes{number isDraft headRefOid headRepository{nameWithOwner}"
     "commits(last:1){nodes{commit{statusCheckRollup{"
     "contexts(first:100){pageInfo{hasNextPage}nodes{__typename "
-    "... on CheckRun{name status conclusion}"
-    "... on StatusContext{context state}}}}}}}}}}}"
+    "... on CheckRun{name status conclusion startedAt completedAt databaseId}"
+    "... on StatusContext{context state createdAt}}}}}}}}}}}"
 )
 
 
@@ -87,6 +95,16 @@ def _acquire(path):
     return handle
 
 
+def _order_key(node):
+    """Latest signal wins, like the controller's _latest(): newest stamp, then id."""
+    stamp = node.get("completedAt") or node.get("startedAt") or node.get("createdAt") or ""
+    try:
+        ident = int(node.get("databaseId") or 0)
+    except (TypeError, ValueError):
+        ident = 0
+    return (stamp, ident)
+
+
 def _context_states(rollup):
     """Map context name -> (kind, status, conclusion/state) for the head commit."""
     out = {}
@@ -96,13 +114,23 @@ def _context_states(rollup):
     if (contexts.get("pageInfo") or {}).get("hasNextPage"):
         # More than 100 contexts: treat as not ready; the fallback scan decides.
         return None
+    newest = {}
     for node in contexts.get("nodes") or []:
         if not isinstance(node, dict):
             continue
-        if node.get("__typename") == "CheckRun":
-            out[node.get("name")] = ("check", node.get("status"), node.get("conclusion"))
-        elif node.get("__typename") == "StatusContext":
-            out[node.get("context")] = ("status", "COMPLETED", node.get("state"))
+        kind = node.get("__typename")
+        if kind == "CheckRun":
+            name = node.get("name")
+            entry = ("check", node.get("status"), node.get("conclusion"))
+        elif kind == "StatusContext":
+            name = node.get("context")
+            entry = ("status", "COMPLETED", node.get("state"))
+        else:
+            continue
+        key = _order_key(node)
+        if name not in newest or key > newest[name]:
+            newest[name] = key
+            out[name] = entry
     return out
 
 
@@ -171,6 +199,36 @@ def ready_heads(controller, github, policy, repository, state):
     return found
 
 
+def decided_heads(output, candidates):
+    """Candidates the controller reached and settled, from the wrapper's stdout.
+
+    ``candidates`` is a list of (repo, number, head, key). A candidate is settled
+    when the output holds a line for its repo and number that is a pass/fail
+    verdict for that exact head, or a skip whose reason is not in RETRY_REASONS.
+    """
+    decisions = {}
+    for line in output.splitlines():
+        match = DECISION_RE.match(line.strip())
+        if match is None:
+            continue
+        decisions.setdefault((match.group("repo"), int(match.group("number"))), []).append(
+            match.group("rest")
+        )
+    settled = []
+    for repo, number, head, key in candidates:
+        for rest in decisions.get((repo, number), []):
+            parts = rest.split()
+            if parts[0] == "skip":
+                reason = parts[1] if len(parts) > 1 else ""
+                if reason not in RETRY_REASONS:
+                    settled.append((repo, number, head, key))
+                    break
+            elif len(parts) == 2 and parts[0] == head and parts[1] in ("pass", "fail"):
+                settled.append((repo, number, head, key))
+                break
+    return settled
+
+
 def _load_cache(path):
     if not path.exists():
         return {}
@@ -190,57 +248,6 @@ def _store_cache(path, cache):
     os.replace(temporary, path)
 
 
-def _parse_stamp(text):
-    try:
-        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        return None
-
-
-def _rearm_after_snapshot_changed(cache, journal_path, tail_bytes=262144):
-    """Drop cache entries whose head the controller abandoned as snapshot-changed.
-
-    A snapshot-changed skip means the review was discarded after it started
-    (head, base, labels or files moved). The head is often still the current one
-    and still green, so it must be eligible to fire again immediately instead of
-    waiting for the fallback scan. Only the journal tail is read.
-    """
-    if not journal_path.exists() or not cache:
-        return cache
-    try:
-        with journal_path.open("rb") as handle:
-            handle.seek(0, os.SEEK_END)
-            size = handle.tell()
-            handle.seek(max(0, size - tail_bytes))
-            lines = handle.read().decode("utf-8", "replace").splitlines()
-    except OSError:
-        return cache
-    latest = {}
-    for line in lines:
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(record, dict) or record.get("reason") != "snapshot-changed":
-            continue
-        when = _parse_stamp(record.get("time"))
-        key = (record.get("repo"), record.get("number"))
-        if when is not None and (key not in latest or when > latest[key]):
-            latest[key] = when
-    if not latest:
-        return cache
-    kept = {}
-    for key, record in cache.items():
-        repo = key.split("@", 1)[0]
-        triggered = _parse_stamp(record.get("triggered"))
-        changed = latest.get((repo, record.get("number")))
-        if triggered is not None and changed is not None and changed > triggered:
-            _log("re-arm {0}#{1}: snapshot-changed at {2}".format(repo, record.get("number"), _stamp(changed)))
-            continue
-        kept[key] = record
-    return kept
-
-
 def _prune(cache, now):
     cutoff = now - timedelta(days=CACHE_TTL_DAYS)
     kept = {}
@@ -254,6 +261,13 @@ def _prune(cache, now):
         if when >= cutoff:
             kept[key] = record
     return kept
+
+
+def _run_timeout(policy):
+    """Longest a wrapper run may take: every slot at the reviewer timeout, plus the scan."""
+    per_pull = int(policy.get("reviewerTimeoutSeconds") or 900)
+    slots = int(policy.get("maxPullsPerRun") or 1)
+    return per_pull * slots + 300
 
 
 def main(argv=None):
@@ -282,7 +296,6 @@ def main(argv=None):
         github = controller.GitHubClient(policy["appId"], policy["appSlug"], policy["privateKeyPath"])
         cache_path = state_dir / "probe.json"
         cache = _prune(_load_cache(cache_path), _now())
-        cache = _rearm_after_snapshot_changed(cache, state_dir / "journal.jsonl")
         candidates = []
         for repository in policy["repositories"]:
             for number, head in ready_heads(controller, github, policy, repository, state):
@@ -301,13 +314,19 @@ def main(argv=None):
         for repo, number, head, _key in candidates:
             _log("trigger {0}#{1} {2}".format(repo, number, head))
         started = time.monotonic()
-        completed = subprocess.run(
-            [args.run_script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                [args.run_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+                timeout=_run_timeout(policy),
+            )
+        except subprocess.TimeoutExpired as expired:
+            sys.stdout.write(expired.stdout if isinstance(expired.stdout, str) else "")
+            _log("controller killed after {0}s; heads left for the fallback scan".format(expired.timeout))
+            return 0
         output = completed.stdout or ""
         sys.stdout.write(output)
         if LOCK_HELD_LINE in output:
@@ -316,10 +335,15 @@ def main(argv=None):
         if completed.returncode != 0:
             _log("controller exited {0}; heads left for the fallback scan".format(completed.returncode))
             return 0
+        settled = decided_heads(output, candidates)
         now = _stamp(_now())
-        for repo, number, _head, key in candidates:
+        for repo, number, _head, key in settled:
             cache[key] = {"number": number, "triggered": now}
-        _store_cache(cache_path, cache)
+        if settled:
+            _store_cache(cache_path, cache)
+        for repo, number, _head, _key in candidates:
+            if (repo, number) not in {(s[0], s[1]) for s in settled}:
+                _log("not settled {0}#{1}; fires again next probe".format(repo, number))
         _log("controller finished in {0:.0f}s".format(time.monotonic() - started))
         return 0
     finally:

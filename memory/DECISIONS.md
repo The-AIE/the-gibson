@@ -356,7 +356,9 @@ Decided: a second launchd job on the Mini probes readiness once a minute with on
 GraphQL call per repo and runs the existing controller wrapper the first time a
 head is green, unpublished and not exhausted; the 900 s scan stays as fallback.
 Single-flight is the existing controller.lock plus a probe.lock and a per-head
-fired cache that re-arms on snapshot-changed. No controller, policy or
+cache of heads the controller actually settled (read from the wrapper's own
+stdout lines), so halt, budget-run, required-context and snapshot-changed all
+fire again next minute. No controller, policy or
 conference-os workflow change. Full record: docs/adr/0001-independent-review-ready-probe.md.
 Rejected: GitHub Actions → repository_dispatch → Mini receiver (needs a new
 always-on inbound service or a CI-held credential that can execute on the Mini);
