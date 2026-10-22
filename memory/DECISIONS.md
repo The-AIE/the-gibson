@@ -350,3 +350,17 @@ UNKNOWN still fail the run.
 Revisit when: CodeQL default setup is turned off, GitHub makes the risk assessment
 recurring or removable, or the risk-assessment row goes IDLE (re-run it, do not widen
 the window).
+
+## D-018 · 2026-10-22 · Independent reviewer starts on a 60-second ready probe, not the 15-minute tick
+Decided: a second launchd job on the Mini probes readiness once a minute with one
+GraphQL call per repo and runs the existing controller wrapper the first time a
+head is green, unpublished and not exhausted; the 900 s scan stays as fallback.
+Single-flight is the existing controller.lock plus a probe.lock and a per-head
+fired cache that re-arms on snapshot-changed. No controller, policy or
+conference-os workflow change. Full record: docs/adr/0001-independent-review-ready-probe.md.
+Rejected: GitHub Actions → repository_dispatch → Mini receiver (needs a new
+always-on inbound service or a CI-held credential that can execute on the Mini);
+full scan every 60 s (~86k REST calls/day); a "review-ready" status set in CI
+(still needs a poller, adds a repo change).
+Revisit when: probe-started runs review nothing for a week, or App rate-limit
+headroom drops below 1,000 points.
