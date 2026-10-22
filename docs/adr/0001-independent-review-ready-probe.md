@@ -44,7 +44,7 @@ The 900-second job stays loaded, unchanged, as the fallback. The controller, its
 - `state/controller.lock` already serialises controller runs. If the probe's run loses that lock to a scheduled run, the wrapper prints `another instance holds the lock`; the probe sees it, records nothing, and retries next minute.
 - `state/probe.json` records each `repo@head` the controller has **decided** after a probe-started run. The wrapper prints one line per PR it reaches (`repo#N skip <reason>` or `repo#N <sha> pass|fail`); the probe records a head only when its line is present and the reason is not one that means "try again" (`required-context`, `snapshot-changed`, `snapshot-unreadable`, `halt`). A head the controller skips for a reason the probe cannot see (`missing-vendor-hint`, `diff-incomplete`, `diff-too-large`) is therefore fired **once** and afterwards left to the fallback scan, which is today's behaviour. The dry run on 2026-10-22 listed seven such heads; on install the probe fires one controller run for them (about 20 s of skips, no paid review), then goes quiet.
 - A head the controller never reached (`halt`, `vendor-state-not-plain`, a fourth simultaneous head over `maxPullsPerRun`) or abandoned (`snapshot-changed`) has no settling line, is not recorded, and fires again next minute. This is what turns the 16-minute restart above into a 1-minute one.
-- The wrapper run has a timeout of `maxPullsPerRun × reviewerTimeoutSeconds + 300 s` so a hung fetch cannot hold `probe.lock` forever.
+- The wrapper run has a timeout of `maxPullsPerRun × reviewerTimeoutSeconds + 300 s` so a hung wrapper cannot hold `probe.lock` forever. Heads in a timed-out run are recorded as settled, so the probe does not re-fire a hanging wrapper every minute; they belong to the fallback scan from then on. (The wrapper's `git fetch` runs before the controller takes `controller.lock`, so a hung fetch never holds that lock; a long legitimate review does, for the scheduled job as much as for a probe-started one, exactly as today.)
 - Per-head dedupe of paid work stays where it is: `published[repo@head]`, `attempts`, `_existing_evidence` on GitHub, and the daily budget are all enforced by the controller on every run, probe-started or scheduled.
 
 ### What the probe does not do
@@ -78,7 +78,7 @@ For #2357's round as measured: 16 min + 15.5 min = **31.5 min saved**, out of a 
 
 Verified before opening this PR: the probe ran on the Mini in `--dry-run` from a scratch directory (reads only; 2.6 s; wrote nothing) and reported the seven green-but-unpublished heads the controller currently skips every tick. `test_probe.py` beside the script covers readiness parsing (latest run wins on re-run names), the settle rules, and the timeout.
 
-The probe imports five names from the controller (`GitHubClient._repo_json`, `_decode_json`, `_published_key`, `SHA_RE`, `IncompleteRead`, plus `load_policy`/`load_state`). A controller rename breaks the probe at import, every minute, into `probe.err.log`, while the fallback keeps working. Add that log to the Mini health check when installing.
+The probe imports seven names from the controller (`GitHubClient._repo_json`, `_decode_json`, `_published_key`, `SHA_RE`, `IncompleteRead`, `load_policy`, `load_state`). A controller rename breaks the probe at import, every minute, into `probe.err.log`, while the fallback keeps working. Add that log to the Mini health check when installing.
 
 ## Follow-ups (not in this change)
 
