@@ -3108,7 +3108,7 @@ out=$(cd "$ROOT/lane2/canon" && GIT_AUTHOR_EMAIL=codex@openai.invalid GIT_COMMIT
   env -u GIBSON_AGENT_VENDOR "$CLAIM" 46 nologin 'app/w/**' --vendor=codex 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "claim as codex@openai.invalid exits nonzero" || bad "claim as codex@openai.invalid succeeded: $out"
 contains "names the .invalid identity and no-login" "$out" "reserved .invalid domain"
-contains "reservation commit failed before any push" "$out" "claim commit failed"
+contains "refused by the hook probe before any commit exists" "$out" "refused this lane's own stamped probe"
 [[ ! -d "$ROOT/lane2/wt-46-nologin" ]] && ok "worktree rolled back" || bad "worktree left behind"
 lacks "no PR was opened" "$(cat "$GH_PR_FILE")" "issue-46-nologin"
 
@@ -3132,6 +3132,17 @@ out=$(cd "$ROOT/lane4/canon" && GIT_AUTHOR_EMAIL=lane@gibson.test GIT_COMMITTER_
 [[ "$rc" -ne 0 ]] && ok "a prepare-commit-msg that stamps nothing is refused by the probe" || bad "a no-op prepare-commit-msg was accepted: $out"
 contains "names the failed probe" "$out" "did not stamp 'Agent-Vendor: claude' on a probe"
 [[ ! -d "$ROOT/lane4/wt-48-noprobe" ]] && ok "worktree rolled back" || bad "worktree left behind"
+new_repo "$ROOT/lane6"
+(
+  cd "$ROOT/lane6/canon" || exit 1
+  mkdir -p .githooks && cp "$HOOKS_SRC/prepare-commit-msg" .githooks/ && printf '#!/usr/bin/env bash\nexit 0\n' > .githooks/commit-msg && chmod +x .githooks/*
+  git add -A && git commit -qm "genuine prepare hook, no-op reject hook" && git push -q origin main
+) >/dev/null 2>&1
+out=$(cd "$ROOT/lane6/canon" && GIT_AUTHOR_EMAIL=lane@gibson.test GIT_COMMITTER_EMAIL=lane@gibson.test \
+  env -u GIBSON_AGENT_VENDOR "$CLAIM" 50 noreject 'app/s/**' --vendor=claude 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a commit-msg that rejects nothing is refused by the wrong-vendor probe (Codex round 2)" || bad "a no-op commit-msg was accepted: $out"
+contains "names the accepted wrong-vendor probe" "$out" "accepted a probe trailered 'Agent-Vendor: codex' on a 'claude' lane"
+[[ ! -d "$ROOT/lane6/wt-50-noreject" ]] && ok "worktree rolled back" || bad "worktree left behind"
 new_repo "$ROOT/lane5"
 out=$(cd "$ROOT/lane5/canon" && env -u GIBSON_AGENT_VENDOR "$CLAIM" 49 nohooks 'app/t/**' --vendor=claude 2>&1); rc=$?
 check "a repository with no hooks at all still claims (adopters are not blocked)" "$rc" "0"

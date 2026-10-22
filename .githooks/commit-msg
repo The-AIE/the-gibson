@@ -62,21 +62,23 @@ refuse() {
 # claude extra`, an empty value) is refused on every checkout, declared or not:
 # it reads as a vendor to a human and as nothing to the evaluator (Codex
 # review of #523, finding 1).
-malformed=$(grep -iE '^Agent-Vendor:' "$msg_file" 2>/dev/null | grep -viE '^Agent-Vendor:[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*$' || true)
+malformed=$(grep -iE '^Agent-Vendor:' "$msg_file" 2>/dev/null | grep -viE '^Agent-Vendor:[[:blank:]]*[A-Za-z0-9_-]+[[:blank:]]*$' || true)
 if [[ -n "$malformed" ]]; then
   refuse "malformed Agent-Vendor line: '${malformed}'" \
     "the trailer is exactly \`Agent-Vendor: <claude|codex|grok|devin>\` on its own line; review-evidence ignores any other shape."
 fi
 
 # Every Agent-Vendor line in the message, exactly as review-evidence matches
-# them (anywhere in the body, case-insensitive key and value).
+# them (anywhere in the body, case-insensitive key and value, and ONLY space or
+# tab around the value: `[[:blank:]]` is the evaluator's `[ \t]`; `[[:space:]]`
+# would let a vertical tab through here and not there — Codex round 2).
 trailer_vendors=""
 trailer_count=0
 while IFS= read -r line; do
   [[ -n "$line" ]] || continue
   v="${line#*:}"
-  v="${v#"${v%%[![:space:]]*}"}"
-  v="${v%"${v##*[![:space:]]}"}"
+  v="${v#"${v%%[![:blank:]]*}"}"
+  v="${v%"${v##*[![:blank:]]}"}"
   v="$(lower "$v")"
   trailer_count=$((trailer_count + 1))
   if ! vendor_known "$v"; then
@@ -88,7 +90,7 @@ while IFS= read -r line; do
     *) trailer_vendors="${trailer_vendors:+$trailer_vendors }$v" ;;
   esac
 done <<EOF
-$(grep -iE '^Agent-Vendor:[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*$' "$msg_file" 2>/dev/null || true)
+$(grep -iE '^Agent-Vendor:[[:blank:]]*[A-Za-z0-9_-]+[[:blank:]]*$' "$msg_file" 2>/dev/null || true)
 EOF
 
 case "$trailer_vendors" in
