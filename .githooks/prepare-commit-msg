@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
-# prepare-commit-msg: append Signed-off-by from the committer identity when absent.
-# Wired via core.hooksPath=.githooks (see scripts/setup-hooks.sh).
+# prepare-commit-msg: append Signed-off-by from the committer identity when
+# absent, and append the lane's Agent-Vendor trailer when the worktree (or the
+# environment) declares one. Wired via core.hooksPath=.githooks (see
+# scripts/setup-hooks.sh); claim.sh wires it per lane worktree.
+#
+# Agent-Vendor (the-gibson#503/#504/#506, 2026-10-21): review-evidence resolves
+# an owner-identity commit to its vendor only through this trailer. claim.sh
+# writes it on the reservation commit, but every later commit on the lane was
+# made by hand and went out without it, so the PR failed `identity-unresolved`
+# at review time. This hook adds the trailer from the lane's declared vendor
+# (`git config --worktree gibson.agentVendor`, written by claim.sh / setup-hooks
+# --vendor; GIBSON_AGENT_VENDOR is the fallback when no lane declares one). It
+# never guesses: an unknown declared vendor, or an environment vendor that
+# disagrees with the lane, aborts the commit. commit-msg is the reject half.
 set -euo pipefail
 
 msg_file="${1:-}"
@@ -8,61 +20,134 @@ if [[ -z "$msg_file" || ! -f "$msg_file" ]]; then
   exit 0
 fi
 
-# Already present — leave message alone (covers git commit -s and prior hooks).
-if grep -qiE '^Signed-off-by:[[:space:]]+' "$msg_file" 2>/dev/null; then
-  exit 0
-fi
+# ---------------------------------------------------------------------------
+# Signed-off-by (issue #204)
+# ---------------------------------------------------------------------------
+add_signoff() {
+  # Already present — leave message alone (covers git commit -s and prior hooks).
+  if grep -qiE '^Signed-off-by:[[:space:]]+' "$msg_file" 2>/dev/null; then
+    return 0
+  fi
 
-# Resolve the committer the same way `git commit` does:
-#   1. GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL (env wins)
-#   2. git var GIT_COMMITTER_IDENT (user.name / user.email + timestamp)
-# Require both a non-empty name and email so the trailer cannot be
-# "Signed-off-by:" or "Signed-off-by: <>".
-name="${GIT_COMMITTER_NAME:-}"
-email="${GIT_COMMITTER_EMAIL:-}"
+  # Resolve the committer the same way `git commit` does:
+  #   1. GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL (env wins)
+  #   2. git var GIT_COMMITTER_IDENT (user.name / user.email + timestamp)
+  # Require both a non-empty name and email so the trailer cannot be
+  # "Signed-off-by:" or "Signed-off-by: <>".
+  local name="${GIT_COMMITTER_NAME:-}"
+  local email="${GIT_COMMITTER_EMAIL:-}"
+  local ident ident_email ident_name sob
 
-if [[ -z "$name" || -z "$email" ]]; then
-  ident="$(git var GIT_COMMITTER_IDENT 2>/dev/null || true)"
-  if [[ -n "$ident" ]]; then
-    # "Name <email> timestamp tz"
-    ident_email="${ident#*<}"
-    ident_email="${ident_email%%>*}"
-    ident_name="${ident%% <*}"
-    if [[ -z "$name" && -n "$ident_name" && "$ident_name" != "$ident" ]]; then
-      name="$ident_name"
-    fi
-    if [[ -z "$email" && -n "$ident_email" && "$ident_email" != "$ident" ]]; then
-      email="$ident_email"
+  if [[ -z "$name" || -z "$email" ]]; then
+    ident="$(git var GIT_COMMITTER_IDENT 2>/dev/null || true)"
+    if [[ -n "$ident" ]]; then
+      # "Name <email> timestamp tz"
+      ident_email="${ident#*<}"
+      ident_email="${ident_email%%>*}"
+      ident_name="${ident%% <*}"
+      if [[ -z "$name" && -n "$ident_name" && "$ident_name" != "$ident" ]]; then
+        name="$ident_name"
+      fi
+      if [[ -z "$email" && -n "$ident_email" && "$ident_email" != "$ident" ]]; then
+        email="$ident_email"
+      fi
     fi
   fi
+
+  if [[ -z "$name" ]]; then
+    name="$(git config --get user.name 2>/dev/null || true)"
+  fi
+  if [[ -z "$email" ]]; then
+    email="$(git config --get user.email 2>/dev/null || true)"
+  fi
+
+  # Trim surrounding whitespace (git config can carry it; env usually does not).
+  name="${name#"${name%%[![:space:]]*}"}"
+  name="${name%"${name##*[![:space:]]}"}"
+  email="${email#"${email%%[![:space:]]*}"}"
+  email="${email%"${email##*[![:space:]]}"}"
+
+  if [[ -z "$name" || -z "$email" ]]; then
+    return 0
+  fi
+
+  # A newline inside either field would split the trailer into a second paragraph.
+  case "$name$email" in
+    *$'\n'*|*$'\r'*) return 0 ;;
+  esac
+
+  sob="${name} <${email}>"
+
+  git interpret-trailers \
+    --if-exists doNothing \
+    --trailer "Signed-off-by: ${sob}" \
+    --in-place \
+    "$msg_file"
+}
+
+add_signoff
+
+# ---------------------------------------------------------------------------
+# Agent-Vendor (lane provenance)
+# ---------------------------------------------------------------------------
+# The vendors review-evidence accepts in an Agent-Vendor trailer
+# (AUTHOR_COMMIT_VENDORS in scripts/pr-review-evidence.mjs). Keep the four lists
+# in step: here, .githooks/commit-msg, scripts/claim.sh, scripts/setup-hooks.sh.
+# scripts/tests/setup-hooks.test.sh fails when they drift.
+AGENT_VENDORS="claude codex grok devin"
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+vendor_known() {
+  local v
+  for v in $AGENT_VENDORS; do
+    [[ "$1" == "$v" ]] && return 0
+  done
+  return 1
+}
+
+# Worktree scope ONLY: the declaration lives on the lane (`git config --worktree`),
+# never in the local, global or system config, so a stray global value cannot
+# turn the owner's checkout into a lane (Codex round 4). With
+# extensions.worktreeConfig off, `--worktree` silently falls back to --local
+# (git-config(1)), so the declaration counts only when the extension is on;
+# claim.sh and setup-hooks.sh --vendor always enable it when they declare.
+# Git activates config.worktree only from the REPOSITORY config (--local, the
+# shared config in a linked worktree) and accepts any boolean spelling, so read
+# it with --bool --local (Codex round 5).
+lane_vendor=""
+if [[ "$(git config --bool --local --get extensions.worktreeConfig 2>/dev/null || true)" == "true" ]]; then
+  lane_vendor="$(lower "$(git config --worktree --get gibson.agentVendor 2>/dev/null || true)")"
+fi
+env_vendor="$(lower "${GIBSON_AGENT_VENDOR:-}")"
+
+if [[ -n "$lane_vendor" && -n "$env_vendor" && "$lane_vendor" != "$env_vendor" ]]; then
+  echo "prepare-commit-msg: this lane is declared as vendor '${lane_vendor}' (git config gibson.agentVendor) but GIBSON_AGENT_VENDOR='${env_vendor}' — refusing to guess which one wrote this commit." >&2
+  echo "prepare-commit-msg: unset GIBSON_AGENT_VENDOR here, or re-declare the lane with \`scripts/setup-hooks.sh --vendor ${env_vendor}\`." >&2
+  exit 1
 fi
 
-if [[ -z "$name" ]]; then
-  name="$(git config --get user.name 2>/dev/null || true)"
-fi
-if [[ -z "$email" ]]; then
-  email="$(git config --get user.email 2>/dev/null || true)"
-fi
-
-# Trim surrounding whitespace (git config can carry it; env usually does not).
-name="${name#"${name%%[![:space:]]*}"}"
-name="${name%"${name##*[![:space:]]}"}"
-email="${email#"${email%%[![:space:]]*}"}"
-email="${email%"${email##*[![:space:]]}"}"
-
-if [[ -z "$name" || -z "$email" ]]; then
+vendor="${lane_vendor:-$env_vendor}"
+if [[ -z "$vendor" ]]; then
+  # No lane declared and no environment vendor: an ordinary checkout (the
+  # owner's own clone, a target repo without lanes). Nothing to add.
   exit 0
 fi
 
-# A newline inside either field would split the trailer into a second paragraph.
-case "$name$email" in
-  *$'\n'*|*$'\r'*) exit 0 ;;
-esac
+if ! vendor_known "$vendor"; then
+  echo "prepare-commit-msg: unknown agent vendor '${vendor}' — use one of: ${AGENT_VENDORS}. Refusing the commit rather than writing a trailer review-evidence cannot resolve." >&2
+  exit 1
+fi
 
-sob="${name} <${email}>"
+# Present anywhere in the message — claim.sh keeps the reservation's trailer in
+# its own paragraph ABOVE the Gibson-* block (claim-provenance reads only the
+# final block and treats an extra key there as malformed), so look at the whole
+# message exactly as review-evidence does, never only at the final block.
+if grep -qiE '^Agent-Vendor:[[:blank:]]*[A-Za-z0-9_-]+[[:blank:]]*$' "$msg_file" 2>/dev/null; then
+  exit 0
+fi
 
 git interpret-trailers \
-  --if-exists doNothing \
-  --trailer "Signed-off-by: ${sob}" \
+  --trailer "Agent-Vendor: ${vendor}" \
   --in-place \
   "$msg_file"

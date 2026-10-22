@@ -194,6 +194,285 @@ else
   bad "commit-msg rejected a case-folded trailer"
 fi
 
+# ---------------------------------------------------------------------------
+# Agent-Vendor on a declared lane (the-gibson closures of 2026-10-21)
+# ---------------------------------------------------------------------------
+# The hermetic identity above is sensor@gibson.invalid on purpose: `.invalid`
+# is exactly what commit-msg refuses on a declared lane (no-login, #503/#504).
+# Lane cases that must COMMIT therefore use a resolvable-looking address.
+LANE_EMAIL=lane@gibson.test
+GIT_LANE="git -c user.email=$LANE_EMAIL -c user.name=gibson-sensor -c commit.gpgsign=false"
+lane_env() { GIT_AUTHOR_EMAIL=$LANE_EMAIL GIT_COMMITTER_EMAIL=$LANE_EMAIL "$@"; }
+
+echo "the four Agent-Vendor lists agree with pr-review-evidence.mjs"
+mjs_list=$(grep -o 'AUTHOR_COMMIT_VENDORS = new Set(\[[^]]*\])' "$GIBSON/scripts/pr-review-evidence.mjs" \
+  | tr -d '"' | sed 's/.*\[//; s/\].*//' | tr ',' '\n' | tr -d ' ' | sort | tr '\n' ' ')
+list_of() { grep -m1 '^AGENT_VENDORS=' "$1" | sed 's/^AGENT_VENDORS="//; s/"$//' | tr ' ' '\n' | sort | tr '\n' ' '; }
+claim_list=$(grep -m1 -E '^[[:space:]]+claude\|codex\|grok\|devin\) ;;' "$GIBSON/scripts/claim.sh" \
+  | sed 's/^[[:space:]]*//; s/) ;;.*//' | tr '|' '\n' | sort | tr '\n' ' ')
+if [[ -n "$mjs_list" ]]; then ok "pr-review-evidence.mjs still exports AUTHOR_COMMIT_VENDORS ($mjs_list)"
+else bad "could not read AUTHOR_COMMIT_VENDORS from pr-review-evidence.mjs"; fi
+for f in "$PREPARE" "$COMMIT_MSG" "$SETUP"; do
+  if [[ "$(list_of "$f")" == "$mjs_list" ]]; then ok "$(basename "$f") vendor list matches the evaluator"
+  else bad "$(basename "$f") vendor list '$(list_of "$f")' != evaluator '$mjs_list'"; fi
+done
+if [[ "$claim_list" == "$mjs_list" ]]; then ok "claim.sh vendor list matches the evaluator"
+else bad "claim.sh vendor list '$claim_list' != evaluator '$mjs_list'"; fi
+
+echo "no declared vendor: hooks leave an ordinary checkout alone"
+msg="$ROOT/msg-nolane"
+printf 'subject\n\nbody\n' > "$msg"
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$PREPARE" "$msg") && ! grep -qi '^Agent-Vendor:' "$msg"; then
+  ok "prepare-commit-msg adds no Agent-Vendor when nothing declares a vendor"
+else
+  bad "prepare-commit-msg touched an undeclared checkout: $(cat "$msg")"
+fi
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$msg"); then
+  ok "commit-msg does not require Agent-Vendor when nothing declares a vendor"
+else
+  bad "commit-msg required Agent-Vendor on an undeclared checkout"
+fi
+printf 'subject\n\nAgent-Vendor: bogus\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-bogus"
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-bogus") 2>"$ROOT/bogus.err"; then
+  bad "commit-msg accepted Agent-Vendor: bogus"
+else
+  if grep -q "unknown vendor 'bogus'" "$ROOT/bogus.err"; then ok "commit-msg refuses an unknown vendor even on an undeclared checkout"
+  else bad "commit-msg refusal of a bogus vendor was unclear: $(cat "$ROOT/bogus.err")"; fi
+fi
+
+printf 'subject\n\nAgent-Vendor: claude extra\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-malformed"
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-malformed") 2>"$ROOT/malformed.err"; then
+  bad "commit-msg accepted 'Agent-Vendor: claude extra' on an undeclared checkout"
+else
+  if grep -q 'malformed Agent-Vendor line' "$ROOT/malformed.err"; then ok "a malformed Agent-Vendor line is refused even on an undeclared checkout (Codex #523 finding 1)"
+  else bad "malformed-line refusal unclear: $(cat "$ROOT/malformed.err")"; fi
+fi
+printf 'subject\n\nAgent-Vendor:\013claude\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-vtab"
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-vtab") 2>/dev/null; then
+  bad "commit-msg accepted 'Agent-Vendor:<VT>claude', which the evaluator's [ \\t] matcher would not resolve"
+else
+  ok "a vertical-tab separator is refused: only space/tab count, as in pr-review-evidence.mjs (Codex round 2)"
+fi
+printf 'subject\n\nAgent-Vendor:\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-empty"
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-empty") 2>/dev/null; then
+  bad "commit-msg accepted an empty Agent-Vendor line"
+else
+  ok "an empty Agent-Vendor line is refused"
+fi
+
+echo "setup-hooks.sh --vendor declares the worktree and validates the name"
+if (cd "$REPO" && "$SETUP" --vendor bogus) >/dev/null 2>"$ROOT/vbogus.err"; then
+  bad "--vendor bogus must not succeed"
+else
+  vb_rc=$?
+  if [[ "$vb_rc" -eq 2 ]] && grep -q 'unknown agent vendor' "$ROOT/vbogus.err"; then ok "--vendor bogus exits 2 and names the valid set"
+  else bad "--vendor bogus exited $vb_rc: $(cat "$ROOT/vbogus.err")"; fi
+fi
+set +e
+(cd "$REPO" && "$SETUP" --vendor) >/dev/null 2>"$ROOT/vnone.err"
+vnone_rc=$?
+set -e
+if [[ "$vnone_rc" -eq 2 ]]; then ok "--vendor without a value exits 2"; else bad "--vendor without a value exited $vnone_rc"; fi
+set +e
+(cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$SETUP" --vendor=) >/dev/null 2>"$ROOT/veq.err"
+veq_rc=$?
+set -e
+if [[ "$veq_rc" -eq 2 ]] && grep -q 'empty vendor' "$ROOT/veq.err"; then ok "--vendor= (empty value) exits 2 instead of silently declaring nothing (Codex round 3)"
+else bad "--vendor= exited $veq_rc: $(cat "$ROOT/veq.err")"; fi
+if ! git -C "$REPO" config --worktree --get gibson.agentVendor >/dev/null 2>&1; then ok "--vendor= left no declaration behind"
+else bad "--vendor= declared '$(git -C "$REPO" config --worktree --get gibson.agentVendor)'"; fi
+if (cd "$REPO" && "$SETUP" --vendor Claude) >"$ROOT/vok.out" 2>"$ROOT/vok.err"; then
+  ok "--vendor Claude succeeds"
+else
+  bad "--vendor Claude failed: $(cat "$ROOT/vok.err")"
+fi
+declared=$(git -C "$REPO" config --worktree --get gibson.agentVendor 2>/dev/null || true)
+if [[ "$declared" == "claude" ]]; then ok "declaration is worktree-scoped and lower-cased (gibson.agentVendor=claude)"
+else bad "gibson.agentVendor was '${declared:-<unset>}' (want claude, worktree scope)"; fi
+if ! git -C "$REPO" config --local --get gibson.agentVendor >/dev/null 2>&1; then
+  ok "nothing was written to the shared (--local) config"
+else
+  bad "gibson.agentVendor leaked into the shared config"
+fi
+if grep -q "commits as vendor 'claude'" "$ROOT/vok.out"; then ok "--vendor reports the declaration"
+else bad "--vendor was silent about the declaration: $(cat "$ROOT/vok.out")"; fi
+
+echo "prepare-commit-msg adds the lane's Agent-Vendor (and still signs off)"
+msg="$ROOT/msg-lane-add"
+printf 'subject\n\nbody\n' > "$msg"
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$PREPARE" "$msg"); then
+  ok "prepare-commit-msg exits 0 on a declared lane"
+else
+  bad "prepare-commit-msg failed on a declared lane"
+fi
+if grep -qx 'Agent-Vendor: claude' "$msg"; then ok "appended Agent-Vendor: claude"
+else bad "no Agent-Vendor appended: $(cat "$msg")"; fi
+if grep -qiE '^Signed-off-by:[[:space:]]+' "$msg"; then ok "Signed-off-by still added alongside"
+else bad "Signed-off-by missing on a lane commit: $(cat "$msg")"; fi
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$PREPARE" "$msg") && [[ "$(grep -ci '^Agent-Vendor:' "$msg")" == "1" ]]; then
+  ok "a second run does not duplicate the trailer"
+else
+  bad "trailer duplicated on re-run: $(cat "$msg")"
+fi
+
+echo "prepare-commit-msg leaves claim.sh's reservation shape alone (trailer in its own paragraph)"
+msg="$ROOT/msg-reserve"
+printf 'chore: reserve issue #1 for issue-1-x\n\nAgent-Vendor: claude\n\nGibson-Reservation: v1\nGibson-Claim-ID: issue-1-x\nGibson-Issue: #1\nGibson-Branch: feat/1-x\nSigned-off-by: gibson-sensor <%s>\n' "$LANE_EMAIL" > "$msg"
+before=$(cat "$msg")
+(cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$PREPARE" "$msg")
+if [[ "$(cat "$msg")" == "$before" ]]; then ok "reservation message is byte-identical (no second Agent-Vendor in the Gibson block)"
+else bad "reservation message was rewritten: $(cat "$msg")"; fi
+if (cd "$REPO" && lane_env env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$msg"); then ok "commit-msg accepts the reservation shape"
+else bad "commit-msg rejected claim.sh's reservation shape"; fi
+
+echo "commit-msg refuses what review-evidence would refuse later, on the declared lane"
+printf 'subject\n\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-missing"
+if (cd "$REPO" && lane_env env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-missing") 2>"$ROOT/missing.err"; then
+  bad "commit-msg accepted a lane commit with no Agent-Vendor"
+else
+  if grep -q 'no Agent-Vendor trailer' "$ROOT/missing.err" && grep -q 'setup-hooks.sh --vendor claude' "$ROOT/missing.err"; then
+    ok "missing trailer: refused, names the fix (#506 class)"
+  else bad "missing-trailer refusal unclear: $(cat "$ROOT/missing.err")"; fi
+fi
+printf 'subject\n\nAgent-Vendor: grok\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-mismatch"
+if (cd "$REPO" && lane_env env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-mismatch") 2>"$ROOT/mismatch.err"; then
+  bad "commit-msg accepted a trailer that disagrees with the lane"
+else
+  if grep -q "says 'grok' but this lane is declared as 'claude'" "$ROOT/mismatch.err"; then ok "mismatched trailer: refused"
+  else bad "mismatch refusal unclear: $(cat "$ROOT/mismatch.err")"; fi
+fi
+printf 'subject\n\nAgent-Vendor: claude\nAgent-Vendor: codex\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-two"
+if (cd "$REPO" && lane_env env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-two") 2>"$ROOT/two.err"; then
+  bad "commit-msg accepted two vendors on one commit"
+else
+  if grep -q 'more than one vendor' "$ROOT/two.err"; then ok "two vendors on one commit: refused"
+  else bad "two-vendor refusal unclear: $(cat "$ROOT/two.err")"; fi
+fi
+printf 'subject\n\nAgent-Vendor: claude\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-good"
+if (cd "$REPO" && GIBSON_AGENT_VENDOR=grok lane_env "$COMMIT_MSG" "$ROOT/msg-good") 2>"$ROOT/envmis.err"; then
+  bad "commit-msg guessed between GIBSON_AGENT_VENDOR=grok and the lane's claude"
+else
+  if grep -q "GIBSON_AGENT_VENDOR='grok'" "$ROOT/envmis.err"; then ok "environment vendor disagreeing with the lane: refused, never guessed"
+  else bad "env-mismatch refusal unclear: $(cat "$ROOT/envmis.err")"; fi
+fi
+printf 'subject\n\nbody\n' > "$ROOT/msg-envmis-prep"
+if (cd "$REPO" && GIBSON_AGENT_VENDOR=grok "$PREPARE" "$ROOT/msg-envmis-prep") 2>/dev/null; then
+  bad "prepare-commit-msg guessed between GIBSON_AGENT_VENDOR=grok and the lane's claude"
+else
+  ok "prepare-commit-msg refuses the same disagreement"
+fi
+# The hermetic default identity is sensor@gibson.invalid — exactly the #503/#504 class.
+if (cd "$REPO" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-good") 2>"$ROOT/invalid.err"; then
+  bad "commit-msg accepted a .invalid committer on a declared lane"
+else
+  if grep -q 'reserved .invalid domain' "$ROOT/invalid.err" && grep -q 'no-login' "$ROOT/invalid.err"; then
+    ok ".invalid author/committer email: refused, names no-login (#503/#504 class)"
+  else bad ".invalid refusal unclear: $(cat "$ROOT/invalid.err")"; fi
+fi
+if (cd "$REPO" && lane_env env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-good"); then
+  ok "matching trailer + resolvable identity: accepted"
+else
+  bad "commit-msg rejected a correct lane commit"
+fi
+
+echo "declaration is read from worktree scope only; a global/local value is not a lane (Codex round 4)"
+GSCOPE="$ROOT/gscope"
+mkdir -p "$GSCOPE"
+$GIT init -q "$GSCOPE"
+git -C "$GSCOPE" config user.name gibson-sensor
+git -C "$GSCOPE" config user.email "$LANE_EMAIL"
+git -C "$GSCOPE" config --local gibson.agentVendor grok
+msg="$ROOT/msg-gscope"
+printf 'subject\n\nbody\n' > "$msg"
+(cd "$GSCOPE" && env -u GIBSON_AGENT_VENDOR "$PREPARE" "$msg")
+if ! grep -qi '^Agent-Vendor:' "$msg"; then ok "a --local gibson.agentVendor does not stamp a trailer"
+else bad "a --local gibson.agentVendor was treated as a lane: $(cat "$msg")"; fi
+if (cd "$GSCOPE" && env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-missing"); then ok "a --local gibson.agentVendor does not require a trailer"
+else bad "a --local gibson.agentVendor made commit-msg demand a trailer"; fi
+printf 'subject\n\nAgent-Vendor: claude\nSigned-off-by: A <a@example.test>\n' > "$ROOT/msg-bareinvalid"
+if (cd "$REPO" && GIT_AUTHOR_EMAIL=codex@invalid GIT_COMMITTER_EMAIL=codex@invalid env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-bareinvalid") 2>/dev/null; then
+  bad "commit-msg accepted the bare codex@invalid identity on a declared lane"
+else
+  ok "the bare @invalid form is refused like .invalid (Codex round 4)"
+fi
+
+echo "extension spelled 'on' still activates the declaration; a global-only extension does not (Codex round 5)"
+ONREPO="$ROOT/onrepo"
+mkdir -p "$ONREPO"
+$GIT init -q "$ONREPO"
+git -C "$ONREPO" config user.name gibson-sensor
+git -C "$ONREPO" config user.email "$LANE_EMAIL"
+git -C "$ONREPO" config extensions.worktreeConfig on
+git -C "$ONREPO" config --worktree gibson.agentVendor codex
+msg="$ROOT/msg-on"
+printf 'subject\n\nbody\n' > "$msg"
+(cd "$ONREPO" && env -u GIBSON_AGENT_VENDOR "$PREPARE" "$msg")
+if grep -qx 'Agent-Vendor: codex' "$msg"; then ok "extensions.worktreeConfig=on counts as true: trailer stamped"
+else bad "extensions.worktreeConfig=on was ignored: $(cat "$msg")"; fi
+if (cd "$ONREPO" && lane_env env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-missing") 2>/dev/null; then
+  bad "extensions.worktreeConfig=on: commit-msg did not require the trailer"
+else
+  ok "extensions.worktreeConfig=on: commit-msg requires the trailer"
+fi
+GLOBALREPO="$ROOT/globalrepo"
+mkdir -p "$GLOBALREPO"
+$GIT init -q "$GLOBALREPO"
+git -C "$GLOBALREPO" config user.name gibson-sensor
+git -C "$GLOBALREPO" config user.email "$LANE_EMAIL"
+git -C "$GLOBALREPO" config --local gibson.agentVendor grok
+printf '[extensions]\n\tworktreeConfig = true\n' > "$ROOT/global-gitconfig"
+msg="$ROOT/msg-global"
+printf 'subject\n\nbody\n' > "$msg"
+(cd "$GLOBALREPO" && GIT_CONFIG_GLOBAL="$ROOT/global-gitconfig" env -u GIBSON_AGENT_VENDOR "$PREPARE" "$msg")
+if ! grep -qi '^Agent-Vendor:' "$msg"; then ok "a global-only extensions.worktreeConfig does not activate a --local declaration"
+else bad "global-only extension + --local value was treated as a lane: $(cat "$msg")"; fi
+if (cd "$GLOBALREPO" && GIT_CONFIG_GLOBAL="$ROOT/global-gitconfig" lane_env env -u GIBSON_AGENT_VENDOR "$COMMIT_MSG" "$ROOT/msg-missing"); then
+  ok "global-only extension: commit-msg requires nothing"
+else
+  bad "global-only extension made commit-msg demand a trailer"
+fi
+
+echo "end to end: a plain git commit on a declared lane carries the trailer; the main worktree does not"
+E2E="$ROOT/e2e"
+mkdir -p "$E2E"
+$GIT init -q "$E2E"
+git -C "$E2E" config user.name gibson-sensor
+git -C "$E2E" config user.email "$LANE_EMAIL"
+mkdir -p "$E2E/.githooks"
+cp "$PREPARE" "$COMMIT_MSG" "$E2E/.githooks/"
+(cd "$E2E" && "$SETUP") >/dev/null 2>&1
+# The hooks must be IN the commit the lane checks out: core.hooksPath=.githooks
+# is relative to each worktree, and git silently runs nothing when it is absent.
+(cd "$E2E" && git add .githooks && lane_env $GIT_LANE commit -q -m init) >/dev/null 2>&1
+git -C "$E2E" worktree add -q "$ROOT/e2e-lane" -b lane/1 HEAD 2>/dev/null
+(cd "$ROOT/e2e-lane" && "$SETUP" --vendor codex) >/dev/null 2>&1
+if (cd "$ROOT/e2e-lane" && lane_env env -u GIBSON_AGENT_VENDOR $GIT_LANE commit -q --allow-empty -m "lane work") 2>"$ROOT/e2e.err"; then
+  ok "git commit on the declared lane succeeds"
+else
+  bad "git commit on the declared lane failed: $(cat "$ROOT/e2e.err")"
+fi
+lane_msg=$(git -C "$ROOT/e2e-lane" log -1 --format=%B)
+if grep -qx 'Agent-Vendor: codex' <<<"$lane_msg"; then ok "lane commit carries Agent-Vendor: codex"
+else bad "lane commit lacks the trailer: $lane_msg"; fi
+if grep -qiE '^Signed-off-by:[[:space:]]+' <<<"$lane_msg"; then ok "lane commit is also signed off"
+else bad "lane commit is unsigned: $lane_msg"; fi
+if (cd "$ROOT/e2e-lane" && GIT_AUTHOR_EMAIL=codex@openai.invalid GIT_COMMITTER_EMAIL=codex@openai.invalid env -u GIBSON_AGENT_VENDOR $GIT_LANE commit -q --allow-empty -m "as codex@openai.invalid") 2>/dev/null; then
+  bad "git commit as codex@openai.invalid was accepted on the lane"
+else
+  ok "git commit as codex@openai.invalid is refused on the lane (the #503/#504 commit would have stopped here)"
+fi
+if ! git -C "$E2E" config --get gibson.agentVendor >/dev/null 2>&1; then ok "main worktree is still undeclared"
+else bad "lane declaration leaked into the main worktree: $(git -C "$E2E" config --get gibson.agentVendor)"; fi
+(cd "$E2E" && lane_env env -u GIBSON_AGENT_VENDOR $GIT_LANE commit -q --allow-empty -m "main work") >/dev/null 2>&1
+main_msg=$(git -C "$E2E" log -1 --format=%B)
+if ! grep -qi '^Agent-Vendor:' <<<"$main_msg"; then ok "main worktree commit carries no Agent-Vendor (owner checkout unchanged)"
+else bad "main worktree commit gained a trailer: $main_msg"; fi
+if (cd "$E2E" && GIT_AUTHOR_EMAIL=sensor@gibson.invalid GIT_COMMITTER_EMAIL=sensor@gibson.invalid env -u GIBSON_AGENT_VENDOR $GIT_LANE commit -q --allow-empty -m "main .invalid") 2>/dev/null; then
+  ok "main worktree still accepts any identity (the .invalid rule applies to declared lanes only)"
+else
+  bad "main worktree refused a commit on identity grounds"
+fi
+
 echo
 echo "setup-hooks.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

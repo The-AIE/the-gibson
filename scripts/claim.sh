@@ -222,11 +222,99 @@ die() { echo "claim.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "claim.sh: $*" >&2; }
 
 # #467: refuse before any inventory read or mutation when the vendor is unknown.
+# Same list as .githooks/{prepare-commit-msg,commit-msg} and setup-hooks.sh
+# (AUTHOR_COMMIT_VENDORS in pr-review-evidence.mjs); setup-hooks.test.sh
+# fails when they drift.
 case "$VENDOR" in
   claude|codex|grok|devin) ;;
   "") die "no agent vendor: pass --vendor=<claude|codex|grok|devin> or set GIBSON_AGENT_VENDOR (an unvendored reservation commit blocks review-evidence, #467)" ;;
   *) die "unknown agent vendor '$VENDOR': use one of claude, codex, grok, devin (#467)" ;;
 esac
+
+# Declare VENDOR on worktree WT so the repo hooks stamp and check the
+# Agent-Vendor trailer on every commit made there. Worktree-scoped config only
+# (`git config --worktree`, which needs extensions.worktreeConfig; enabling that
+# is a one-time, inert change to the shared config that git documents as safe
+# unless core.worktree is set or core.bare is true — both refused here rather
+# than moved behind the owner's back). core.hooksPath is set for THIS worktree
+# only when nothing already wires hooks, never in the shared config: the
+# canonical checkout keeps whatever the owner chose. Every write is read back;
+# a declaration that cannot be proven is a refusal, not a warning.
+lane_vendor_declare() { # wt-dir vendor
+  local wt="$1" vendor="$2" ext got hooks hooks_dir probe other err
+  ext=$(git -C "$wt" config --bool --local --get extensions.worktreeConfig 2>/dev/null || true)
+  if [[ "$ext" != "true" ]]; then
+    if git -C "$wt" config --get core.worktree >/dev/null 2>&1; then
+      die "cannot declare the lane vendor: extensions.worktreeConfig is off and core.worktree is set in the shared config — move core.worktree to the main worktree's config.worktree (git-config(1), extensions.worktreeConfig) and re-run"
+    fi
+    if [[ "$(git -C "$wt" config --get core.bare 2>/dev/null || true)" == "true" ]]; then
+      die "cannot declare the lane vendor: extensions.worktreeConfig is off and core.bare is true in the shared config — refusing to enable the extension on a bare-marked repository"
+    fi
+    git -C "$wt" config extensions.worktreeConfig true ||
+      die "cannot enable extensions.worktreeConfig — refusing to continue without a worktree-scoped vendor declaration"
+  fi
+  git -C "$wt" config --worktree gibson.agentVendor "$vendor" ||
+    die "cannot write gibson.agentVendor=$vendor on $wt — refusing to continue with an undeclared lane"
+  got=$(git -C "$wt" config --worktree --get gibson.agentVendor 2>/dev/null || true)
+  [[ "$got" == "$vendor" ]] ||
+    die "lane vendor read-back mismatch on $wt: wrote '$vendor', read '${got:-<unset>}' — refusing to continue with an unproven declaration"
+  hooks=$(git -C "$wt" config --get core.hooksPath 2>/dev/null || true)
+  if [[ -z "$hooks" ]]; then
+    if [[ -d "$wt/.githooks" ]]; then
+      git -C "$wt" config --worktree core.hooksPath .githooks ||
+        die "cannot wire .githooks for $wt — refusing to leave a lane whose commits are not checked for Agent-Vendor"
+      hooks=.githooks
+    else
+      # No hooks anywhere: the repository has not adopted the Gibson hooks, so
+      # nothing (DCO included) is enforced at commit time here. A loud gap, not
+      # a refusal: refusing the claim would block every adopter until the hooks
+      # are copied in, and the reservation below still carries the trailer.
+      info "WARNING: ENFORCEMENT GAP — no core.hooksPath and no .githooks/ in this repository: later commits on $wt are NOT checked for an Agent-Vendor trailer (only the reservation carries one); copy the Gibson .githooks/ into the repository and re-run to close this"
+      info "lane vendor declared: gibson.agentVendor=$vendor on $wt (hooks: none)"
+      return 0
+    fi
+  fi
+  # A hooks path that is configured but does not hold the Gibson hooks
+  # (core.hooksPath=/dev/null, a stale directory, a non-executable file) is a
+  # silent bypass: the lane would look declared and every commit would go out
+  # unchecked. Refuse it (Codex review of #523, finding 2).
+  case "$hooks" in
+    /*) hooks_dir="$hooks" ;;
+    *)  hooks_dir="$wt/$hooks" ;;
+  esac
+  [[ -d "$hooks_dir" ]] ||
+    die "core.hooksPath=$hooks does not resolve to a directory ($hooks_dir) — refusing to declare a lane whose commits would never be checked; point core.hooksPath at the Gibson .githooks/ and re-run"
+  chmod +x "$hooks_dir"/prepare-commit-msg "$hooks_dir"/commit-msg 2>/dev/null || true
+  [[ -x "$hooks_dir/prepare-commit-msg" && -x "$hooks_dir/commit-msg" ]] ||
+    die "core.hooksPath=$hooks lacks an executable prepare-commit-msg and commit-msg ($hooks_dir) — refusing to declare a lane whose commits would never be checked; install the Gibson .githooks/ there and re-run"
+  # Prove the declaration is effective: the real prepare-commit-msg, run the way
+  # git runs it (cwd = the worktree), must stamp this lane's vendor on a probe.
+  probe=$(mktemp "${TMPDIR:-/tmp}/gibson-lane-probe.XXXXXX") ||
+    die "cannot create a probe message file — refusing to declare a lane without proving the hooks work"
+  printf 'probe: lane declaration\n\nnot a commit\n' > "$probe"
+  if ! (cd "$wt" && env -u GIBSON_AGENT_VENDOR "$hooks_dir/prepare-commit-msg" "$probe") >/dev/null 2>&1 ||
+     ! grep -qx "Agent-Vendor: $vendor" "$probe"; then
+    rm -f "$probe"
+    die "the hooks at core.hooksPath=$hooks did not stamp 'Agent-Vendor: $vendor' on a probe message — they are not the Gibson hooks, or the declaration is not visible to them; refusing to continue"
+  fi
+  # And the reject half must reject: the same probe with the WRONG vendor must
+  # fail commit-msg, and the stamped one must pass it (Codex round 2: a genuine
+  # prepare hook beside a no-op commit-msg would otherwise pass as declared).
+  other=claude; [[ "$vendor" == "claude" ]] && other=codex
+  printf 'probe: lane declaration\n\nAgent-Vendor: %s\nSigned-off-by: probe <probe@gibson.test>\n' "$other" > "$probe.bad"
+  if (cd "$wt" && env -u GIBSON_AGENT_VENDOR "$hooks_dir/commit-msg" "$probe.bad") >/dev/null 2>&1; then
+    rm -f "$probe" "$probe.bad"
+    die "the commit-msg hook at core.hooksPath=$hooks accepted a probe trailered 'Agent-Vendor: $other' on a '$vendor' lane — it is not the Gibson reject hook; refusing to continue"
+  fi
+  rm -f "$probe.bad"
+  if ! (cd "$wt" && env -u GIBSON_AGENT_VENDOR "$hooks_dir/commit-msg" "$probe") >"$probe.err" 2>&1; then
+    err=$(cat "$probe.err" 2>/dev/null || true)
+    rm -f "$probe" "$probe.err"
+    die "the commit-msg hook at core.hooksPath=$hooks refused this lane's own stamped probe — fix what it names before claiming: ${err}"
+  fi
+  rm -f "$probe" "$probe.err"
+  info "lane vendor declared: gibson.agentVendor=$vendor on $wt (hooks: $hooks, both probes passed)"
+}
 
 # --- local scope-token grammar (#331) ---------------------------------------
 # Cheap, no inventory, no network. A glob like `*.test.sh` must refuse here
@@ -1083,6 +1171,18 @@ CLAIM_EXPECTED_OID=$(git rev-parse --verify --quiet "$DEFAULT_REMOTE_BRANCH^{com
 info "creating worktree $WT_DIR branch $BRANCH"
 git worktree add "$WT_DIR" -b "$BRANCH" "$DEFAULT_REMOTE_BRANCH"
 WORKTREE_CREATED=1
+
+# Declare the lane's vendor ON THE WORKTREE, before its first commit, so every
+# commit made here — not only the reservation below — carries the Agent-Vendor
+# trailer (.githooks/prepare-commit-msg adds it, .githooks/commit-msg refuses a
+# commit without it, with another vendor's, or under a `.invalid` identity).
+# The 2026-10-21 closures all failed review-evidence on later, hand-made
+# commits the reservation's trailer did not cover: #506 had none, #503/#504
+# had it but were authored as codex@openai.invalid (GitHub: no login, so the
+# trailer was never read). Everything written here is worktree-scoped
+# (`git config --worktree`): the canonical checkout and sibling lanes are not
+# touched, and the settings vanish with the worktree on rollback or release.
+lane_vendor_declare "$WT_DIR" "$VENDOR"
 
 # Pin the original branch point before the empty reservation commit. The v2
 # PR body and v1 trailers bind this exact SHA; re-reading the ref later would

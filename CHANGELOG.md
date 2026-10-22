@@ -10,6 +10,31 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### Lane commits carry `Agent-Vendor:` at commit time (the 2026-10-21 closures)
+
+- **What changed:** `scripts/claim.sh` now declares the claim's vendor on the worktree it
+  creates (`git config --worktree gibson.agentVendor`) and wires the repo hooks for that
+  worktree only. `.githooks/prepare-commit-msg` appends `Agent-Vendor: <vendor>` to every
+  commit made on a declared lane; `.githooks/commit-msg` refuses a lane commit with no
+  trailer, another vendor's trailer, a vendor `review-evidence` does not resolve, a
+  `GIBSON_AGENT_VENDOR` that disagrees with the lane, or an author/committer email in the
+  reserved `.invalid` domain. `scripts/setup-hooks.sh --vendor NAME` declares a lane made
+  by hand. Sensors: `scripts/tests/setup-hooks.test.sh`, `scripts/tests/claim.test.sh`.
+- **Why:** three lane PRs were closed on 2026-10-21 with `identity-unresolved` at review
+  time — #506 (owner-identity commits, no trailer) and #503/#504 (trailer present, but
+  authored as `codex@openai.invalid`, which GitHub maps to no login, so the trailer was
+  never consulted). The reservation commit carried the trailer since #467; the real work
+  after it did not. Review time was the last place to learn this; commit time is the first.
+- **Migration note for forks:** nothing to do for an ordinary clone — an undeclared
+  checkout is unchanged (the owner's commits need no trailer). Lanes created by
+  `claim.sh` after this change are declared automatically; for an existing lane run
+  `scripts/setup-hooks.sh --vendor <claude|codex|grok|devin>` inside it. `claim.sh`
+  enables `extensions.worktreeConfig` once if it is off (refused, not forced, when
+  `core.worktree` is set or `core.bare` is true). `git worktree add` copies the current
+  worktree's `config.worktree`, so a lane cut by hand from a declared worktree inherits
+  the declaration until re-declared. A lane whose git identity is a `.invalid` address
+  cannot commit at all until `user.email` is an address GitHub resolves.
+
 ### New brand: ring logo and tagline (#406)
 
 - **New mark:** a G made of two rings around an amber core. The outer ring is the

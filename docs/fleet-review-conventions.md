@@ -101,6 +101,23 @@ sees what it is signing. Agent commits name their vendor: lane-bot identity, or 
 owner identity with an `Agent-Vendor:` trailer (a branch-update merge commit needs the
 trailer too). The 2026-10-05 carve-out model (D-013) is superseded.
 
+**The trailer is stamped at commit time, not remembered (2026-10-21).** Three lane PRs were
+closed that day with `identity-unresolved`: #506 had owner-identity commits with no trailer
+(`owner-unvendored`), and #503/#504 carried the trailer but were authored as
+`codex@openai.invalid`, an address GitHub maps to no login, so the trailer was never read
+(`no-login`). The reservation commit from `claim.sh` had carried the trailer since #467; the
+hand-made commits after it did not. So a lane now declares its vendor on the worktree itself
+(`git config --worktree gibson.agentVendor <claude|codex|grok|devin>`, written by `claim.sh`
+for the lanes it creates and by `scripts/setup-hooks.sh --vendor` for a lane made by hand), and
+the repo hooks do the rest: `.githooks/prepare-commit-msg` appends `Agent-Vendor:` from the
+declaration, `.githooks/commit-msg` refuses a lane commit with no trailer, another vendor's
+trailer, a vendor review-evidence does not know, a `GIBSON_AGENT_VENDOR` that disagrees with the
+lane, or an author/committer email in the reserved `.invalid` domain. Nothing is guessed: an
+unknown vendor aborts the commit. The declaration is worktree-scoped and vanishes with the
+worktree; the owner's own checkout, which declares nothing, is unchanged. Note that `git
+worktree add` copies the current worktree's `config.worktree` into the new one, so a lane cut
+by hand from a declared worktree inherits that declaration until re-declared.
+
 **Residual window (documented, not hidden).** The workflow resolves the head via the
 API and falls back to the event's head so `pending` is stamped even when the API call
 fails. Review and comment events carry no head in their payload; if the API is down
