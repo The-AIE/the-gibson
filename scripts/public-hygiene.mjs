@@ -14,9 +14,15 @@
  *   `foo_bar`, `FooBar`, and `foo bar` all normalize to the same token and match
  *   one entry. `--digest` rejects terms longer than MAX_WORDS words.
  *
+ *   What is scanned: the tracked Git blobs (`git ls-files -s` + `git cat-file`),
+ *   not the working tree. A symlink is scanned as the target text Git stores, a
+ *   dangling or non-regular path is not skipped, and nothing depends on the
+ *   checkout. NUL bytes are stripped before scanning, so UTF-16 text is scanned,
+ *   and no file is skipped for its extension.
+ *
  *   Fail closed: the config file itself is scanned (its free-text fields must not
- *   name a protected term), and a tracked text file too large to scan is a
- *   finding, never a silent skip.
+ *   name a protected term), a blob too large to scan is a finding, and a blob Git
+ *   cannot read is a finding. Never a silent skip.
  *
  * WHY
  *   Agents write back into this public repository (lessons, decisions, ADRs,
@@ -39,8 +45,9 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_CONFIG = "config/public-hygiene.v1.json";
 // Oversized tracked text files are not skipped: they fail closed (a term could hide in one).
@@ -48,7 +55,6 @@ const MAX_BYTES = Number(process.env.PUBLIC_HYGIENE_MAX_BYTES) || 16 * 1024 * 10
 // Longest term, in words, the scanner can match. --digest refuses anything longer so a
 // stored hash can never be one the scanner is unable to find.
 export const MAX_WORDS = 6;
-const BINARY_EXT = /\.(png|jpe?g|gif|ico|webp|pdf|woff2?|ttf|otf|zip|gz|mp4|mov)$/i;
 
 function usage() {
   console.log(
@@ -113,29 +119,60 @@ export function loadConfig(path) {
   return cfg;
 }
 
+/** Read Git blobs by sha in one process. Returns Map<sha, Buffer>; a missing blob is absent. */
+export function readBlobs(root, shas) {
+  const map = new Map();
+  if (shas.length === 0) return map;
+  const out = execFileSync("git", ["-C", root, "cat-file", "--batch"], {
+    input: shas.join("\n") + "\n",
+    maxBuffer: 1024 * 1024 * 1024,
+  });
+  let pos = 0;
+  for (const sha of shas) {
+    const nl = out.indexOf(10, pos);
+    if (nl < 0) break;
+    const header = out.toString("utf8", pos, nl).split(" ");
+    pos = nl + 1;
+    if (header[1] === "missing") continue;
+    const size = Number(header[2]);
+    map.set(sha, out.subarray(pos, pos + size));
+    pos += size + 1; // trailing newline after each object
+  }
+  return map;
+}
+
 export function scan(root, cfg) {
   const byDigest = new Map(cfg.denylist.map((e) => [e.digest, e.id]));
   // An entry names a path in plain text, or by the SHA-256 of the path when the
   // path itself contains a protected term and so must not be spelled in this file.
   const allowed = new Set((cfg.allow || []).filter((a) => a.path).map((a) => a.path));
   const allowedDigests = new Set((cfg.allow || []).filter((a) => a.pathDigest).map((a) => a.pathDigest));
-  const files = execFileSync("git", ["-C", root, "ls-files", "-z"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })
+  const listing = execFileSync("git", ["-C", root, "ls-files", "-s", "-z"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 })
     .split("\0")
     .filter(Boolean);
+  // Each record is "<mode> <blob-sha> <stage>\t<path>".
+  const entries = [];
+  for (const rec of listing) {
+    const tab = rec.indexOf("\t");
+    const [mode, sha] = rec.slice(0, tab).split(" ");
+    entries.push({ mode, sha, rel: rec.slice(tab + 1) });
+  }
   const findings = [];
-  for (const rel of files) {
-    if (allowed.has(rel) || allowedDigests.has(digest(rel)) || BINARY_EXT.test(rel)) continue;
-    const abs = join(root, rel);
-    if (!existsSync(abs)) continue;
-    const st = statSync(abs);
-    if (!st.isFile()) continue;
-    if (st.size > MAX_BYTES) {
+  const want = entries.filter((e) => e.mode !== "160000" && !(allowed.has(e.rel) || allowedDigests.has(digest(e.rel))));
+  const blobs = readBlobs(root, [...new Set(want.map((e) => e.sha))]);
+  for (const { sha, rel } of want) {
+    const blob = blobs.get(sha);
+    if (!blob) {
+      findings.push({ path: rel, line: 0, id: "UNSCANNABLE-unreadable" });
+      continue;
+    }
+    if (blob.length > MAX_BYTES) {
       findings.push({ path: rel, line: 0, id: "UNSCANNABLE-too-large" });
       continue;
     }
-    const buf = readFileSync(abs);
-    if (buf.includes(0)) continue; // binary
-    const lines = buf.toString("utf8").split("\n");
+    // UTF-16 text has a NUL between letters; stripping NULs makes it scannable.
+    const text = (blob.includes(0) ? Buffer.from(blob.filter((b) => b !== 0)) : blob).toString("utf8");
+    const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const hit = new Set();
       for (const c of candidates(lines[i])) {
@@ -182,4 +219,14 @@ function main(argv) {
   process.exit(1);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main(process.argv.slice(2));
+// Compare real paths: a spaced or symlinked checkout path must not make main() silently not run.
+function isEntrypoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) main(process.argv.slice(2));

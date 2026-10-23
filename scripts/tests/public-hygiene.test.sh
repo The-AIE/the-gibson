@@ -68,11 +68,51 @@ write_cfg "$ROOT/cfg-noreason.json" '[{"path":"doc.md","reason":""}]'
 node "$PH" --root "$R" --config "$ROOT/cfg-noreason.json" >/dev/null 2>&1; rc=$?
 [[ $rc -eq 2 ]] && ok "allow entry without a reason is a config error (exit 2)" || bad "empty reason rc=$rc (want 2)"
 
-echo "# binary files and untracked files are ignored"
-R="$ROOT/bin"; new_repo "$R"; printf 'ok\n' > "$R/a.txt"; printf 'Zorblax Quux\0\1\2' > "$R/blob.dat"; commit_all "$R"
+echo "# only tracked blobs are scanned: untracked files are ignored"
+R="$ROOT/untracked"; new_repo "$R"; printf 'ok\n' > "$R/a.txt"; commit_all "$R"
 printf 'Zorblax Quux\n' > "$R/untracked.md"
 node "$PH" --root "$R" --config "$ROOT/cfg.json" >/dev/null 2>&1; rc=$?
-[[ $rc -eq 0 ]] && ok "NUL-containing and untracked files are skipped" || bad "binary/untracked rc=$rc"
+[[ $rc -eq 0 ]] && ok "an untracked file is not scanned" || bad "untracked rc=$rc"
+
+echo "# no tracked file is skipped for its bytes or its name"
+R="$ROOT/bytes"; new_repo "$R"
+printf 'Zorblax Quux\0\1\2' > "$R/blob.dat"                       # stray NUL
+printf 'Z\0o\0r\0b\0l\0a\0x\0 \0Q\0u\0u\0x\0\n\0' > "$R/utf16.txt"  # UTF-16LE text
+printf 'x Zorblax Quux x\n' > "$R/image.png"                     # extension used to be skipped
+commit_all "$R"
+out=$(node "$PH" --root "$R" --config "$ROOT/cfg.json" 2>&1); rc=$?
+[[ $rc -eq 1 ]] && ok "tree with hidden-by-bytes terms exits 1" || bad "bytes rc=$rc out=$out"
+grep -q 'blob.dat:1  \[T1\]' <<<"$out" && ok "a stray NUL does not hide a term" || bad "NUL hid a term: $out"
+grep -q 'utf16.txt:1  \[T1\]' <<<"$out" && ok "UTF-16 text is scanned" || bad "UTF-16 hid a term: $out"
+grep -q 'image.png:1  \[T1\]' <<<"$out" && ok "a .png-named file is scanned" || bad "extension hid a term: $out"
+
+echo "# symlinks are scanned as the link text Git stores, dangling or not"
+R="$ROOT/links"; new_repo "$R"
+ln -s "docs/zorblax-quux-notes" "$R/dangling"       # target does not exist
+printf 'plain\n' > "$R/real.txt"; ln -s "real.txt" "$R/ok-link"   # resolvable, innocent
+commit_all "$R"
+out=$(node "$PH" --root "$R" --config "$ROOT/cfg.json" 2>&1); rc=$?
+[[ $rc -eq 1 ]] && grep -q 'dangling:1  \[T1\]' <<<"$out" && ok "a dangling symlink whose target names a protected term is caught" || bad "dangling symlink rc=$rc out=$out"
+grep -q 'ok-link' <<<"$out" && bad "innocent symlink flagged: $out" || ok "an innocent symlink is not flagged"
+R="$ROOT/links2"; new_repo "$R"
+printf 'harmless\n' > "$R/harmless.txt"
+ln -s "harmless.txt" "$R/to-harmless"
+commit_all "$R"
+rm -f "$R/harmless.txt"                              # working tree now has a broken link
+node "$PH" --root "$R" --config "$ROOT/cfg.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 0 ]] && ok "scan reads the index, so a broken working tree changes nothing" || bad "broken-tree rc=$rc"
+
+echo "# a blob missing from the object store is a finding, never a skip"
+R="$ROOT/missing"; new_repo "$R"; printf 'findme-not\n' > "$R/m.txt"; commit_all "$R"
+blob=$(git -C "$R" rev-parse HEAD:m.txt)
+rm -f "$R/.git/objects/${blob:0:2}/${blob:2}"
+out=$(node "$PH" --root "$R" --config "$ROOT/cfg.json" 2>&1); rc=$?
+[[ $rc -ne 0 ]] && ok "an unreadable blob does not pass silently (rc=$rc)" || bad "missing blob passed: $out"
+
+echo "# the entrypoint runs when the script path contains characters a file URL escapes"
+mkdir -p "$ROOT/path with space"; cp "$PH" "$ROOT/path with space/public-hygiene.mjs"
+out=$(node "$ROOT/path with space/public-hygiene.mjs" --digest "plainword" 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == "$D2" ]] && ok "script under a spaced path still executes main" || bad "spaced path rc=$rc out=$out"
 
 echo "# unknown flag exits 2 with the repo-wide message (#192 convention)"
 out=$(node "$PH" --definitely-not-a-flag 2>&1 </dev/null); rc=$?
