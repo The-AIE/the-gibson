@@ -80,7 +80,14 @@ case "$REVIEWER" in
     "${PREPUSH_CLAUDE_BIN:-claude}" -p --permission-mode plan --model sonnet < "$FULL" > "$OUT" 2>&1
     crc=$?
     if [ "$crc" -ne 0 ]; then echo "prepush-review: claude exited $crc — no verdict (NOT a pass)" >&2; echo "VERDICT: NONE"; exit 2; fi
-    V="$(grep -oE 'VERDICT: (PASS|REQUEST_CHANGES)' "$OUT" | tail -1)"
-    echo "${V:-VERDICT: NONE}"; case "$V" in *PASS) exit 0;; *REQUEST_CHANGES) exit 1;; *) exit 2;; esac ;;
+    # The verdict is the LAST non-empty line, exactly; never the last matching substring anywhere in the
+    # output, where a finding that quotes the protocol ("... VERDICT: PASS is the format") after a
+    # REQUEST_CHANGES read as a pass. Anything else is no verdict. Codex read-only review 2026-10-23.
+    V="$(grep -v '^[[:space:]]*$' "$OUT" | tail -1 | sed 's/[[:space:]]*$//; s/^[[:space:]]*//')"
+    case "$V" in
+      "VERDICT: PASS") echo "$V"; exit 0 ;;
+      "VERDICT: REQUEST_CHANGES") echo "$V"; exit 1 ;;
+      *) echo "prepush-review: last line of the review is not a verdict ('$V') — NOT a pass" >&2; echo "VERDICT: NONE"; exit 2 ;;
+    esac ;;
   *) echo "prepush-review: unknown reviewer $REVIEWER" >&2; exit 64 ;;
 esac

@@ -34,6 +34,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$TARGET" in /*) ;; *) TARGET="$PWD/$TARGET" ;; esac
+# Never install a tree onto itself: with --target pointing at this directory (or a link to it) every
+# file is its own source, and `ln -sfn src src` replaces the tracked file with a self-pointing link.
+# Codex read-only review 2026-10-23. Compared physically (pwd -P) so a symlinked path cannot evade it.
+if [ -d "$TARGET" ] && [ "$(cd "$TARGET" && pwd -P)" = "$(cd "$HERE" && pwd -P)" ]; then
+  echo "install.sh: REFUSED — target $TARGET is this directory; nothing changed" >&2; exit 64
+fi
 
 state() { # state <relative path> -> ok | missing | dangling | wrong-target | not-a-link | drift
   local src="$HERE/$1" dst="$TARGET/$1"
@@ -53,6 +59,9 @@ bad=0
 for f in $FILES; do
   src="$HERE/$f"; dst="$TARGET/$f"
   [ -f "$src" ] || { echo "install.sh: FAILED — tracked file missing: $src" >&2; bad=1; continue; }
+  if [ -e "$dst" ] && [ "$src" -ef "$dst" ] && [ ! -L "$dst" ]; then   # same inode by another path: linking would destroy it
+    echo "install.sh: REFUSED — $dst is the tracked file itself; nothing changed" >&2; bad=1; continue
+  fi
   st="$(state "$f")"
   if [ "$MODE" = check ]; then
     printf '%-12s %s\n' "$st" "$dst"; [ "$st" = ok ] || bad=1; continue

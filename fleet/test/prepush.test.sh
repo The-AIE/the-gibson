@@ -159,6 +159,14 @@ printf '#!/bin/sh\necho "VERDICT: PASS"; exit 1\n' > "$TMP/fake-claude"; chmod +
 PREPUSH_CLAUDE_BIN="$TMP/fake-claude" "$FLEET/prepush-review.sh" "$TMP/lane" codex >/dev/null 2>&1; is "claude PASS text + nonzero exit -> 2 (not a pass)" 2 "$?"
 printf '#!/bin/sh\necho "VERDICT: PASS"; exit 0\n' > "$TMP/fake-claude"
 PREPUSH_CLAUDE_BIN="$TMP/fake-claude" "$FLEET/prepush-review.sh" "$TMP/lane" codex >/dev/null 2>&1; is "claude PASS + exit 0 -> 0" 0 "$?"
+# Codex 2026-10-23: the verdict is the last non-empty line exactly, not the last matching substring.
+printf '#!/bin/sh\necho "finding: x"; echo "VERDICT: REQUEST_CHANGES"; echo "(the protocol line would be VERDICT: PASS otherwise)"; exit 0\n' > "$TMP/fake-claude"
+PREPUSH_CLAUDE_BIN="$TMP/fake-claude" "$FLEET/prepush-review.sh" "$TMP/lane" codex >/dev/null 2>&1; is "claude: quoted PASS after a REQUEST_CHANGES is no verdict -> 2" 2 "$?"
+printf '#!/bin/sh\necho "finding: x"; echo "VERDICT: REQUEST_CHANGES"; echo; exit 0\n' > "$TMP/fake-claude"
+PREPUSH_CLAUDE_BIN="$TMP/fake-claude" "$FLEET/prepush-review.sh" "$TMP/lane" codex >/dev/null 2>&1; is "claude: REQUEST_CHANGES as the last non-empty line -> 1" 1 "$?"
+printf '#!/bin/sh\necho "  VERDICT: PASS  "; exit 0\n' > "$TMP/fake-claude"
+PREPUSH_CLAUDE_BIN="$TMP/fake-claude" "$FLEET/prepush-review.sh" "$TMP/lane" codex >/dev/null 2>&1; is "claude: surrounding whitespace on the verdict line is tolerated -> 0" 0 "$?"
+printf '#!/bin/sh\necho "VERDICT: PASS"; exit 0\n' > "$TMP/fake-claude"
 chmod 500 "$TMP/reviews"; PREPUSH_CLAUDE_BIN="$TMP/fake-claude" "$FLEET/prepush-review.sh" "$TMP/lane" codex >/dev/null 2>&1; rc=$?; chmod 700 "$TMP/reviews"
 is "unwritable review dir -> 2 (not a pass)" 2 "$rc"
 export PREPUSH_REVIEW_DRY=1
@@ -169,6 +177,13 @@ unset PREPUSH_REVIEW_DRY PREPUSH_REVIEW_OUTDIR   # artifacts lived under $TMP; n
 echo "== install.sh links the layer into a target dir =="
 T="$TMP/home"
 "$FLEET/install.sh" --bogus >/dev/null 2>&1; is "unknown flag -> 64" 64 "$?"
+# Codex 2026-10-23: a target that IS the source tree would turn every tracked file into a link to itself.
+before="$(ls -l "$FLEET/pre-push-gate.sh")"
+"$FLEET/install.sh" --target "$FLEET" >/dev/null 2>&1; is "--target = the tracked tree itself is refused (64)" 64 "$?"
+ln -s "$FLEET" "$TMP/fleet-alias"
+"$FLEET/install.sh" --target "$TMP/fleet-alias" >/dev/null 2>&1; is "--target = a symlink to the tracked tree is refused (64)" 64 "$?"
+is "tracked file untouched" "$before" "$(ls -l "$FLEET/pre-push-gate.sh")"
+[ -f "$FLEET/pre-push-gate.sh" ] && [ ! -L "$FLEET/pre-push-gate.sh" ] && ok "tracked file is still a plain file" || bad "tracked file is still a plain file" "plain file" "$(ls -l "$FLEET/pre-push-gate.sh")"
 out="$("$FLEET/install.sh" --target "$T" 2>&1)"; rc=$?; is "fresh target -> exit 0" 0 "$rc"; has "reports the link" "$out" "linked"
 is "hook is a symlink to the tracked copy" "$FLEET/hooks/pre-push" "$(readlink "$T/hooks/pre-push")"
 "$FLEET/install.sh" --check --target "$T" >/dev/null 2>&1; is "--check on a correct install -> 0" 0 "$?"
