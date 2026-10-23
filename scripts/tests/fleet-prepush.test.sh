@@ -5,7 +5,7 @@
 #   fleet/ is the tracked home of the per-worktree pre-push layer (FLEET.md "Coder owns the
 #   green loop": refuse main/release targets and force-pushes, require a vendor marker on every
 #   introduced commit, run the repo's local gate). Until 2026-10-23 it lived only under
-#   ~/.claude/fleet on one Mac, so a defect fixed there (L-098) could not be reviewed or
+#   ~/.claude/fleet on one Mac, so a defect fixed there (the 2026-10-23 locale default, the-gibson#531) could not be reviewed or
 #   versioned. Running its suite here keeps the tracked copy green on every PR.
 #
 # HERMETIC
