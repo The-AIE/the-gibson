@@ -4,7 +4,8 @@
 # Why (2026-10-15, Mark): "the coder owns the green loop" (FLEET.md) makes a green LOCAL gate the
 # precondition for the first push. The dispatch template already says so; this makes it a check
 # rather than a sentence, because prose is advisory and gates are law. Installed as the lane's
-# pre-push hook by install-lane-hooks.sh (called from lane-sync.sh).
+# pre-push hook by install-lane-hooks.sh (called from lane-sync.sh). Tracked in The-AIE/the-gibson
+# under fleet/; ~/.claude/fleet holds symlinks to it (fleet/install.sh, fleet/README.md).
 #
 # Resolution order (first match wins):
 #   1. .fleet-gate at the worktree root — one shell command line, repo-owned override. "Repo-owned"
@@ -17,7 +18,10 @@
 # visible in the shell history, a silent env var is not.
 #
 # Usage: pre-push-gate.sh [worktree]      exit 0 green, 1 red, 64 usage
+# Env: FLEET_LOG_DIR  where the gate log goes (default ~/.claude/fleet/logs; created if missing)
 set -uo pipefail
+# Sibling scripts resolve from where THIS file lives, not from the environment (see hooks/pre-push).
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Locale: default one when the caller has none. The Cowork Bash tool shell exports LANG and LC_ALL
 # EMPTY; under that, every conference-os *-postgres.test.ts suite died on 2026-10-23 with
 # "FATAL: postmaster became multithreaded during startup / HINT: Set the LC_ALL environment
@@ -29,7 +33,9 @@ WT="${1:-$PWD}"
 cd "$WT" 2>/dev/null || { echo "pre-push-gate: no such dir $WT" >&2; exit 64; }
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "pre-push-gate: not a git worktree" >&2; exit 64; }
 cd "$ROOT" || exit 64
-LOG="$HOME/.claude/fleet/logs/pre-push-gate-$(date +%Y%m%d-%H%M%S)-$$.log"
+LOGDIR="${FLEET_LOG_DIR:-$HOME/.claude/fleet/logs}"
+mkdir -p "$LOGDIR" 2>/dev/null || { echo "pre-push-gate: cannot create log dir $LOGDIR — FAILING CLOSED" >&2; exit 1; }
+LOG="$LOGDIR/pre-push-gate-$(date +%Y%m%d-%H%M%S)-$$.log"
 ORIGIN="$(git remote get-url origin 2>/dev/null || true)"
 MAIN="origin/main"   # scope boundary for touched-package detection: deliberately NOT overridable
 
@@ -72,7 +78,7 @@ fi
 case "$ORIGIN" in
   *the-gibson*)
     # NEVER run the-gibson's suites inside a lane: they rewrite the shared .git (2026-10-15 incident).
-    run "gibson gate (isolated clone)" "$HOME/.claude/fleet/gibson-isolated-gate.sh" "$ROOT"; exit $? ;;
+    run "gibson gate (isolated clone)" "$HERE/gibson-isolated-gate.sh" "$ROOT"; exit $? ;;
   *conference-os*)
     # vitest capped at 3 workers (spinup rule): unconstrained vitest on a loaded Mac with sibling
     # lanes produces timeout failures in timing-sensitive suites that look exactly like defects.

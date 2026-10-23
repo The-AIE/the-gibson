@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Lane pre-push hook (installed per worktree by install-lane-hooks.sh, 2026-10-15).
+# Tracked in The-AIE/the-gibson under fleet/; the live copy under ~/.claude/fleet is a symlink
+# installed by fleet/install.sh (see fleet/README.md).
 # 1. Refuses any push whose REMOTE ref is main/master/release, and any non-fast-forward push
 #    (a force-push in effect) — the coder's loop is lane-branch only and never rewrites history.
 # 2. Refuses any push that introduces a commit with no vendor marker: author OR committer email must
@@ -11,6 +13,9 @@
 # stdin: "<local ref> <local sha> <remote ref> <remote sha>" per ref being pushed.
 set -uo pipefail
 ZERO="0000000000000000000000000000000000000000"
+# Siblings resolve from where THIS hook lives (~/.claude/fleet via the symlinks, or a checkout's
+# fleet/), never from the environment, so a lane cannot point the gate at a different script.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IDDIR="${FLEET_IDENTITIES_DIR:-$HOME/.claude/fleet/identities}"
 BASE="origin/main"   # provenance boundary: deliberately NOT overridable from the environment
 bot_emails() { sed -n 's/^[[:space:]]*BOT_EMAIL=["'"'"']\{0,1\}\([^"'"'"']*\).*/\1/p' "$IDDIR"/*.env 2>/dev/null; }
@@ -59,4 +64,4 @@ while read -r _lref lsha rref rsha; do
   need_gate=1
 done
 [ $need_gate -eq 1 ] || exit 0
-exec "$HOME/.claude/fleet/pre-push-gate.sh" "$PWD"
+exec "$HERE/pre-push-gate.sh" "$PWD"

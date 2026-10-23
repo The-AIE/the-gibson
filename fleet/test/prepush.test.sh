@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Tests for the 2026-10-15 pre-push layer: install-lane-hooks.sh, hooks/pre-push, pre-push-gate.sh,
-# prepush-review.sh (dry). No network, no gh, no codex, no claude.
-# Run: bash ~/.claude/fleet/test/prepush.test.sh
+# prepush-review.sh (dry). No network, no gh, no codex, no claude. Hermetic: every repo it touches is
+# its own bare origin + clones under mktemp, and every runtime path the layer would otherwise take under
+# ~/.claude/fleet (logs, identities, review output) is pointed at that temp dir.
+# Run: bash fleet/test/prepush.test.sh                      # tests the copy beside this file
+#      FLEET_DIR=~/.claude/fleet bash fleet/test/prepush.test.sh   # tests the installed copy
+# In the-gibson it runs as scripts/tests/fleet-prepush.test.sh (run-all.sh discovers that shim).
 set -uo pipefail
-FLEET="$HOME/.claude/fleet"
+FLEET="$(cd "${FLEET_DIR:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)" || exit 1
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+export FLEET_LOG_DIR="$TMP/logs"   # pre-push-gate.sh logs here instead of ~/.claude/fleet/logs
 pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf '  FAIL %s\n     expected: %s\n     actual:   %s\n' "$1" "$2" "$3"; }
@@ -47,6 +52,7 @@ is "lane not pushed on red" "" "$(git ls-remote origin refs/heads/lane/1)"
 G checkout -q -- package.json
 out="$(G push origin HEAD:lane/1 2>&1 || true)"; has "green gate allows push" "$out" "green"
 has "lane pushed on green" "$(git ls-remote origin refs/heads/lane/1)" "refs/heads/lane/1"
+has "gate log lands under FLEET_LOG_DIR, not ~/.claude/fleet/logs" "$(ls "$TMP/logs" 2>/dev/null)" "pre-push-gate-"
 echo "== hooks/pre-push enforces the vendor marker =="
 echo v > v && G add v && G commit -qm "unmarked"
 out="$(G push origin HEAD:lane/1 2>&1 || true)"; has "unmarked owner-style commit refused" "$out" "no vendor marker"
@@ -150,5 +156,37 @@ export PREPUSH_REVIEW_DRY=1
 p="$(printf '%s' "$out" | sed -n 's/.*content=//p')"; has "diff captured" "$(cat "$p")" "diff --git a/b b/b"
 ( cd "$TMP/lane2" && out="$("$FLEET/prepush-review.sh" "$TMP/lane2" grok 2>&1)"; has "empty diff -> nothing to review" "$out" "nothing to review" )
 unset PREPUSH_REVIEW_DRY PREPUSH_REVIEW_OUTDIR   # artifacts lived under $TMP; nothing in the shared store was touched
+
+echo "== install.sh links the layer into a target dir =="
+T="$TMP/home"
+"$FLEET/install.sh" --bogus >/dev/null 2>&1; is "unknown flag -> 64" 64 "$?"
+out="$("$FLEET/install.sh" --target "$T" 2>&1)"; rc=$?; is "fresh target -> exit 0" 0 "$rc"; has "reports the link" "$out" "linked"
+is "hook is a symlink to the tracked copy" "$FLEET/hooks/pre-push" "$(readlink "$T/hooks/pre-push")"
+"$FLEET/install.sh" --check --target "$T" >/dev/null 2>&1; is "--check on a correct install -> 0" 0 "$?"
+"$FLEET/install.sh" --target "$T" >/dev/null 2>&1; is "re-run is idempotent -> 0" 0 "$?"
+echo "== the installed links work end to end (hook finds its siblings through the link dir) =="
+( cd "$TMP/lane2" && G fetch -q origin && G merge -q origin/main )
+out="$("$T/install-lane-hooks.sh" "$TMP/lane2" 2>&1)"; has "installer via link resolves hooks beside the link" "$out" "hooksPath=$T/hooks"
+is "lane2 hooksPath is the link dir" "$T/hooks" "$(cd "$TMP/lane2" && git config --worktree core.hooksPath)"
+( cd "$TMP/lane2" && echo c > c && G add c && B commit -qm c )
+out="$(cd "$TMP/lane2" && G push origin HEAD:lane/2 2>&1 || true)"; has "push through the linked hook runs the linked gate -> green" "$out" "green"
+has "lane2 pushed" "$(cd "$TMP/lane2" && git ls-remote origin refs/heads/lane/2)" "refs/heads/lane/2"
+out="$(cd "$TMP/lane2" && G push origin HEAD:main 2>&1 || true)"; has "linked hook still refuses main" "$out" "REFUSED"
+echo "== install.sh never overwrites a live file that differs =="
+rm "$T/pre-push-gate.sh"; cp "$FLEET/pre-push-gate.sh" "$T/pre-push-gate.sh"; echo '# local edit' >> "$T/pre-push-gate.sh"
+out="$("$FLEET/install.sh" --check --target "$T" 2>&1)"; rc=$?; is "--check sees drift -> 1" 1 "$rc"; has "names it drift" "$out" "drift"
+out="$("$FLEET/install.sh" --target "$T" 2>&1)"; rc=$?; is "install refuses a drifted live file -> 1" 1 "$rc"; has "says REFUSED" "$out" "REFUSED drift"
+has "drifted file kept" "$(tail -1 "$T/pre-push-gate.sh")" "local edit"
+cp "$FLEET/pre-push-gate.sh" "$T/pre-push-gate.sh"
+out="$("$FLEET/install.sh" --check --target "$T" 2>&1)"; has "--check: identical plain file is not-a-link" "$out" "not-a-link"
+"$FLEET/install.sh" --target "$T" >/dev/null 2>&1; is "identical plain file is replaced by the link -> 0" 0 "$?"
+is "now a link" "$FLEET/pre-push-gate.sh" "$(readlink "$T/pre-push-gate.sh")"
+ln -sfn "$TMP/gone" "$T/install-lane-hooks.sh"
+out="$("$FLEET/install.sh" --check --target "$T" 2>&1)"; rc=$?; is "--check: dangling -> 1" 1 "$rc"; has "names it dangling" "$out" "dangling"
+"$FLEET/install.sh" --target "$T" >/dev/null 2>&1; is "dangling link is replaced -> 0" 0 "$?"
+mkdir -p "$TMP/other-tree"; cp "$FLEET/prepush-review.sh" "$TMP/other-tree/"; ln -sfn "$TMP/other-tree/prepush-review.sh" "$T/prepush-review.sh"
+out="$("$FLEET/install.sh" --target "$T" 2>&1)"; rc=$?; is "link into another tree refused -> 1" 1 "$rc"; has "says wrong-target" "$out" "wrong-target"
+is "foreign link kept" "$TMP/other-tree/prepush-review.sh" "$(readlink "$T/prepush-review.sh")"
+rm "$T/prepush-review.sh"; "$FLEET/install.sh" --check --target "$T" >/dev/null 2>&1; is "--check: missing -> 1" 1 "$?"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"; [ "$fail" -eq 0 ]
