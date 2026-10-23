@@ -212,7 +212,10 @@ else
 fi
 
 # --- evidence template ---
-EVIDENCE_DIR="$GIBSON/memory/dogfood"
+# shellcheck source=lib/private-home.sh
+. "$SCRIPT_DIR/lib/private-home.sh"
+EVIDENCE_HOME=$(gibson_private_home "$GIBSON") || exit 2
+EVIDENCE_DIR="$EVIDENCE_HOME/memory/dogfood"
 if [[ -d "$EVIDENCE_DIR" ]]; then
   ok "evidence dir $EVIDENCE_DIR"
 else

@@ -51,10 +51,13 @@ done
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GIBSON_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
-LEDGER="$GIBSON_ROOT/memory/recipe-runs.md"
+# shellcheck source=lib/private-home.sh
+. "$SCRIPT_DIR/lib/private-home.sh"
+HOME_DIR=$(gibson_private_home "$GIBSON_ROOT") || exit 2
+LEDGER="$HOME_DIR/memory/recipe-runs.md"
 
-if [[ ! -d "$GIBSON_ROOT/memory" ]]; then
-  echo "recipe-stamp.sh: memory/ missing under $GIBSON_ROOT" >&2
+if [[ ! -d "$HOME_DIR/memory" ]]; then
+  echo "recipe-stamp.sh: memory/ missing under $HOME_DIR" >&2
   exit 1
 fi
 

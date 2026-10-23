@@ -2451,6 +2451,8 @@ stamp_root=$(mktemp -d "${TMPDIR:-/tmp}/gibson-recipe-stamp.XXXXXX")
 mkdir -p "$stamp_root/memory" "$stamp_root/scripts" "$stamp_root/playbooks/recipes"
 cp "$STAMP" "$stamp_root/scripts/recipe-stamp.sh"
 chmod +x "$stamp_root/scripts/recipe-stamp.sh"
+mkdir -p "$stamp_root/scripts/lib"
+cp "$REPO_ROOT/scripts/lib/private-home.sh" "$stamp_root/scripts/lib/private-home.sh"
 cp "$BUILDER_RECIPE" "$stamp_root/playbooks/recipes/builder.yaml"
 # Point stamp at temp gibson root by invoking from a fake tree: rewrite GIBSON_ROOT via path
 # recipe-stamp resolves GIBSON_ROOT from script location — so run the copy under stamp_root.
