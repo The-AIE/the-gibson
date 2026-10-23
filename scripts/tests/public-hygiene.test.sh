@@ -78,6 +78,63 @@ echo "# unknown flag exits 2 with the repo-wide message (#192 convention)"
 out=$(node "$PH" --definitely-not-a-flag 2>&1 </dev/null); rc=$?
 [[ $rc -eq 2 && "$out" == *"unknown flag:"* ]] && ok "unknown flag exits 2 with 'unknown flag:'" || bad "unknown flag rc=$rc out=$out"
 
+echo "# terms longer than three words match, and --digest refuses terms the scanner cannot match"
+D5=$(node "$PH" --digest "alpha beta gamma delta epsilon")
+cat > "$ROOT/cfg5.json" <<CFG5
+{"version":1,"algorithm":"sha256","denylist":[{"id":"T5","digest":"$D5"}],"allow":[]}
+CFG5
+R="$ROOT/long"; new_repo "$R"; printf 'see Alpha-Beta_Gamma delta, epsilon here\n' > "$R/n.md"; commit_all "$R"
+out=$(node "$PH" --root "$R" --config "$ROOT/cfg5.json" 2>&1); rc=$?
+[[ $rc -eq 1 ]] && grep -q 'n.md:1  \[T5\]' <<<"$out" && ok "five-word term matched across separators" || bad "five-word term not matched rc=$rc out=$out"
+out=$(node "$PH" --digest "one two three four five six seven" 2>&1); rc=$?
+[[ $rc -eq 2 && "$out" == *"at most"* ]] && ok "--digest rejects a term longer than the scanner can match" || bad "long --digest rc=$rc out=$out"
+node "$PH" --digest "one two three four five six" >/dev/null 2>&1 && ok "--digest accepts the longest matchable term" || bad "six-word --digest refused"
+out=$(node "$PH" --digest "!!!" 2>&1); rc=$?
+[[ $rc -eq 2 ]] && ok "--digest rejects a term with no letters or digits" || bad "empty-term --digest rc=$rc"
+
+echo "# the config file itself is scanned (free-text fields cannot name a protected term)"
+R="$ROOT/selfscan"; new_repo "$R"; mkdir -p "$R/config"
+cat > "$R/config/public-hygiene.v1.json" <<CFGA
+{"\$comment":"notes about zorblax quux","version":1,"algorithm":"sha256","denylist":[{"id":"T1","digest":"$D1"}],"allow":[]}
+CFGA
+commit_all "$R"
+out=$(node "$PH" --root "$R" 2>&1); rc=$?
+[[ $rc -eq 1 ]] && grep -q 'config/public-hygiene.v1.json:1  \[T1\]' <<<"$out" && ok "term in the default config's comment field is caught" || bad "self-scan comment rc=$rc out=$out"
+cat > "$R/config/public-hygiene.v1.json" <<CFGB
+{"version":1,"algorithm":"sha256","denylist":[{"id":"T1","digest":"$D1"}],"allow":[{"path":"x.md","reason":"covers zorblax quux fixture"}]}
+CFGB
+commit_all "$R"
+out=$(node "$PH" --root "$R" 2>&1); rc=$?
+[[ $rc -eq 1 ]] && grep -q 'config/public-hygiene.v1.json:1  \[T1\]' <<<"$out" && ok "term in an allow-list reason is caught" || bad "self-scan reason rc=$rc out=$out"
+
+echo "# oversized tracked text files fail closed instead of being skipped"
+R="$ROOT/big"; new_repo "$R"; head -c 400 /dev/zero | tr '\0' 'a' > "$R/big.txt"; printf '\n' >> "$R/big.txt"; commit_all "$R"
+write_cfg "$ROOT/cfg-big.json" '[]'
+out=$(PUBLIC_HYGIENE_MAX_BYTES=100 node "$PH" --root "$R" --config "$ROOT/cfg-big.json" 2>&1); rc=$?
+[[ $rc -eq 1 && "$out" == *"big.txt:0  [UNSCANNABLE-too-large]"* ]] && ok "file over the limit is a finding (UNSCANNABLE)" || bad "oversized rc=$rc out=$out"
+write_cfg "$ROOT/cfg-big-allow.json" '[{"path":"big.txt","reason":"generated data"}]'
+out=$(PUBLIC_HYGIENE_MAX_BYTES=100 node "$PH" --root "$R" --config "$ROOT/cfg-big-allow.json" 2>&1); rc=$?
+[[ $rc -eq 0 ]] && ok "an oversized file can be allow-listed with a reason" || bad "oversized allow rc=$rc out=$out"
+
+echo "# allow entries can name a path by digest, so the config never spells a protected path"
+R="$ROOT/digestallow"; new_repo "$R"; mkdir -p "$R/sub"; printf 'Zorblax Quux\n' > "$R/sub/secret-name.md"; commit_all "$R"
+PDIG=$(printf '%s' 'sub/secret-name.md' | shasum -a 256 | awk '{print $1}')
+write_cfg "$ROOT/cfg-dig.json" "[{\"pathDigest\":\"$PDIG\",\"reason\":\"fixture\"}]"
+out=$(node "$PH" --root "$R" --config "$ROOT/cfg-dig.json" 2>&1); rc=$?
+[[ $rc -eq 0 ]] && ok "pathDigest entry allow-lists the matching path" || bad "pathDigest allow rc=$rc out=$out"
+write_cfg "$ROOT/cfg-dig-wrong.json" "[{\"pathDigest\":\"$(printf '%s' 'other.md' | shasum -a 256 | awk '{print $1}')\",\"reason\":\"fixture\"}]"
+node "$PH" --root "$R" --config "$ROOT/cfg-dig-wrong.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "a digest for a different path does not allow this one" || bad "wrong digest rc=$rc"
+write_cfg "$ROOT/cfg-dig-both.json" "[{\"path\":\"sub/secret-name.md\",\"pathDigest\":\"$PDIG\",\"reason\":\"fixture\"}]"
+node "$PH" --root "$R" --config "$ROOT/cfg-dig-both.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 2 ]] && ok "an entry with both path and pathDigest is a config error" || bad "both rc=$rc"
+write_cfg "$ROOT/cfg-dig-none.json" '[{"reason":"fixture"}]'
+node "$PH" --root "$R" --config "$ROOT/cfg-dig-none.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 2 ]] && ok "an entry with neither path nor pathDigest is a config error" || bad "neither rc=$rc"
+write_cfg "$ROOT/cfg-dig-bad.json" '[{"pathDigest":"not-a-digest","reason":"fixture"}]'
+node "$PH" --root "$R" --config "$ROOT/cfg-dig-bad.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 2 ]] && ok "a malformed pathDigest is a config error" || bad "bad digest rc=$rc"
+
 echo "# config errors exit 2"
 echo '{"version":2}' > "$ROOT/bad.json"
 node "$PH" --root "$R" --config "$ROOT/bad.json" >/dev/null 2>&1; rc=$?

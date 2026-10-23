@@ -9,10 +9,14 @@
  *   list does not publish the names it protects, and this script never echoes
  *   the matched text.
  *
- *   Normalization: a line is split into alphanumeric words, lowercased. Each
- *   word, each adjacent pair joined, and each adjacent triple joined is hashed.
- *   So `Foo-Bar`, `foo_bar`, `FooBar`, and `foo bar` all normalize to the same
- *   pair token and match one entry.
+ *   Normalization: a line is split into alphanumeric words, lowercased. Every
+ *   run of 1 to MAX_WORDS adjacent words, joined, is hashed. So `Foo-Bar`,
+ *   `foo_bar`, `FooBar`, and `foo bar` all normalize to the same token and match
+ *   one entry. `--digest` rejects terms longer than MAX_WORDS words.
+ *
+ *   Fail closed: the config file itself is scanned (its free-text fields must not
+ *   name a protected term), and a tracked text file too large to scan is a
+ *   finding, never a silent skip.
  *
  * WHY
  *   Agents write back into this public repository (lessons, decisions, ADRs,
@@ -39,7 +43,11 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const DEFAULT_CONFIG = "config/public-hygiene.v1.json";
-const MAX_BYTES = 2 * 1024 * 1024;
+// Oversized tracked text files are not skipped: they fail closed (a term could hide in one).
+const MAX_BYTES = Number(process.env.PUBLIC_HYGIENE_MAX_BYTES) || 16 * 1024 * 1024;
+// Longest term, in words, the scanner can match. --digest refuses anything longer so a
+// stored hash can never be one the scanner is unable to find.
+export const MAX_WORDS = 6;
 const BINARY_EXT = /\.(png|jpe?g|gif|ico|webp|pdf|woff2?|ttf|otf|zip|gz|mp4|mov)$/i;
 
 function usage() {
@@ -64,14 +72,16 @@ export function digest(token) {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-/** Candidate tokens for one line: words, adjacent pairs, adjacent triples. */
+/** Candidate tokens for one line: every run of 1..MAX_WORDS adjacent words, joined. */
 export function candidates(line) {
   const words = line.toLowerCase().match(/[a-z0-9]+/g) || [];
   const out = new Set();
   for (let i = 0; i < words.length; i++) {
-    out.add(words[i]);
-    if (i + 1 < words.length) out.add(words[i] + words[i + 1]);
-    if (i + 2 < words.length) out.add(words[i] + words[i + 1] + words[i + 2]);
+    let joined = "";
+    for (let n = 0; n < MAX_WORDS && i + n < words.length; n++) {
+      joined += words[i + n];
+      out.add(joined);
+    }
   }
   return out;
 }
@@ -94,8 +104,10 @@ export function loadConfig(path) {
   }
   const allow = cfg.allow || [];
   for (const a of allow) {
-    if (!a || typeof a.path !== "string" || typeof a.reason !== "string" || a.reason.trim() === "") {
-      die(`${path}: every allow entry needs a path and a non-empty reason`);
+    const hasPath = a && typeof a.path === "string" && a.path !== "";
+    const hasDigest = a && typeof a.pathDigest === "string" && /^[0-9a-f]{64}$/.test(a.pathDigest);
+    if (!a || hasPath === hasDigest || typeof a.reason !== "string" || a.reason.trim() === "") {
+      die(`${path}: every allow entry needs exactly one of path or pathDigest, and a non-empty reason`);
     }
   }
   return cfg;
@@ -103,18 +115,24 @@ export function loadConfig(path) {
 
 export function scan(root, cfg) {
   const byDigest = new Map(cfg.denylist.map((e) => [e.digest, e.id]));
-  const allowed = new Set((cfg.allow || []).map((a) => a.path));
-  const selfConfig = cfg.__path;
+  // An entry names a path in plain text, or by the SHA-256 of the path when the
+  // path itself contains a protected term and so must not be spelled in this file.
+  const allowed = new Set((cfg.allow || []).filter((a) => a.path).map((a) => a.path));
+  const allowedDigests = new Set((cfg.allow || []).filter((a) => a.pathDigest).map((a) => a.pathDigest));
   const files = execFileSync("git", ["-C", root, "ls-files", "-z"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })
     .split("\0")
     .filter(Boolean);
   const findings = [];
   for (const rel of files) {
-    if (rel === selfConfig || allowed.has(rel) || BINARY_EXT.test(rel)) continue;
+    if (allowed.has(rel) || allowedDigests.has(digest(rel)) || BINARY_EXT.test(rel)) continue;
     const abs = join(root, rel);
     if (!existsSync(abs)) continue;
     const st = statSync(abs);
-    if (!st.isFile() || st.size > MAX_BYTES) continue;
+    if (!st.isFile()) continue;
+    if (st.size > MAX_BYTES) {
+      findings.push({ path: rel, line: 0, id: "UNSCANNABLE-too-large" });
+      continue;
+    }
     const buf = readFileSync(abs);
     if (buf.includes(0)) continue; // binary
     const lines = buf.toString("utf8").split("\n");
@@ -138,6 +156,9 @@ function main(argv) {
     if (a === "--help" || a === "-h") return usage();
     if (a === "--digest") {
       if (i + 1 >= argv.length) die("--digest needs a value");
+      const words = (String(argv[i + 1]).toLowerCase().match(/[a-z0-9]+/g) || []).length;
+      if (words === 0) die("--digest term has no letters or digits");
+      if (words > MAX_WORDS) die(`--digest term has ${words} words; the scanner matches at most ${MAX_WORDS}`);
       console.log(digest(normalizeTerm(argv[i + 1])));
       return;
     }
@@ -147,7 +168,6 @@ function main(argv) {
   }
   const cfgFile = configPath || join(root, DEFAULT_CONFIG);
   const cfg = loadConfig(cfgFile);
-  cfg.__path = configPath ? null : DEFAULT_CONFIG;
   const findings = scan(root, cfg);
   if (findings.length === 0) {
     console.log(`public-hygiene: OK (${cfg.denylist.length} entries, tree clean)`);
@@ -156,6 +176,9 @@ function main(argv) {
   console.error(`public-hygiene: FAIL — ${findings.length} finding(s); matched text is not printed`);
   for (const f of findings) console.error(`  ${f.path}:${f.line}  [${f.id}]`);
   console.error("Remove the private reference, or move the record to the operator's private repo.");
+  if (findings.some((f) => f.id.startsWith("UNSCANNABLE"))) {
+    console.error("UNSCANNABLE: a tracked text file exceeds the scan limit; split it, or allow-list it with a reason.");
+  }
   process.exit(1);
 }
 
