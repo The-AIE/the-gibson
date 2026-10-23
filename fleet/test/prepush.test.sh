@@ -126,6 +126,14 @@ out="$("$FLEET/pre-push-gate.sh" "$TMP/lane" 2>&1)"; rc=$?; is "edited .fleet-ga
 G checkout -q -- .fleet-gate; rm .fleet-gate
 "$FLEET/pre-push-gate.sh" "$TMP/lane" >/dev/null 2>&1; is "deleted .fleet-gate -> exit 1" 1 "$?"
 G checkout -q -- .fleet-gate
+# Codex 2026-10-23: the command is the first non-blank non-comment line; a leading comment must never be
+# what runs (bash -c '# ...' exits 0). Same fixture shape as above, with a command that fails.
+( cd "$TMP/main" && printf '# repo gate\nfalse\n' > .fleet-gate && G add .fleet-gate && G commit -qm gate-red && G push -q origin main )
+G fetch -q origin && G merge -q origin/main
+out="$("$FLEET/pre-push-gate.sh" "$TMP/lane" 2>&1)"; rc=$?; is "comment-first .fleet-gate whose command fails -> exit 1" 1 "$rc"; has "the command ran, not the comment" "$out" ".fleet-gate: RED"
+( cd "$TMP/main" && printf '# repo gate\ntrue\n' > .fleet-gate && G add .fleet-gate && G commit -qm gate-green && G push -q origin main )
+G fetch -q origin && G merge -q origin/main
+"$FLEET/pre-push-gate.sh" "$TMP/lane" >/dev/null 2>&1; is "repo-owned gate restored -> exit 0" 0 "$?"
 
 echo "== prepush-review.sh (dry) =="
 export PREPUSH_REVIEW_DRY=1 PREPUSH_REVIEW_OUTDIR="$TMP/reviews"
@@ -136,7 +144,8 @@ G remote set-url origin "$TMP/origin.git"; git update-ref refs/remotes/origin/ma
 PREPUSH_REVIEWER=Codex "$FLEET/prepush-review.sh" "$TMP/lane" codex >/dev/null 2>&1; is "case-insensitive same-vendor refused" 64 "$?"
 PREPUSH_REVIEWER=codex "$FLEET/prepush-review.sh" "$TMP/lane" 'codex ' >/dev/null 2>&1; is "whitespace in vendor cannot evade (64)" 64 "$?"
 "$FLEET/prepush-review.sh" "$TMP/lane" gemini >/dev/null 2>&1; is "unknown vendor refused (64)" 64 "$?"
-out="$("$FLEET/prepush-review.sh" "$TMP/lane" grok 2>&1)"; has "grok coder -> codex reviewer" "$out" "reviewer=codex"
+out="$("$FLEET/prepush-review.sh" "$TMP/lane" grok 2>&1)"; rc=$?; has "grok coder -> codex reviewer" "$out" "reviewer=codex"
+is "a dry run is not a pass (2)" 2 "$rc"; has "dry run prints no real verdict" "$out" "VERDICT: NONE"
 out="$("$FLEET/prepush-review.sh" "$TMP/lane" codex 2>&1)"; has "codex coder -> claude reviewer" "$out" "reviewer=claude"
 PREPUSH_REVIEWER=claude "$FLEET/prepush-review.sh" "$TMP/lane" claude >/dev/null 2>&1; is "same-vendor reviewer refused" 64 "$?"
 unset PREPUSH_REVIEW_DRY

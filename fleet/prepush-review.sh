@@ -14,7 +14,9 @@
 # Usage: prepush-review.sh <worktree> [coder-vendor=grok]
 #   The diff base is ALWAYS origin/main (fetched); it is not an argument and not an env var, so the
 #   review cannot be pointed at an empty range.
-#   PREPUSH_REVIEW_DRY=1  write the prompt+content files and print their paths; do not call a model
+#   PREPUSH_REVIEW_DRY=1  write the prompt+content files and print their paths; do not call a model.
+#                         A dry run exits 2 (no verdict): it is never a pass, so an exported variable
+#                         cannot turn the peer read into a green signal (Codex review 2026-10-23).
 # Exit: 0 PASS, 1 REQUEST_CHANGES, 2 no verdict (treat as NOT a pass), 64 usage
 set -uo pipefail
 FLEET="$HOME/.claude/fleet"
@@ -60,7 +62,7 @@ P
 case "$REVIEWER" in
   codex)
     [ -s "$PROMPT" ] || { echo "prepush-review: prompt file empty — NOT a pass" >&2; echo "VERDICT: NONE"; exit 2; }
-    [ -n "${PREPUSH_REVIEW_DRY:-}" ] && { echo "prepush-review: DRY reviewer=codex prompt=$PROMPT content=$CONTENT"; exit 0; }
+    [ -n "${PREPUSH_REVIEW_DRY:-}" ] && { echo "prepush-review: DRY reviewer=codex prompt=$PROMPT content=$CONTENT"; echo "VERDICT: NONE (dry run)"; exit 2; }
     # The verdict is the line codex-review.sh PRINTS (its own parsed output), never a grep of the log:
     # the log echoes our prompt, which contains the literal text "VERDICT: PASS" — a grep of it made every
     # REQUEST_CHANGES read as PASS (found by the chatterbuilt#651 lane, 2026-10-15).
@@ -70,7 +72,7 @@ case "$REVIEWER" in
     case "$VLINE" in "VERDICT: PASS") exit 0 ;; "VERDICT: REQUEST_CHANGES") exit 1 ;; *) echo "prepush-review: unrecognised verdict '$VLINE' — NOT a pass" >&2; exit 2 ;; esac ;;
   claude)
     [ -s "$PROMPT" ] || { echo "prepush-review: prompt file empty — NOT a pass" >&2; echo "VERDICT: NONE"; exit 2; }
-    [ -n "${PREPUSH_REVIEW_DRY:-}" ] && { echo "prepush-review: DRY reviewer=claude prompt=$PROMPT content=$CONTENT"; exit 0; }
+    [ -n "${PREPUSH_REVIEW_DRY:-}" ] && { echo "prepush-review: DRY reviewer=claude prompt=$PROMPT content=$CONTENT"; echo "VERDICT: NONE (dry run)"; exit 2; }
     FULL="$OUTDIR/full-prompt.md"
     { cat "$PROMPT" && echo && echo "===== CONTENT UNDER REVIEW (inlined) =====" && cat "$CONTENT"; } > "$FULL" \
       || { echo "prepush-review: cannot assemble the review input — NOT a pass" >&2; echo "VERDICT: NONE"; exit 2; }

@@ -70,7 +70,9 @@ if [ -f .fleet-gate ] || git cat-file -e "$MAIN:.fleet-gate" 2>/dev/null; then
   if [ ! -f .fleet-gate ] || ! git diff --quiet "$MAIN" -- .fleet-gate; then
     echo "pre-push-gate: .fleet-gate differs from $MAIN (edited or deleted in this lane) — the gate is not the coder's to change, FAILING CLOSED" >&2; exit 1
   fi
-  CMD="$(grep -vE '^\s*(#|$)' .fleet-gate | head -1)"
+  # POSIX class, not \s: the first non-blank non-comment line is the command; a comment must never be
+  # what bash -c runs (it would exit 0 = false green). Codex read-only review 2026-10-23.
+  CMD="$(grep -vE '^[[:space:]]*(#|$)' .fleet-gate | head -1)"
   [ -n "$CMD" ] || { echo "pre-push-gate: .fleet-gate is empty — FAILING CLOSED" >&2; exit 1; }
   run ".fleet-gate" bash -c "$CMD"; exit $?
 fi
