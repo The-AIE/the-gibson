@@ -74,6 +74,10 @@ printf 'Zorblax Quux\n' > "$R/untracked.md"
 node "$PH" --root "$R" --config "$ROOT/cfg.json" >/dev/null 2>&1; rc=$?
 [[ $rc -eq 0 ]] && ok "NUL-containing and untracked files are skipped" || bad "binary/untracked rc=$rc"
 
+echo "# unknown flag exits 2 with the repo-wide message (#192 convention)"
+out=$(node "$PH" --definitely-not-a-flag 2>&1 </dev/null); rc=$?
+[[ $rc -eq 2 && "$out" == *"unknown flag:"* ]] && ok "unknown flag exits 2 with 'unknown flag:'" || bad "unknown flag rc=$rc out=$out"
+
 echo "# config errors exit 2"
 echo '{"version":2}' > "$ROOT/bad.json"
 node "$PH" --root "$R" --config "$ROOT/bad.json" >/dev/null 2>&1; rc=$?

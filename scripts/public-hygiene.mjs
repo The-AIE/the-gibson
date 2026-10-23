@@ -143,7 +143,7 @@ function main(argv) {
     }
     if (a === "--root") root = resolve(argv[++i] ?? die("--root needs a value"));
     else if (a === "--config") configPath = resolve(argv[++i] ?? die("--config needs a value"));
-    else die(`unknown argument ${a}`);
+    else die(`unknown flag: ${a}`);
   }
   const cfgFile = configPath || join(root, DEFAULT_CONFIG);
   const cfg = loadConfig(cfgFile);
