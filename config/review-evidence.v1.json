@@ -34,6 +34,15 @@
       ]
     },
     {
+      "login": "chatgpt-codex-connector[bot]",
+      "appSlug": "chatgpt-codex-connector",
+      "appId": 1144995,
+      "vendor": "codex",
+      "roles": [
+        "reviewer"
+      ]
+    },
+    {
       "login": "devin-ai-integration[bot]",
       "appSlug": "devin-ai-integration",
       "appId": 811515,

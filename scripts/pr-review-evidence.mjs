@@ -23,8 +23,9 @@
  *     (APPROVED / CHANGES_REQUESTED; DISMISSED, PENDING, COMMENTED ignored),
  *     an App-authored `review-evidence:v1` comment at the exact head, or an
  *     owner-countersigned `owner-attested-review:v1` comment (#366) for a
- *     vendor with no GitHub App on this repo (e.g. Codex, run locally) —
- *     refused for any vendor that already has a real App reviewer identity.
+ *     vendor with no GitHub App on this repo (e.g. Claude, run locally) —
+ *     refused for any vendor that already has a real App reviewer identity
+ *     (since #470 / D-019 that includes Codex: `chatgpt-codex-connector[bot]`).
  *     Per identity the newest evidence at this head wins.
  *   - Eligibility: the reviewer's vendor differs from every resolved author
  *     vendor; `unknown` is never eligible. Human reviews and comments from
@@ -389,9 +390,10 @@ export function editedAtAll(c) {
 /**
  * Vendors that already have a real GitHub-App reviewer identity in the
  * config: `ownerAttestedReview` refuses to countersign for these — the
- * external path exists ONLY for a vendor with no App presence (Codex,
- * Claude, human), never as a weaker shortcut around one that could post
- * real, machine-verified evidence itself.
+ * external path exists ONLY for a vendor with no App presence (Claude,
+ * human; Codex until #470 gave it `chatgpt-codex-connector[bot]`), never as
+ * a weaker shortcut around one that could post real, machine-verified
+ * evidence itself.
  */
 function appReviewerVendors(identities) {
   return new Set(identities.filter((i) => i.roles.includes("reviewer") && i.appSlug).map((i) => i.vendor));
@@ -407,8 +409,9 @@ const OWNER_EXTERNAL_REVIEW_LOGIN = "owner-attested-review";
 
 /**
  * Owner-countersigned review from a vendor with no GitHub App on this repo
- * (e.g. Codex, run locally via codex-review.sh — there is no "codex[bot]"
- * App to post a `review-evidence:v1` comment through). Mirrors
+ * (e.g. Claude, run locally — there is no Claude App to post a
+ * `review-evidence:v1` comment through; Codex lost this path when #470
+ * listed its App as a reviewer, see D-019). Mirrors
  * `ownerAttestation`'s exact trust boundary (OWNER/MEMBER login match,
  * exact-head bound) but carries a review verdict rather than an
  * author-vendor claim. Returns a synthetic reviewer "identity" item, a
@@ -490,7 +493,7 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
       }
     }
     // Owner-countersigned review for a vendor with no GitHub App on this
-    // repo (Codex, Claude, human) — see ownerAttestedReview above.
+    // repo (Claude, human) — see ownerAttestedReview above.
     if (ownerLogin) {
       const ext = ownerAttestedReview(c, ownerLogin, headSha, attestationVendors, blockedVendors);
       if (ext) {
