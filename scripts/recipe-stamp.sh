@@ -119,4 +119,7 @@ printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
   "${repo_base:-—}" \
   >> "$LEDGER"
 
-echo "recipe-stamp.sh: stamped $ROLE/$recipe_base → memory/recipe-runs.md"
+# Default output is unchanged; with the override set, name the resolved private ledger.
+LEDGER_LABEL="memory/recipe-runs.md"
+[[ -n "${GIBSON_PRIVATE_HOME:-}" ]] && LEDGER_LABEL="$LEDGER"
+echo "recipe-stamp.sh: stamped $ROLE/$recipe_base → $LEDGER_LABEL"

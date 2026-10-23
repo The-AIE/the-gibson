@@ -49,11 +49,13 @@ echo "# default: recipe-stamp writes into the tree's own memory/"
 T1="$ROOT/t1"; fake_tree "$T1"
 out=$(env -u GIBSON_PRIVATE_HOME bash -c "$(declare -f stamp); stamp '$T1'"); rc=$?
 if [[ $rc -eq 0 ]] && grep -q 'builder' "$T1/memory/recipe-runs.md" 2>/dev/null; then ok "default writes <tree>/memory/recipe-runs.md"; else bad "default stamp rc=$rc: $out"; fi
+[[ "$out" == *"stamped builder/builder.yaml → memory/recipe-runs.md" ]] && ok "default closing line is unchanged (relative memory/recipe-runs.md)" || bad "default closing line changed: $out"
 
 echo "# override: same writer lands in the private checkout, tree untouched"
 T2="$ROOT/t2"; fake_tree "$T2"; mkdir -p "$ROOT/priv2/memory"
 out=$(GIBSON_PRIVATE_HOME="$ROOT/priv2" bash -c "$(declare -f stamp); stamp '$T2'"); rc=$?
 if [[ $rc -eq 0 ]] && grep -q 'builder' "$ROOT/priv2/memory/recipe-runs.md" 2>/dev/null; then ok "override writes <private>/memory/recipe-runs.md"; else bad "override stamp rc=$rc: $out"; fi
+[[ "$out" == *"→ $ROOT/priv2/memory/recipe-runs.md" ]] && ok "override closing line names the private ledger it wrote" || bad "override closing line is stale: $out"
 if [[ ! -s "$T2/memory/recipe-runs.md" ]]; then ok "override leaves the public tree's ledger empty"; else bad "override still wrote into the tree"; fi
 
 echo "# override pointing nowhere refuses, never writes to the tree"
@@ -66,6 +68,23 @@ mkdir -p "$ROOT/priv4"
 T4="$ROOT/t4"; fake_tree "$T4"
 out=$(GIBSON_PRIVATE_HOME="$ROOT/priv4" bash -c "$(declare -f stamp); stamp '$T4'"); rc=$?
 if [[ $rc -eq 1 && "$out" == *"memory/ missing under $ROOT/priv4"* ]]; then ok "missing memory/ in private home reported"; else bad "no-memory rc=$rc out=$out"; fi
+
+echo "# dogfood-prep points evidence at the resolved directory (and is unchanged by default)"
+git init -q "$ROOT/app"; git -C "$ROOT/app" remote add origin "https://github.com/acme/app.git"; mkdir -p "$ROOT/app/docs"
+PREP="$REPO_ROOT/scripts/dogfood-prep.sh"
+out=$(env -u GIBSON_PRIVATE_HOME "$PREP" --repo "$ROOT/app" --repo-slug acme/app --check-only 2>&1)
+[[ "$out" == *"→ memory/dogfood/YYYY-MM-DD-journal.md"* ]] && ok "default evidence hint is unchanged (relative memory/dogfood)" || bad "default hint changed: $out"
+mkdir -p "$ROOT/priv5/memory/dogfood"
+out=$(GIBSON_PRIVATE_HOME="$ROOT/priv5" "$PREP" --repo "$ROOT/app" --repo-slug acme/app --check-only 2>&1)
+[[ "$out" == *"→ $ROOT/priv5/memory/dogfood/YYYY-MM-DD-journal.md"* && "$out" != *"→ memory/dogfood/"* ]] && ok "override evidence hint names the private directory" || bad "override hint still public-relative: $out"
+mkdir -p "$ROOT/priv6/memory"   # no dogfood/ yet
+out=$(GIBSON_PRIVATE_HOME="$ROOT/priv6" "$PREP" --repo "$ROOT/app" --repo-slug acme/app --check-only 2>&1)
+[[ "$out" == *"missing $ROOT/priv6/memory/dogfood"* ]] && ok "missing-directory warning names the private path" || bad "missing-dir warning stale: $out"
+
+echo "# the recipe suite is hermetic: an exported GIBSON_PRIVATE_HOME is never written by it"
+mkdir -p "$ROOT/priv7/memory"
+GIBSON_PRIVATE_HOME="$ROOT/priv7" bash "$SCRIPT_DIR/goose-recipes.test.sh" >/dev/null 2>&1
+if [[ ! -e "$ROOT/priv7/memory/recipe-runs.md" ]]; then ok "goose-recipes.test.sh did not touch the operator's private ledger"; else bad "goose-recipes.test.sh wrote into GIBSON_PRIVATE_HOME"; fi
 
 echo
 echo "private-home.test.sh: $PASS passed, $FAIL failed"
