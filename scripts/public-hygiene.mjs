@@ -14,6 +14,10 @@
  *   `foo_bar`, `FooBar`, and `foo bar` all normalize to the same token and match
  *   one entry. `--digest` rejects terms longer than MAX_WORDS words.
  *
+ *   Tracked path names are scanned too. A path that contains a protected term is
+ *   reported as `<redacted-path sha256:...>` (never by name); use --path-digest to
+ *   get the digest an allow entry needs.
+ *
  *   What is scanned: the tracked Git blobs (`git ls-files -s` + `git cat-file`),
  *   not the working tree. A symlink is scanned as the target text Git stores, a
  *   dangling or non-regular path is not skipped, and nothing depends on the
@@ -38,6 +42,7 @@
  * USAGE
  *   node scripts/public-hygiene.mjs [--root PATH] [--config PATH]
  *   node scripts/public-hygiene.mjs --digest "some term"   # print its entry hash
+ *   node scripts/public-hygiene.mjs --path-digest PATH     # print a path's allow-list digest
  *   node scripts/public-hygiene.mjs --help
  *
  * EXIT
@@ -109,12 +114,17 @@ export function loadConfig(path) {
     ids.add(e.id);
   }
   const allow = cfg.allow || [];
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
   for (const a of allow) {
-    const hasPath = a && typeof a.path === "string" && a.path !== "";
-    const hasDigest = a && typeof a.pathDigest === "string" && /^[0-9a-f]{64}$/.test(a.pathDigest);
-    if (!a || hasPath === hasDigest || typeof a.reason !== "string" || a.reason.trim() === "") {
-      die(`${path}: every allow entry needs exactly one of path or pathDigest, and a non-empty reason`);
+    if (!a || typeof a !== "object") die(`${path}: every allow entry must be an object`);
+    const hasPath = has(a, "path");
+    const hasDigest = has(a, "pathDigest");
+    if (hasPath === hasDigest) die(`${path}: every allow entry needs exactly one of path or pathDigest`);
+    if (hasPath && (typeof a.path !== "string" || a.path === "")) die(`${path}: allow path must be a non-empty string`);
+    if (hasDigest && !(typeof a.pathDigest === "string" && /^[0-9a-f]{64}$/.test(a.pathDigest))) {
+      die(`${path}: allow pathDigest must be 64 lowercase hex characters`);
     }
+    if (typeof a.reason !== "string" || a.reason.trim() === "") die(`${path}: every allow entry needs a non-empty reason`);
   }
   return cfg;
 }
@@ -145,8 +155,17 @@ export function scan(root, cfg) {
   const byDigest = new Map(cfg.denylist.map((e) => [e.digest, e.id]));
   // An entry names a path in plain text, or by the SHA-256 of the path when the
   // path itself contains a protected term and so must not be spelled in this file.
-  const allowed = new Set((cfg.allow || []).filter((a) => a.path).map((a) => a.path));
-  const allowedDigests = new Set((cfg.allow || []).filter((a) => a.pathDigest).map((a) => a.pathDigest));
+  const allowed = new Set((cfg.allow || []).filter((a) => typeof a.path === "string").map((a) => a.path));
+  const allowedDigests = new Set((cfg.allow || []).filter((a) => typeof a.pathDigest === "string").map((a) => a.pathDigest));
+  // Entry ids whose digest matches any candidate token of `text`.
+  const idsIn = (text) => {
+    const hit = new Set();
+    for (const c of candidates(text)) {
+      const id = byDigest.get(digest(c));
+      if (id) hit.add(id);
+    }
+    return hit;
+  };
   const listing = execFileSync("git", ["-C", root, "ls-files", "-s", "-z"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 })
     .split("\0")
     .filter(Boolean);
@@ -161,25 +180,24 @@ export function scan(root, cfg) {
   const want = entries.filter((e) => e.mode !== "160000" && !(allowed.has(e.rel) || allowedDigests.has(digest(e.rel))));
   const blobs = readBlobs(root, [...new Set(want.map((e) => e.sha))]);
   for (const { sha, rel } of want) {
+    // A path that itself contains a protected term is reported by digest, never by name.
+    const pathIds = idsIn(rel);
+    const shown = pathIds.size > 0 ? `<redacted-path sha256:${digest(rel).slice(0, 12)}>` : rel;
+    for (const id of pathIds) findings.push({ path: shown, line: 0, id });
     const blob = blobs.get(sha);
     if (!blob) {
-      findings.push({ path: rel, line: 0, id: "UNSCANNABLE-unreadable" });
+      findings.push({ path: shown, line: 0, id: "UNSCANNABLE-unreadable" });
       continue;
     }
     if (blob.length > MAX_BYTES) {
-      findings.push({ path: rel, line: 0, id: "UNSCANNABLE-too-large" });
+      findings.push({ path: shown, line: 0, id: "UNSCANNABLE-too-large" });
       continue;
     }
     // UTF-16 text has a NUL between letters; stripping NULs makes it scannable.
     const text = (blob.includes(0) ? Buffer.from(blob.filter((b) => b !== 0)) : blob).toString("utf8");
     const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
-      const hit = new Set();
-      for (const c of candidates(lines[i])) {
-        const id = byDigest.get(digest(c));
-        if (id) hit.add(id);
-      }
-      for (const id of hit) findings.push({ path: rel, line: i + 1, id });
+      for (const id of idsIn(lines[i])) findings.push({ path: shown, line: i + 1, id });
     }
   }
   return findings;
@@ -197,6 +215,11 @@ function main(argv) {
       if (words === 0) die("--digest term has no letters or digits");
       if (words > MAX_WORDS) die(`--digest term has ${words} words; the scanner matches at most ${MAX_WORDS}`);
       console.log(digest(normalizeTerm(argv[i + 1])));
+      return;
+    }
+    if (a === "--path-digest") {
+      if (i + 1 >= argv.length) die("--path-digest needs a value");
+      console.log(digest(String(argv[i + 1])));
       return;
     }
     if (a === "--root") root = resolve(argv[++i] ?? die("--root needs a value"));

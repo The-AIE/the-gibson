@@ -175,6 +175,39 @@ write_cfg "$ROOT/cfg-dig-bad.json" '[{"pathDigest":"not-a-digest","reason":"fixt
 node "$PH" --root "$R" --config "$ROOT/cfg-dig-bad.json" >/dev/null 2>&1; rc=$?
 [[ $rc -eq 2 ]] && ok "a malformed pathDigest is a config error" || bad "bad digest rc=$rc"
 
+echo "# an allow entry with both selectors is rejected even when one value is malformed"
+R="$ROOT/bothsel"; new_repo "$R"; printf 'x\n' > "$R/a.md"; commit_all "$R"
+write_cfg "$ROOT/cfg-both-bad.json" '[{"path":"a.md","pathDigest":"bad","reason":"fixture"}]'
+node "$PH" --root "$R" --config "$ROOT/cfg-both-bad.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 2 ]] && ok "path + malformed pathDigest is a config error (exit 2)" || bad "both-selectors rc=$rc (want 2)"
+write_cfg "$ROOT/cfg-path-empty.json" '[{"path":"","reason":"fixture"}]'
+node "$PH" --root "$R" --config "$ROOT/cfg-path-empty.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 2 ]] && ok "an empty allow path is a config error" || bad "empty path rc=$rc"
+write_cfg "$ROOT/cfg-path-num.json" '[{"path":7,"reason":"fixture"}]'
+node "$PH" --root "$R" --config "$ROOT/cfg-path-num.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 2 ]] && ok "a non-string allow path is a config error" || bad "numeric path rc=$rc"
+
+echo "# tracked path names are scanned, and a protected path is never printed by name"
+R="$ROOT/names"; new_repo "$R"
+printf 'harmless words only\n' > "$R/zorblax-quux.md"                 # protected name, harmless body
+mkdir -p "$R/dir"; printf 'see Zorblax Quux\n' > "$R/dir/Zorblax_Quux_notes.txt"   # protected name AND body
+printf 'clean\n' > "$R/clean.md"
+commit_all "$R"
+out=$(node "$PH" --root "$R" --config "$ROOT/cfg.json" 2>&1); rc=$?
+[[ $rc -eq 1 ]] && ok "a protected file name alone is a finding" || bad "name-only rc=$rc out=$out"
+if grep -qi -E 'zorblax|quux' <<<"$out"; then bad "output printed a protected path: $out"; else ok "no protected path or term appears in the output"; fi
+n=$(grep -c 'redacted-path sha256:' <<<"$out")
+[[ $n -ge 3 ]] && ok "protected paths are reported by digest ($n findings: name and content)" || bad "expected >=3 redacted findings, got $n: $out"
+grep -q 'clean.md' <<<"$out" && bad "clean path flagged: $out" || ok "an innocent path is not flagged"
+
+echo "# --path-digest matches the digest an allow entry needs, so a protected path can be allow-listed unnamed"
+PD=$(node "$PH" --path-digest "zorblax-quux.md")
+[[ "$PD" == "$(printf '%s' 'zorblax-quux.md' | shasum -a 256 | awk '{print $1}')" ]] && ok "--path-digest prints sha256 of the exact path" || bad "path-digest mismatch: $PD"
+R2="$ROOT/names2"; new_repo "$R2"; printf 'harmless words only\n' > "$R2/zorblax-quux.md"; commit_all "$R2"
+write_cfg "$ROOT/cfg-pd.json" "[{\"pathDigest\":\"$PD\",\"reason\":\"fixture\"}]"
+node "$PH" --root "$R2" --config "$ROOT/cfg-pd.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 0 ]] && ok "a protected path allow-listed by digest passes" || bad "digest-allowed protected path rc=$rc"
+
 echo "# config errors exit 2"
 echo '{"version":2}' > "$ROOT/bad.json"
 node "$PH" --root "$R" --config "$ROOT/bad.json" >/dev/null 2>&1; rc=$?
