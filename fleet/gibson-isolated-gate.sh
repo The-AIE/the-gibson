@@ -47,8 +47,12 @@ cd "$TMP/repo" || exit 1
 git config user.name "gibson-isolated-gate"; git config user.email "isolated-gate@fleet.invalid"
 git config --unset core.hooksPath 2>/dev/null || true
 # Bring uncommitted work along (tracked diff + untracked, excluding ignored) so focused runs test what the coder has.
-( cd "$WT" && git diff --binary HEAD ) | git apply --allow-empty 2>/dev/null || true
-( cd "$WT" && git ls-files --others --exclude-standard -z ) | while IFS= read -r -d '' f; do mkdir -p "$(dirname "$f")"; cp "$WT/$f" "$f"; done
+# Fail closed when any of it cannot be brought: a clone missing part of the lane would gate something other than
+# what the coder has and could report green for it (Codex read-only review 2026-10-23). Commit or stash, then retry.
+( cd "$WT" && git diff --binary HEAD ) | git apply --allow-empty \
+  || { echo "gibson-isolated-gate: cannot apply the lane's uncommitted diff to the clone — FAILING CLOSED (commit or stash it)" >&2; exit 1; }
+( cd "$WT" && git ls-files --others --exclude-standard -z ) | while IFS= read -r -d '' f; do mkdir -p "$(dirname "$f")" && cp "$WT/$f" "$f" || exit 1; done \
+  || { echo "gibson-isolated-gate: cannot copy an untracked lane file into the clone — FAILING CLOSED" >&2; exit 1; }
 echo "gibson-isolated-gate: clone of $BRANCH at $(git rev-parse --short HEAD) in $TMP/repo (jobs=$GIBSON_TEST_JOBS)"
 if [ -n "$ONLY" ]; then
   bash scripts/tests/run-all.sh --only "$ONLY"; exit $?   # (lock + temp dir released by the EXIT trap)
