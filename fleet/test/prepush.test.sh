@@ -134,6 +134,19 @@ out="$("$FLEET/pre-push-gate.sh" "$TMP/lane" 2>&1)"; rc=$?; is "comment-first .f
 ( cd "$TMP/main" && printf '# repo gate\ntrue\n' > .fleet-gate && G add .fleet-gate && G commit -qm gate-green && G push -q origin main )
 G fetch -q origin && G merge -q origin/main
 "$FLEET/pre-push-gate.sh" "$TMP/lane" >/dev/null 2>&1; is "repo-owned gate restored -> exit 0" 0 "$?"
+# Codex 2026-10-23 (round 5): the gate file must be the tracked bytes, not a symlink and not an untracked
+# stand-in. (B) tracked file swapped for a symlink to identical bytes; (A) a lane whose branch predates the
+# gate file plants an untracked symlink to a weak gate; (C) same lane, an untracked plain copy of main's file.
+cp .fleet-gate "$TMP/same-bytes"; rm .fleet-gate; ln -s "$TMP/same-bytes" .fleet-gate
+out="$("$FLEET/pre-push-gate.sh" "$TMP/lane" 2>&1)"; rc=$?; is "(B) tracked .fleet-gate swapped for a symlink -> exit 1" 1 "$rc"; has "(B) names the reason" "$out" "FAILING CLOSED"
+rm .fleet-gate; G checkout -q -- .fleet-gate
+printf 'touch "%s/weak-gate-ran"\ntrue\n' "$TMP" > "$TMP/weak-gate"
+( cd "$TMP/lane2" && G fetch -q origin && ln -s "$TMP/weak-gate" .fleet-gate )
+out="$("$FLEET/pre-push-gate.sh" "$TMP/lane2" 2>&1)"; rc=$?; is "(A) untracked symlink .fleet-gate in a lane that predates the gate file -> exit 1" 1 "$rc"
+[ -e "$TMP/weak-gate-ran" ] && bad "(A) the planted gate never runs" "not run" "weak gate ran" || ok "(A) the planted gate never runs"
+( cd "$TMP/lane2" && rm .fleet-gate && printf '# repo gate\ntrue\n' > .fleet-gate )
+"$FLEET/pre-push-gate.sh" "$TMP/lane2" >/dev/null 2>&1; is "(C) untracked plain copy of main's .fleet-gate in that lane -> exit 1 (merge main first)" 1 "$?"
+( cd "$TMP/lane2" && rm .fleet-gate )
 
 echo "== prepush-review.sh (dry) =="
 export PREPUSH_REVIEW_DRY=1 PREPUSH_REVIEW_OUTDIR="$TMP/reviews"

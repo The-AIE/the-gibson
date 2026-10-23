@@ -67,7 +67,13 @@ if [ -f .fleet-gate ] || git cat-file -e "$MAIN:.fleet-gate" 2>/dev/null; then
     || { echo "pre-push-gate: $MAIN is unresolvable; cannot verify .fleet-gate is repo-owned — FAILING CLOSED" >&2; exit 1; }
   git cat-file -e "$MAIN:.fleet-gate" 2>/dev/null \
     || { echo "pre-push-gate: .fleet-gate exists in this lane but not on $MAIN — a gate file is repo-owned, FAILING CLOSED" >&2; exit 1; }
-  if [ ! -f .fleet-gate ] || ! git diff --quiet "$MAIN" -- .fleet-gate; then
+  # The gate is the tracked bytes of the file: not a symlink (whatever it points at), not an untracked
+  # stand-in in a lane that has not merged main, and byte-identical to the blob on $MAIN. Each case already
+  # failed closed through the diff below; stated explicitly after the Codex read-only review of 2026-10-23.
+  [ ! -L .fleet-gate ] || { echo "pre-push-gate: .fleet-gate is a symlink — the gate is the tracked file, FAILING CLOSED" >&2; exit 1; }
+  git ls-files --error-unmatch .fleet-gate >/dev/null 2>&1 \
+    || { echo "pre-push-gate: .fleet-gate is not tracked in this lane (untracked stand-in, or $MAIN not merged yet) — FAILING CLOSED" >&2; exit 1; }
+  if [ ! -f .fleet-gate ] || ! git cat-file -p "$MAIN:.fleet-gate" | cmp -s - .fleet-gate; then
     echo "pre-push-gate: .fleet-gate differs from $MAIN (edited or deleted in this lane) — the gate is not the coder's to change, FAILING CLOSED" >&2; exit 1
   fi
   # POSIX class, not \s: the first non-blank non-comment line is the command; a comment must never be
