@@ -32,6 +32,17 @@ USAGE
   --issue     only claims on this issue number, namespaced ones included
   --markdown  emit the docs/active-work.md table format
 
+UNDECLARED LANES
+  After the table (not with --issue or --markdown), a second list: every
+  registered worktree of this repository (`git worktree list`) that is on a
+  branch other than the ledger base and has no `gibson.agentVendor` in its
+  worktree-scoped config (extensions.worktreeConfig on; a --local-only value is
+  not a declaration, exactly as the hooks read it). Such a lane was made before claim.sh declared vendors
+  (the-gibson#523) or by hand, so its commits carry no Agent-Vendor trailer and
+  review-evidence reports identity-unresolved at review time. The fix is printed
+  with each row: `scripts/setup-hooks.sh --vendor from-reservation` inside it.
+  Omitted entirely when every lane is declared.
+
 CLOCK
   GIBSON_CLAIMS_NOW_EPOCH  optional. When set to a decimal Unix epoch (UTC seconds),
                            staleness is computed against this fixed "now" instead of
@@ -338,8 +349,78 @@ while IFS= read -r line; do
 done <<< "$(printf '%s\n' "$_legacy_table" | grep -E '^\| ' || true)"
 unset _legacy_table _legacy_ls _legacy_ls_err
 
+# Registered lane worktrees with no vendor declaration (follow-up to #523).
+# A lane made before claim.sh declared vendors, or by hand, is one whose later
+# commits carry no Agent-Vendor trailer: the sweep over existing lanes is this
+# one list. Linked worktrees only (never the main one), on a branch that is not
+# the ledger base, with a path that still exists. Declared means a worktree-
+# scoped gibson.agentVendor with extensions.worktreeConfig on, the only form the
+# hooks honour; with the extension off `--worktree` falls back to --local, so a
+# shared value would read as a declaration for every lane, and is ignored.
+# shellcheck source=lib/agent-vendor.sh
+. "$SCRIPT_DIR/lib/agent-vendor.sh" 2>/dev/null || {
+  echo "claims-status.sh: ERROR: cannot source $SCRIPT_DIR/lib/agent-vendor.sh — refusing to list lane declarations with a reader that may differ from the hooks" >&2
+  exit 1
+}
+undeclared_lanes() { # reads $_wt_list (git worktree list --porcelain, already checked)
+  local wt="" branch="" prunable=0 line main_wt="" base_branch vendor
+  base_branch="${REF##*/}"
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*)
+        wt="${line#worktree }"; branch=""; prunable=0
+        [[ -n "$main_wt" ]] || main_wt="$wt"
+        ;;
+      "branch "*) branch="${line#branch refs/heads/}" ;;
+      prunable*) prunable=1 ;;
+      "")
+        if [[ -n "$wt" && "$wt" != "$main_wt" && -n "$branch" && "$prunable" -eq 0 && -d "$wt" ]]; then
+          case "$branch" in
+            main|master|"$base_branch") ;;
+            *)
+              # Worktree scope only, gated on extensions.worktreeConfig, as the
+              # hooks read it (scripts/lib/agent-vendor.sh): a --local-only
+              # value is shared by every worktree and is NOT a declaration.
+              vendor=$(agent_vendor_declared "$wt")
+              [[ -n "$vendor" ]] || printf '%s\t%s\n' "$branch" "$wt"
+              ;;
+          esac
+        fi
+        wt=""; branch=""; prunable=0
+        ;;
+    esac
+  done <<EOF
+${_wt_list}
+
+EOF
+}
+UNDECLARED=""
+if [[ -z "$ONLY_ISSUE" && "$MARKDOWN" -eq 0 ]]; then
+  # The enumeration itself must succeed: a git that cannot list worktrees is
+  # "I could not find out", never "every lane is declared" (Codex round five on
+  # #525). Status captured separately from the output, no `; echo` masking.
+  if ! _wt_list=$(git worktree list --porcelain 2>&1); then
+    echo "claims-status.sh: ERROR: cannot list this repository's worktrees (git worktree list --porcelain failed) — ${_wt_list}; refusing to report lane declarations on an unread inventory" >&2
+    exit 1
+  fi
+  UNDECLARED=$(undeclared_lanes)
+  unset _wt_list
+fi
+print_undeclared() {
+  [[ -n "$UNDECLARED" ]] || return 0
+  echo
+  echo "undeclared lanes (no gibson.agentVendor: commits there carry no Agent-Vendor trailer and fail review-evidence as identity-unresolved)"
+  while IFS=$'\t' read -r branch wt; do
+    [[ -n "$branch" ]] || continue
+    echo "  $branch · $wt — run scripts/setup-hooks.sh --vendor from-reservation inside it (or --vendor <claude|codex|grok|devin>)"
+  done <<EOF
+$UNDECLARED
+EOF
+}
+
 if [[ -z "$ROWS" ]]; then
   echo "no live claims${ONLY_ISSUE:+ for issue $ONLY_ISSUE} at $REF"
+  print_undeclared
   exit 0
 fi
 
@@ -352,4 +433,5 @@ else
   echo "live claims at $REF"
   echo
   echo "$SORTED" | sed 's/^| //;s/ |$//;s/ | / · /g;s/^/  /'
+  print_undeclared
 fi

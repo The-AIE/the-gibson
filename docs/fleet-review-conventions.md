@@ -118,6 +118,27 @@ worktree; the owner's own checkout, which declares nothing, is unchanged. Note t
 worktree add` copies the current worktree's `config.worktree` into the new one, so a lane cut
 by hand from a declared worktree inherits that declaration until re-declared.
 
+The hooks only run where a lane is declared, and `git commit --no-verify` skips them anywhere, so
+two backstops apply the same decision rule the evaluator will: `scripts/loop.sh` walks the
+handed-off range before queueing a supervisor handoff (beside its Signed-off-by walk) and blocks,
+naming the SHAs and the fix, on any commit whose author or committer email cannot be proven to
+map to a GitHub login (noreply form, or GitHub's commit search by email in the repository), maps
+to a login the trusted base's identity table does not list as an author (or lists with an
+`authorCommits` allowlist the SHA is outside), is a `.invalid` address, or, for an owner identity,
+has no `Agent-Vendor:` trailer, names more than one vendor, or names one the evaluator does not
+know; `scripts/prepush.sh` reports the same walk over
+`origin/main..HEAD` (FAIL on a declared lane, WARN on an undeclared checkout, where an owner
+commit resolves through independent review instead). The identity table comes from the trusted
+base (a governed target repository, which carries none, uses the harness's own copy); the walk
+runs only when origin is a `GH_HOST` repository, since review-evidence is GitHub-only. The rule lives once, in
+`scripts/lib/agent-vendor.sh`. A lane created by `claim.sh` before the declaration existed is
+declared from its own reservation commit with `scripts/setup-hooks.sh --vendor from-reservation`
+(the commit after the merge-base with `origin/main` carrying `Gibson-Reservation: v1` whose
+`Gibson-Branch:` names the checked-out branch, so a stacked lane never inherits its parent's;
+refused when none names this branch, more than one does, it has no trailer, or its trailers
+disagree), and
+`scripts/claims-status.sh` lists every registered lane worktree that is still undeclared.
+
 **Residual window (documented, not hidden).** The workflow resolves the head via the
 API and falls back to the event's head so `pending` is stamped even when the API call
 fails. Review and comment events carry no head in their payload; if the API is down

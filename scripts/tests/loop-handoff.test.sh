@@ -110,6 +110,18 @@ if [[ -n "$log" ]]; then
   printf '%s\n' "$*" >> "$log"
 fi
 
+# Agent-Vendor walk (follow-up to #523): email → login proof through GitHub's
+# commit search. The lane identity lane@gibson.test is the owner, mrhinkle.
+case "$*" in
+  *search/commits*)
+    case "$*" in
+      *"author-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
+      *"committer-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
+      *) printf '\t\n' ;;
+    esac
+    exit 0 ;;
+esac
+
 # Validate the exact API target so a broken origin parser cannot pass.
 validate_repo_target() {
   local kind="$1"   # issue | api
@@ -273,6 +285,17 @@ export PATH
 command -v curl >/dev/null || { echo "loop-handoff.test.sh: curl stub failed to install"; exit 1; }
 
 GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gpgsign=false"
+# Work on the handed-off branch must be what review-evidence resolves to a
+# vendor, or the Agent-Vendor walk (follow-up to #523) blocks before the review
+# these cases are about: signed, one `Agent-Vendor:` trailer, and an email
+# GitHub maps to a login (the hermetic sensor@gibson.invalid is exactly the
+# `.invalid` class that walk refuses). Base-branch commits stay as they are —
+# they are outside the walked range. dco-handoff.test.sh owns the refusals.
+LANE_EMAIL=lane@gibson.test
+lane_commit() { # dir [git-commit args...]
+  local dir="$1"; shift
+  GIT_AUTHOR_EMAIL=$LANE_EMAIL GIT_COMMITTER_EMAIL=$LANE_EMAIL $GIT -C "$dir" commit -q -s "$@" -m "Agent-Vendor: claude"
+}
 
 # A target repo with one branch to hand off, and a bare remote it is pushed to.
 # `with-remote` is the realistic default: a supervisor handoff only means anything
@@ -295,7 +318,7 @@ setup_repo() { # setup_repo [with-remote|with-remote-unpublished]
   $GIT -C "$REPO" commit -q -m "base"
   $GIT -C "$REPO" checkout -q -b "$BRANCH"
   echo work >> "$REPO/README.md"
-  $GIT -C "$REPO" commit -q -s -am "work"
+  lane_commit "$REPO" -a -m "work"
   $GIT -C "$REPO" checkout -q main
   if [[ "${1:-}" == "with-remote" || "${1:-}" == "with-remote-unpublished" ]]; then
     $GIT init -q --bare "$REMOTE"
@@ -369,7 +392,7 @@ setup_repo_trunk() { # setup_repo_trunk <trunk> <stale-local|remote|none>
   $GIT -C "$REPO" commit -q -m "base"
   $GIT -C "$REPO" checkout -q -b "$BRANCH"
   echo work >> "$REPO/README.md"
-  $GIT -C "$REPO" commit -q -s -am "work"
+  lane_commit "$REPO" -a -m "work"
   $GIT -C "$REPO" checkout -q "$trunk"
   if [[ "$origin_head" != "none" ]]; then
     $GIT init -q --bare "$REMOTE"
@@ -748,7 +771,7 @@ rm -rf "$OTHER"
 git clone -q "$REMOTE" "$OTHER"
 git -C "$OTHER" checkout -q -B "$BRANCH" "origin/$BRANCH"
 echo advanced >> "$OTHER/README.md"
-$GIT -C "$OTHER" commit -q -s -am "advance the remote from a second clone"
+lane_commit "$OTHER" -a -m "advance the remote from a second clone"
 git -C "$OTHER" push -q origin "$BRANCH"
 ADVANCED=$(git -C "$OTHER" rev-parse HEAD)
 if git -C "$REPO" rev-parse --verify --quiet "$ADVANCED^{commit}" >/dev/null 2>&1; then
@@ -1028,7 +1051,7 @@ git clone -q "$REMOTE" "$DIFF_CLONE"
 git -C "$DIFF_CLONE" checkout -q -B "$BRANCH" "origin/$BRANCH"
 echo head > "$DIFF_CLONE/REMOTE-HEAD-ONLY.md"
 $GIT -C "$DIFF_CLONE" add REMOTE-HEAD-ONLY.md
-$GIT -C "$DIFF_CLONE" commit -q -s -m "advance the head on the remote"
+lane_commit "$DIFF_CLONE" -m "advance the head on the remote"
 git -C "$DIFF_CLONE" push -q origin "$BRANCH"
 EXACT_HEAD=$(git -C "$DIFF_CLONE" rev-parse HEAD)
 git -C "$DIFF_CLONE" checkout -q main
@@ -1043,7 +1066,7 @@ EXACT_BASE=$(git -C "$DIFF_CLONE" rev-parse HEAD)
 $GIT -C "$REPO" checkout -q "$BRANCH"
 echo stale > "$REPO/STALE-LOCAL-ONLY.md"
 $GIT -C "$REPO" add STALE-LOCAL-ONLY.md
-$GIT -C "$REPO" commit -q -s -m "a local-only commit the remote never saw"
+lane_commit "$REPO" -m "a local-only commit the remote never saw"
 $GIT -C "$REPO" checkout -q main
 # Fetch the objects without moving refs/heads/*: the clone can READ both reviewed
 # commits (as the driver guarantees before any review) while its branch names

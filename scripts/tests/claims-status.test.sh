@@ -318,5 +318,66 @@ contains "explicit --ref may report no live claims at main" "$out" "no live clai
 contains "names the operator-selected ref" "$out" "at main"
 
 echo
+echo "undeclared lanes · registered lane worktrees without gibson.agentVendor are listed with the fix (follow-up to #523)"
+SETUP="$SCRIPT_DIR/../setup-hooks.sh"
+new_github_repo "$ROOT/lanes"
+install_empty_gh "$ROOT/lanes/bin/gh"
+(
+  cd "$ROOT/lanes/canon" || exit 1
+  mkdir -p .githooks
+  cp "$SCRIPT_DIR/../../.githooks/prepare-commit-msg" "$SCRIPT_DIR/../../.githooks/commit-msg" .githooks/
+  git add -A && git commit -qm hooks && git push -q origin main
+  git worktree add -q "$ROOT/lanes/wt-a" -b feat/1-a HEAD
+  git worktree add -q "$ROOT/lanes/wt-b" -b feat/2-b HEAD
+  git worktree add -q "$ROOT/lanes/wt-main2" main 2>/dev/null || git worktree add -q --detach "$ROOT/lanes/wt-main2" HEAD
+  (cd "$ROOT/lanes/wt-b" && "$SETUP" --vendor codex)
+) >/dev/null 2>&1
+out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" 2>&1); rc=$?
+check    "undeclared lanes: exit 0" "$rc" "0"
+contains "undeclared lanes: section header present" "$out" "undeclared lanes"
+contains "undeclared lanes: the undeclared lane's branch is listed" "$out" "feat/1-a"
+contains "undeclared lanes: the undeclared lane's path is listed" "$out" "$(cd "$ROOT/lanes/wt-a" && pwd -P)"
+contains "undeclared lanes: each row names the fix" "$out" "scripts/setup-hooks.sh --vendor from-reservation"
+lacks    "undeclared lanes: the declared lane (codex) is not listed" "$out" "feat/2-b"
+lacks    "undeclared lanes: a worktree on the base branch is not a lane" "$out" "wt-main2"
+out_md=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" --markdown 2>&1)
+lacks    "undeclared lanes: --markdown output keeps the table format only" "$out_md" "undeclared lanes"
+out_issue=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" --issue 1 2>&1)
+lacks    "undeclared lanes: --issue is a filtered view, no lane sweep" "$out_issue" "undeclared lanes"
+# A --local-only value is shared by every worktree and is not a declaration
+# (the hooks read worktree scope only): wt-a stays listed.
+git -C "$ROOT/lanes/canon" config --local gibson.agentVendor grok
+out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" 2>&1)
+contains "undeclared lanes: a --local-only gibson.agentVendor does not declare a lane (still listed)" "$out" "feat/1-a"
+git -C "$ROOT/lanes/canon" config --unset gibson.agentVendor
+(cd "$ROOT/lanes/wt-a" && "$SETUP" --vendor grok) >/dev/null 2>&1
+out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" 2>&1); rc=$?
+check    "undeclared lanes: exit 0 once every lane is declared" "$rc" "0"
+lacks    "undeclared lanes: section omitted entirely once every lane is declared" "$out" "undeclared lanes"
+# A pruned (deleted-on-disk) lane is not listed as something to declare.
+git -C "$ROOT/lanes/canon" worktree add -q "$ROOT/lanes/wt-gone" -b feat/3-gone HEAD >/dev/null 2>&1
+rm -rf "$ROOT/lanes/wt-gone"
+out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/bin:$PATH" "$CS" 2>&1)
+lacks    "undeclared lanes: a worktree whose directory is gone is not listed" "$out" "feat/3-gone"
+
+echo "undeclared lanes · a git that cannot list worktrees fails closed (Codex round five on #525)"
+REAL_GIT=$(command -v git)
+mkdir -p "$ROOT/lanes/gitbin"
+cat > "$ROOT/lanes/gitbin/git" <<GITSTUB
+#!/usr/bin/env bash
+if [[ "\${1:-}" == worktree && "\${2:-}" == list ]]; then
+  echo "fatal: simulated: cannot read the common git directory" >&2
+  exit 128
+fi
+exec "$REAL_GIT" "\$@"
+GITSTUB
+chmod +x "$ROOT/lanes/gitbin/git"
+out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/gitbin:$ROOT/lanes/bin:$PATH" "$CS" 2>&1); rc=$?
+check    "worktree enumeration failure: exit 1" "$rc" "1"
+contains "worktree enumeration failure: names the cause" "$out" "cannot list this repository's worktrees"
+lacks    "worktree enumeration failure: never reads as 'every lane declared' (no claims table printed)" "$out" "no live claims"
+out=$(cd "$ROOT/lanes/canon" && PATH="$ROOT/lanes/gitbin:$ROOT/lanes/bin:$PATH" "$CS" --markdown 2>&1); rc=$?
+check    "worktree enumeration failure: --markdown (no lane sweep) is unaffected" "$rc" "0"
+
 echo "claims-status.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

@@ -62,7 +62,13 @@ RISKS
     before the review is spent — the supervisor opens the PR from the remote
     branch, so a local-only ref is nothing it can act on. Any commit in the
     handed-off range that lacks a Signed-off-by trailer also blocks the
-    handoff (issue #204) before the reviewer or supervisor is invoked.
+    handoff (issue #204) before the reviewer or supervisor is invoked, and so
+    does any commit review-evidence could not resolve to a vendor: not from a
+    lane-bot login, and with no Agent-Vendor trailer, more than one vendor, a
+    vendor the evaluator does not know, or an author/committer email in the
+    reserved .invalid domain (the-gibson#503/#504/#506; a lane declared before
+    #523, or a commit made with --no-verify, is caught here instead of at
+    review time).
   - Review rounds are capped per tier from config/review-round-caps.json
     (issue #205). Exceeding the cap exits nonzero and does not start another
     model review / second-opinion — a human decision is required. The
@@ -247,6 +253,17 @@ elif [[ -f "$SCRIPT_DIR/lib/wall-timeout.sh" ]]; then
   source "$SCRIPT_DIR/lib/wall-timeout.sh"
 else
   die "missing lib/wall-timeout.sh (looked in $GIBSON/scripts/lib and $SCRIPT_DIR/lib)"
+fi
+# Agent-Vendor walk shared with scripts/lib/convention-probes.sh (prepush.sh)
+# so the pre-queue block below and the local report cannot drift apart.
+if [[ -f "$GIBSON/scripts/lib/agent-vendor.sh" ]]; then
+  # shellcheck disable=SC1090,SC1091
+  source "$GIBSON/scripts/lib/agent-vendor.sh"
+elif [[ -f "$SCRIPT_DIR/lib/agent-vendor.sh" ]]; then
+  # shellcheck disable=SC1090,SC1091
+  source "$SCRIPT_DIR/lib/agent-vendor.sh"
+else
+  die "missing lib/agent-vendor.sh (looked in $GIBSON/scripts/lib and $SCRIPT_DIR/lib)"
 fi
 if ! declare -F silent_noop_progressed >/dev/null 2>&1; then
   die "silent-noop.sh did not define silent_noop_progressed"
@@ -2469,6 +2486,19 @@ EOF
   return 0
 }
 
+# List commits in <base>..<head> that review-evidence would not resolve to a
+# vendor (follow-up to the-gibson#520/#523). Prints "<sha> <reason>" one per
+# line. Same return contract as dco_unsigned_shas: 0 when the range is readable
+# (empty or not), 1 when it cannot be walked. The rule lives in
+# scripts/lib/agent-vendor.sh, shared with prepush.sh's report-only probe.
+vendor_unresolved_shas() {
+  # Table at the pinned remote base, falling back to this harness's own copy
+  # (target repositories carry none); logins proven in origin's GitHub slug,
+  # which is also the one review-evidence reads.
+  AGENT_VENDOR_TABLE_FALLBACK="$GIBSON/config/review-evidence.v1.json" \
+    agent_vendor_unresolved_shas "$1" "$2" "$3" "$2" "$ORIGIN_HALT_SLUG"
+}
+
 # File-handoff protocol: pin and pass the head SHA so a later push cannot
 # invalidate the review without the supervisor noticing (issue #55). The gate is
 # closed — every early return here leaves handoff/handoff_sha queued in
@@ -2522,6 +2552,32 @@ supervisor_handoff() {
     fi
   else
     block "cannot read git log $base_sha..$sha to verify Signed-off-by trailers — refusing the handoff (fail closed)."
+    return 0
+  fi
+
+  # Agent-Vendor (the-gibson#503/#504/#506): refuse work review-evidence would
+  # report identity-unresolved before spending a reviewer or the supervisor.
+  # Author and committer must each prove a GitHub login (noreply form, or GitHub
+  # commit search by email) that the trusted base's identity table lists; a
+  # listed lane bot resolves by identity, an owner identity needs exactly one
+  # known Agent-Vendor trailer. Unprovable identities fail closed.
+  # Catches lanes declared before #523 and commits made with --no-verify.
+  # Same gate as the remote kill switch: review-evidence evaluates GitHub
+  # repositories, and proving a login means asking gh about origin's slug. A
+  # GitLab/Bitbucket/unparseable/other-host origin never touches gh (it would
+  # answer for an unrelated same-named github.com repository), so the walk is
+  # skipped there, loudly, exactly as the remote halt check is.
+  local unvendored
+  if ! origin_remote_halt_slug; then
+    info "Agent-Vendor walk skipped: ${ORIGIN_HALT_SKIP_REASON} — review-evidence is GitHub-only, so there is nothing to pre-empt (zero gh queries)"
+  elif unvendored=$(vendor_unresolved_shas "$REPO" "$base_sha" "$sha"); then
+    if [[ -n "$unvendored" ]]; then
+      unvendored=$(printf '%s' "$unvendored" | tr '\n' ';' | sed 's/;/; /g')
+      block "commit(s) in $base_sha..$sha would be identity-unresolved at review time (no resolvable Agent-Vendor trailer): $unvendored. Fix: $(agent_vendor_fix_hint), then re-queue."
+      return 0
+    fi
+  else
+    block "cannot read git log $base_sha..$sha to verify Agent-Vendor trailers — refusing the handoff (fail closed)."
     return 0
   fi
 

@@ -83,3 +83,53 @@ cp_recipe_hash_all() {
   [[ "$seen" -gt 0 ]] || { echo "no recipe declaring a playbook was found to check"; return 2; }
   return "$worst"
 }
+
+# cp_agent_vendor_walk [BASE] — every commit in merge-base(HEAD, BASE)..HEAD
+# must be one review-evidence resolves to a vendor (follow-up to the-gibson#523:
+# lanes declared before it, and `git commit --no-verify`, bypass the hooks).
+# Default BASE origin/main. Run from inside the repo. Prints "<sha> <reason>"
+# per offender plus the fix. Returns 0 clean, 2 cannot run (no git, BASE or
+# HEAD unresolvable, lib missing), 4 skipped (origin is not the GH_HOST
+# repository: review-evidence is GitHub-only, zero gh calls), 1 findings on a DECLARED lane
+# (worktree-scoped gibson.agentVendor with extensions.worktreeConfig on, as the
+# hooks read it: every commit there must carry the trailer), and 3
+# findings on an undeclared checkout — report only, because an owner commit on
+# the owner's own branch resolves through independent review instead; loop.sh
+# is where the same findings block, since a lane handoff has no such review yet.
+cp_agent_vendor_walk() {
+  local base="${1:-origin/main}" lib mb head out rc
+  command -v git >/dev/null 2>&1 || return 2
+  lib="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/agent-vendor.sh"
+  [[ -f "$lib" ]] || { echo "scripts/lib/agent-vendor.sh missing"; return 2; }
+  # shellcheck source=agent-vendor.sh
+  . "$lib" || return 2
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "not inside a git work tree"; return 2; }
+  # Same gate as loop.sh and the remote kill switch: review-evidence is
+  # GitHub-only and proving a login means asking gh about origin's slug, so an
+  # origin that is not the GH_HOST repository (GitLab, Bitbucket, an alias, an
+  # Enterprise host when GH_HOST says otherwise) is skipped, loudly, with zero
+  # gh calls — never reported as a failure (Codex round six on #525).
+  local slug
+  slug=$(agent_vendor_repo_slug .)
+  if [[ -z "$slug" ]]; then
+    echo "origin '$(git config --get remote.origin.url 2>/dev/null || echo '<none>')' is not a ${GH_HOST:-github.com} repository; review-evidence is GitHub-only, nothing to pre-empt (zero gh calls)"
+    return 4
+  fi
+  head=$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null) || { echo "HEAD is unborn"; return 2; }
+  git rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 || { echo "base ref not found: $base"; return 2; }
+  mb=$(git merge-base "$head" "$base" 2>/dev/null) || { echo "no merge base between HEAD and $base"; return 2; }
+  # Range from the merge-base; the lane-bot identity table from the trusted
+  # BASE ref itself, never from this checkout's own copy.
+  out=$(agent_vendor_unresolved_shas . "$mb" "$head" "$base" "$slug"); rc=$?
+  [[ "$rc" -eq 0 ]] || { echo "cannot walk $mb..$head"; return 2; }
+  [[ -n "$out" ]] || return 0
+  printf '%s\n' "$out"
+  echo "fix: $(agent_vendor_fix_hint)"
+  # Declared means worktree scope with extensions.worktreeConfig on, exactly as
+  # the hooks read it; a --local-only value is not a declaration.
+  if [[ -n "$(agent_vendor_declared .)" ]]; then
+    return 1
+  fi
+  echo "(undeclared checkout: report only; an owner commit resolves through independent review)"
+  return 3
+}
