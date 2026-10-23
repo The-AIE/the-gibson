@@ -401,7 +401,11 @@ requires for a change to who may supply review evidence):
   2026-10-14 and 2026-10-22 (#492, #494, #496, #511, #522). From this merge a
   shell-run `codex-review.sh` verdict is advisory on the-gibson, which is what
   D-014 asks: the owner's word on a reviewer's verdict is the owner in the
-  loop. Claude keeps the countersign path because no Claude App exists.
+  loop, and what Mark's standing order of 2026-10-13 already said ("Go ahead
+  and attest for me for any future sessions I kick off", with the retirement
+  condition "when the-gibson #470 gives Codex a reviewer identity"; recorded
+  in Cortex, scope work/the-gibson, first used on #479). Claude keeps the
+  countersign path because no Claude App exists.
 - Unvendored commits are unchanged: a Codex pass never clears an owner-identity
   commit with no `Agent-Vendor:` trailer; only the independent reviewer does,
   and a Codex fail still blocks beside an independent pass.
