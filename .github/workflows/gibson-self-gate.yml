@@ -98,6 +98,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/lesson-ledger-lint.mjs
 
+      # Public-tree hygiene (#529): fail when a tracked file names something on the
+      # hashed deny-list (private hosts, repos, paths). Hash-only; never echoes the term.
+      - name: Public hygiene
+        run: node scripts/public-hygiene.mjs
+
       # AC4 (#307): fail when a new scripts/*.sh or *.mjs has no gate caller.
       - name: Sensor reachability
         run: node scripts/sensor-reachability.mjs

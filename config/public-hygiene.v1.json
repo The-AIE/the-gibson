@@ -1,0 +1,69 @@
+{
+  "$comment": "Deny-list for scripts/public-hygiene.mjs. Hashes only: SHA-256 of the normalized token (lowercase, alphanumerics joined). Add an entry with: node scripts/public-hygiene.mjs --digest \"term\". Every allow entry needs a reason.",
+  "version": 1,
+  "algorithm": "sha256",
+  "denylist": [
+    {
+      "id": "H01",
+      "digest": "9d6d220ad5946c30f6f23acbb8212c75330ff592b5bd2fffc22f41c6efef28d5"
+    },
+    {
+      "id": "H02",
+      "digest": "abf6a6d51fd88669c2967db6a26e457dd68e6bac001bd6297916751673f9d785"
+    },
+    {
+      "id": "H03",
+      "digest": "9b26c65fe33bf161eea7edd9f1e361783a2ee985b8d5036ddc5b6029f957cd0d"
+    },
+    {
+      "id": "H04",
+      "digest": "824067a802100f81a2d20841e514bafc4d8c10375ac1997e1b6e3854d1c6b9ac"
+    },
+    {
+      "id": "H05",
+      "digest": "751a16d8cb41ea83c7b7c76d8deaa859cb1d10760163b5f184be6a79ed913c85"
+    },
+    {
+      "id": "H06",
+      "digest": "0eb90a59d092c4fca2461d64b86aaf91d2549b2990f5dfc5c3f02f695eb6ae42"
+    },
+    {
+      "id": "H07",
+      "digest": "93643857b87ceed65536214b0565ba3eaee22cf6be2b28e618e93847b4024f19"
+    },
+    {
+      "id": "H08",
+      "digest": "3f0cdfca0348f608e86f88ee51d7f4abef5c4af2243d8fe6ba5b8a6e8f6bd2ba"
+    },
+    {
+      "id": "H09",
+      "digest": "c36051899d680a65d58259d6744fd09e58f4cb55b9f3752383b02c732495ad0f"
+    },
+    {
+      "id": "H10",
+      "digest": "59518e276d8181743b8a97ea18a6213b47938a8559ee7f58a8fd105b5ca10e5d"
+    }
+  ],
+  "allow": [
+    {
+      "path": "docs/adr/0001-independent-review-ready-probe.md",
+      "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
+    },
+    {
+      "path": "docs/adr/independent-review-ready-probe/com.peripety.neuro-independent-review-probe.plist",
+      "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
+    },
+    {
+      "path": "docs/adr/independent-review-ready-probe/neuro-independent-review-probe.py",
+      "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
+    },
+    {
+      "path": "docs/adr/independent-review-ready-probe/test_probe.py",
+      "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
+    },
+    {
+      "path": "memory/DECISIONS.md",
+      "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
+    }
+  ]
+}
