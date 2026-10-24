@@ -10,6 +10,9 @@ WHAT IT DOES
   Appends one markdown table row to memory/recipe-runs.md with role, recipe
   basename, recipe schema version, playbook-sha256 pin, issue, and UTC time.
   Creates the ledger with a header if missing.
+  The ledger is under this repository's memory/ unless GIBSON_PRIVATE_HOME names a
+  private checkout (an absolute path to a directory containing memory/); a set but
+  empty or invalid value exits 2 and writes nothing.
 
 WHY
   Issue #34 / #25: runs must leave a reviewable audit trail so a third party
@@ -51,10 +54,13 @@ done
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GIBSON_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
-LEDGER="$GIBSON_ROOT/memory/recipe-runs.md"
+# shellcheck source=lib/private-home.sh
+. "$SCRIPT_DIR/lib/private-home.sh"
+HOME_DIR=$(gibson_private_home "$GIBSON_ROOT") || exit 2
+LEDGER="$HOME_DIR/memory/recipe-runs.md"
 
-if [[ ! -d "$GIBSON_ROOT/memory" ]]; then
-  echo "recipe-stamp.sh: memory/ missing under $GIBSON_ROOT" >&2
+if [[ ! -d "$HOME_DIR/memory" ]]; then
+  echo "recipe-stamp.sh: memory/ missing under $HOME_DIR" >&2
   exit 1
 fi
 
@@ -116,4 +122,7 @@ printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
   "${repo_base:-—}" \
   >> "$LEDGER"
 
-echo "recipe-stamp.sh: stamped $ROLE/$recipe_base → memory/recipe-runs.md"
+# Default output is unchanged; with the override set, name the resolved private ledger.
+LEDGER_LABEL="memory/recipe-runs.md"
+[[ -n "${GIBSON_PRIVATE_HOME+x}" ]] && LEDGER_LABEL="$LEDGER"
+echo "recipe-stamp.sh: stamped $ROLE/$recipe_base → $LEDGER_LABEL"

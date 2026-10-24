@@ -64,6 +64,33 @@ target area, so it stays cheap. Agents **write** lessons per Law 9.
 exception) so lessons land without a full CI cycle. Same rule is required on
 adopted targets (doc 24).
 
+## Public doctrine vs operator records
+
+Not every record belongs in the public tree. The test is whether a stranger who
+adopts this harness would be helped or confused by it.
+
+| Record | Lives in | Why |
+|---|---|---|
+| A lesson about how the harness fails, with the fix | `memory/LESSONS.md` | General. Every adopter benefits. |
+| A decision about doctrine, gates or mechanism | `memory/DECISIONS.md` | General. |
+| A lesson or decision that names your hosts, private repositories, accounts, local paths or agents | your **private home** | It describes your deployment, not the harness. |
+| An ADR for your own infrastructure (schedulers, hosts, jobs, deployment cards) | your **private home** | Same. |
+| Run ledgers and dogfood evidence from your own fleet | your **private home** | Same. |
+
+**Private home.** Set `GIBSON_PRIVATE_HOME` to an absolute path of a checkout you
+keep private (it needs a `memory/` directory). Scripts that write operator records
+resolve their destination through `scripts/lib/private-home.sh`; unset, they write
+where they always did, so forks and adopters see no change. A bad value fails closed
+rather than falling back to the public tree. Agents that write lessons and decisions
+by hand follow the same rule: if the entry names something private, file it in the
+private home, and file a generalized version here only if the harness lesson stands on
+its own.
+
+**Backstop.** `scripts/public-hygiene.mjs` fails a PR when a tracked file contains a
+term from a hashed deny-list (`config/public-hygiene.v1.json`). It does not replace the
+judgment above; it catches the write-back that slipped past it. Extend the list with
+`node scripts/public-hygiene.mjs --digest "term"`.
+
 ## The ratchet (the self-correcting loop)
 
 The loop, from Fowler, made mandatory:

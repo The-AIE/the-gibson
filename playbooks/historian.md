@@ -86,6 +86,9 @@ Prefer the agent that hit it ships the small fix in-session. Else file
 1. Pull exhaust: merged PRs, CI failures, REQUEST_CHANGES reasons, eval reports,
    MC `cost_usd`, twice-failed tasks, deploy incidents.
 2. Cluster recurring causes; dedup against LESSONS.md.
+   Before filing anything, apply the public/private test in docs/09: an entry that
+   names your hosts, private repositories, accounts or local paths goes to
+   `GIBSON_PRIVATE_HOME`, not `memory/`. File a generalized lesson here only if it stands alone.
 3. File lessons + issues; draft digest for Hermes:
    - what the fleet learned
    - what it changed about itself
