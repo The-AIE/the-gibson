@@ -10,6 +10,9 @@ WHAT IT DOES
   Appends one markdown table row to memory/recipe-runs.md with role, recipe
   basename, recipe schema version, playbook-sha256 pin, issue, and UTC time.
   Creates the ledger with a header if missing.
+  The ledger is under this repository's memory/ unless GIBSON_PRIVATE_HOME names a
+  private checkout (an absolute path to a directory containing memory/); a set but
+  empty or invalid value exits 2 and writes nothing.
 
 WHY
   Issue #34 / #25: runs must leave a reviewable audit trail so a third party
@@ -121,5 +124,5 @@ printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
 
 # Default output is unchanged; with the override set, name the resolved private ledger.
 LEDGER_LABEL="memory/recipe-runs.md"
-[[ -n "${GIBSON_PRIVATE_HOME:-}" ]] && LEDGER_LABEL="$LEDGER"
+[[ -n "${GIBSON_PRIVATE_HOME+x}" ]] && LEDGER_LABEL="$LEDGER"
 echo "recipe-stamp.sh: stamped $ROLE/$recipe_base → $LEDGER_LABEL"

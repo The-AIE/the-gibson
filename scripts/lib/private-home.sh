@@ -19,13 +19,19 @@
 # gibson_private_home DEFAULT_ROOT
 #   Prints GIBSON_PRIVATE_HOME when set, otherwise DEFAULT_ROOT (unchanged
 #   behavior for forks and adopters). A set value must be an absolute path to an
-#   existing directory; anything else is an error, never a silent fallback to the
-#   public tree.
+#   existing directory; anything else, including a set-but-empty value, is an
+#   error, never a silent fallback to the public tree.
 gibson_private_home() {
-  local d="${GIBSON_PRIVATE_HOME:-}"
-  if [[ -z "$d" ]]; then
+  # ${VAR+x} is non-empty when VAR is set at all, even to "": an exported empty value
+  # is a misconfiguration and must fail closed, not silently select the public tree.
+  if [[ -z "${GIBSON_PRIVATE_HOME+x}" ]]; then
     printf '%s\n' "${1:-.}"
     return 0
+  fi
+  local d="$GIBSON_PRIVATE_HOME"
+  if [[ -z "$d" ]]; then
+    echo "private-home: GIBSON_PRIVATE_HOME is set but empty; unset it or give an absolute path" >&2
+    return 2
   fi
   case "$d" in
     /*) ;;

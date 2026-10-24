@@ -218,7 +218,7 @@ EVIDENCE_HOME=$(gibson_private_home "$GIBSON") || exit 2
 EVIDENCE_DIR="$EVIDENCE_HOME/memory/dogfood"
 # Default output is unchanged; with the override set, name the resolved private directory.
 EVIDENCE_LABEL="memory/dogfood"
-[[ -n "${GIBSON_PRIVATE_HOME:-}" ]] && EVIDENCE_LABEL="$EVIDENCE_DIR"
+[[ -n "${GIBSON_PRIVATE_HOME+x}" ]] && EVIDENCE_LABEL="$EVIDENCE_DIR"
 if [[ -d "$EVIDENCE_DIR" ]]; then
   ok "evidence dir $EVIDENCE_DIR"
 else

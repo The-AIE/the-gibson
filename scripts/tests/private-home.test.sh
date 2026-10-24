@@ -45,6 +45,16 @@ out=$(GIBSON_PRIVATE_HOME="relative/dir" bash -c ". '$LIB'; gibson_private_home 
 out=$(GIBSON_PRIVATE_HOME="$ROOT/does-not-exist" bash -c ". '$LIB'; gibson_private_home /some/default" 2>&1); rc=$?
 [[ $rc -eq 2 && "$out" != *"/some/default"* ]] && ok "missing directory rejected" || bad "missing rc=$rc out=$out"
 
+echo "# resolver: an exported EMPTY value fails closed (does not select the public tree)"
+out=$(GIBSON_PRIVATE_HOME="" bash -c ". '$LIB'; gibson_private_home /some/default" 2>&1); rc=$?
+[[ $rc -eq 2 && "$out" != *"/some/default"* && "$out" == *"set but empty"* ]] && ok "empty GIBSON_PRIVATE_HOME exits 2 and prints no default root" || bad "empty override rc=$rc out=$out"
+T0="$ROOT/t0"; fake_tree "$T0"
+out=$(GIBSON_PRIVATE_HOME="" bash -c "$(declare -f stamp); stamp '$T0'"); rc=$?
+if [[ $rc -eq 2 && ! -s "$T0/memory/recipe-runs.md" ]]; then ok "recipe-stamp with an empty override exits 2 and writes nothing to the tree"; else bad "empty override stamp rc=$rc out=$out"; fi
+mkdir -p "$ROOT/app0/docs"; git init -q "$ROOT/app0"; git -C "$ROOT/app0" remote add origin "https://github.com/acme/app.git"
+out=$(GIBSON_PRIVATE_HOME="" "$REPO_ROOT/scripts/dogfood-prep.sh" --repo "$ROOT/app0" --repo-slug acme/app --check-only 2>&1); rc=$?
+[[ $rc -eq 2 ]] && ok "dogfood-prep with an empty override exits 2" || bad "dogfood-prep empty override rc=$rc out=$out"
+
 echo "# default: recipe-stamp writes into the tree's own memory/"
 T1="$ROOT/t1"; fake_tree "$T1"
 out=$(env -u GIBSON_PRIVATE_HOME bash -c "$(declare -f stamp); stamp '$T1'"); rc=$?
