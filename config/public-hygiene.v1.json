@@ -46,22 +46,6 @@
   ],
   "allow": [
     {
-      "path": "docs/adr/0001-independent-review-ready-probe.md",
-      "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
-    },
-    {
-      "pathDigest": "34afab9b37d25d1aaba153e27437e0b92185513f997b08a045feb8b7dd99d7a4",
-      "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
-    },
-    {
-      "pathDigest": "00cca4e60989a7d5dd50c7b44c1a02fce4534ec34a866268853650acb29dbd41",
-      "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
-    },
-    {
-      "path": "docs/adr/independent-review-ready-probe/test_probe.py",
-      "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
-    },
-    {
       "path": "memory/DECISIONS.md",
       "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
     }
