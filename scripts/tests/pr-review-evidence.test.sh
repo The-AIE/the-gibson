@@ -551,15 +551,27 @@ fi
 
 extreview() { printf '<!-- owner-attested-review:v1\\nhead-sha: %s\\nreviewer-vendor: %s\\nresult: %s\\n-->' "$1" "$2" "$3"; }
 
-echo "# #366 — owner-attested review for a vendor with no GitHub App (Claude; Codex until #470 listed chatgpt-codex-connector[bot])"
+echo "# #366 — owner-attested review for a vendor with no GitHub App (Claude), or one the config exempts (Codex, ownerCountersignVendors, D-019)"
 d=$(fx_new x1); fx_files "$d" src/app.ts; fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" claude pass)"
 expect "(x1) grok author + owner-attested claude PASS" "$d" pass success 0
 d=$(fx_new x2); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" claude fail)"
 expect "(x2) grok author + owner-attested claude FAIL" "$d" changes-requested failure 1
 d=$(fx_new x3); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" grok pass)"
-expect "(x3) attested vendor already has a real App identity (grok) → refused, not evidence" "$d" no-receipt-at-head pending 0
-d=$(fx_new x3c); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" codex pass)"
-expect "(x3c) owner-attested codex PASS is refused since #470: Codex has a real App reviewer identity (D-019)" "$d" no-receipt-at-head pending 0
+expect "(x3) attested vendor already has a real App identity (grok) → refused, not evidence, with ownerCountersignVendors present (D-019 exempts codex only)" "$d" no-receipt-at-head pending 0
+d=$(fx_new x3c); fx_files "$d" src/app.ts; fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" codex pass)"
+expect "(x3c) owner-attested codex PASS stays accepted beside the Codex App identity: ownerCountersignVendors names codex (Mark, 2026-10-23, D-019)" "$d" pass success 0
+d=$(fx_new x3d); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" codex fail)"
+expect "(x3d) owner-attested codex FAIL still blocks (the exemption opens both directions)" "$d" changes-requested failure 1
+node -e 'const c=require(process.argv[1]); delete c.ownerCountersignVendors; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/no-ocv.json"
+d=$(fx_new x3e); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" codex pass)"
+expect "(x3e) without ownerCountersignVendors the Codex App identity closes the countersign (#366 rule, nothing implicit)" "$d" no-receipt-at-head pending 0 "$ROOT/no-ocv.json"
+node -e 'const c=require(process.argv[1]); c.ownerCountersignVendors=["codex","grok"]; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ocv-grok.json"
+d=$(fx_new x3f); fx_files "$d" src/app.ts; fx_commits "$d" "$DEVIN"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" grok pass)"
+expect "(x3f) the exemption is config-driven: a config that lists grok opens grok's countersign (the shipped config does not, see x3)" "$d" pass success 0 "$ROOT/ocv-grok.json"
+for spec in 'c.ownerCountersignVendors=["claude"]' 'c.ownerCountersignVendors=["coderabbit"]' 'c.ownerCountersignVendors=["independent"]' 'c.ownerCountersignVendors=["codex","codex"]' 'c.ownerCountersignVendors="codex"' 'c.ownerCountersignVendors=["bogus"]'; do
+  node -e 'const c=require(process.argv[1]); eval(process.argv[2]); process.stdout.write(JSON.stringify(c))' "$CFG" "$spec" > "$ROOT/ocv-bad.json"
+  expect "(x3g) config rejects: $spec" "$d" config-error failure 1 "$ROOT/ocv-bad.json"
+done
 d=$(fx_new x4); fx_commits "$d" "$OWNER"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" claude)" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" claude pass)"
 expect "(x4) owner attests author-vendor claude, then attests reviewer-vendor claude → same-vendor" "$d" same-vendor-reviewer failure 1
 d=$(fx_new x5); fx_commits "$d" "$GROK"; fx_comments "$d" "$DEVIN|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" claude pass)"
@@ -637,9 +649,11 @@ expect "(385-att-review) unsigned allowed Mini SHA with attestation + independen
 expect_av "(385-att-review)" '["codex"]'
 
 # Reviewer eligibility: Codex cannot review its own allowed author; Claude or a listed App can.
-# (#470: the Codex verdict arrives through its App identity now; an owner-attested codex review is refused outright, see x3c.)
+# (#470: both Codex paths, the App identity and the owner countersign, obey the same-vendor rule.)
 d=$(fx_new 385cx); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_comments "$d" "$CODEX|NONE|$CODEX_APP|$CODEX_APPID|9|2026-09-04T12:00:00Z|$(receipt "$HEAD" pass)"
 expect "(385-codex-review) Codex App reviewer PASS is rejected for allowed Codex authors" "$d" same-vendor-reviewer failure 1
+d=$(fx_new 385cx2); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" codex pass)"
+expect "(385-codex-countersign) owner-attested codex PASS is rejected for allowed Codex authors too" "$d" same-vendor-reviewer failure 1
 d=$(fx_new 385cl); fx_files "$d" src/app.ts; fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" claude pass)"
 expect "(385-claude-review) eligible Claude owner-attested review passes" "$d" pass success 0
 d=$(fx_new 385cr); fx_files "$d" src/app.ts; fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_reviews "$d" "$CR|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
@@ -808,8 +822,8 @@ TRAILER_CLAUDE=$'fix: thing\n\nAgent-Vendor: claude\nSigned-off-by: Mark Hinkle 
 TRAILER_CODEX=$'fix: thing\n\nAgent-Vendor: codex\nSigned-off-by: Mark Hinkle <maintainer@example.com>'
 # Shipped config shape: exactly one codex reviewer identity, reviewer-only, bound to the App by slug AND id, and not an author identity.
 node -e 'const c=require(process.argv[1]); const r=c.identities.filter(i=>i.vendor==="codex"&&i.roles.includes("reviewer")); const a=c.identities.filter(i=>i.vendor==="codex"&&i.roles.includes("author"));
-  const ok=r.length===1&&r[0].login==="chatgpt-codex-connector[bot]"&&r[0].appSlug==="chatgpt-codex-connector"&&r[0].appId===1144995&&r[0].roles.length===1&&a.length>=1&&a.every(x=>x.login!==r[0].login&&!x.roles.includes("reviewer")); process.exit(ok?0:1)' "$CFG" \
-  && ok "(cx0) shipped config: one codex reviewer identity, reviewer-only, slug+id bound, distinct from every codex author identity" || bad "(cx0) shipped config codex identities are not shaped as D-019 requires"
+  const ok=r.length===1&&r[0].login==="chatgpt-codex-connector[bot]"&&r[0].appSlug==="chatgpt-codex-connector"&&r[0].appId===1144995&&r[0].roles.length===1&&a.length>=1&&a.every(x=>x.login!==r[0].login&&!x.roles.includes("reviewer"))&&JSON.stringify(c.ownerCountersignVendors)===JSON.stringify(["codex"]); process.exit(ok?0:1)' "$CFG" \
+  && ok "(cx0) shipped config: one codex reviewer identity, reviewer-only, slug+id bound, distinct from every codex author identity; ownerCountersignVendors is exactly [codex]" || bad "(cx0) shipped config codex identities / ownerCountersignVendors are not shaped as D-019 requires"
 # 1. A Codex reviewer pass on a claude-authored head resolves.
 d=$(fx_new cx1); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 "$TRAILER_CLAUDE"; fx_files "$d" scripts/claim.sh; fx_comments "$d" "$CODEX_PASS"
 expect "(cx1) claude-authored head (Agent-Vendor: claude) + Codex App receipt pass" "$d" pass success 0; expect_av "(cx1)" '["claude"]'; expect_detail "(cx1)" "chatgpt-codex-connector[bot]"

@@ -9,6 +9,9 @@
     "devin",
     "human"
   ],
+  "ownerCountersignVendors": [
+    "codex"
+  ],
   "identities": [
     {
       "login": "aie-agent-lanes-grok[bot]",

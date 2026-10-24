@@ -24,8 +24,9 @@
  *     an App-authored `review-evidence:v1` comment at the exact head, or an
  *     owner-countersigned `owner-attested-review:v1` comment (#366) for a
  *     vendor with no GitHub App on this repo (e.g. Claude, run locally) —
- *     refused for any vendor that already has a real App reviewer identity
- *     (since #470 / D-019 that includes Codex: `chatgpt-codex-connector[bot]`).
+ *     refused for any vendor that already has a real App reviewer identity,
+ *     except the vendors the config names in `ownerCountersignVendors`
+ *     (#470 / D-019: Codex, whose App posts no evidence here yet).
  *     Per identity the newest evidence at this head wins.
  *   - Eligibility: the reviewer's vendor differs from every resolved author
  *     vendor; `unknown` is never eligible. Human reviews and comments from
@@ -83,7 +84,7 @@ const SHA40 = /^[0-9a-f]{40}$/;
 const VENDORS = new Set(["grok", "codex", "claude", "devin", "coderabbit", "independent", "owner", "human", "unknown"]);
 const AUTHOR_COMMIT_VENDORS = new Set(["grok", "codex", "claude", "devin"]);
 const ROLES = new Set(["author", "reviewer"]);
-const CONFIG_KEYS = new Set(["schemaVersion", "context", "ownerLogin", "attestationVendors", "identities"]);
+const CONFIG_KEYS = new Set(["schemaVersion", "context", "ownerLogin", "attestationVendors", "ownerCountersignVendors", "identities"]);
 const IDENTITY_KEYS = new Set(["login", "appSlug", "appId", "vendor", "roles", "authorCommits"]);
 // GitHub's own committer for web-UI edits; not a vendor, not an author of record.
 const GITHUB_WEB_FLOW = "web-flow";
@@ -199,6 +200,23 @@ export function validateConfig(cfg) {
     if (!known || v === "unknown" || v === "owner" || v === "coderabbit" || v === "independent") fail(`attestationVendors:${v}`);
   }
   if (!Array.isArray(cfg.identities) || cfg.identities.length === 0) fail("identities");
+  // ownerCountersignVendors (D-019, Mark 2026-10-23): vendors whose App reviewer
+  // identity does NOT close the owner-countersign path. Optional; default none.
+  // Each entry must be an attestation vendor that actually has an App reviewer
+  // identity in this config (otherwise the entry is dead and the config is
+  // saying something false), listed once. Codex is the only one today: its App
+  // (Codex in GitHub) posts no evidence on this repo, so a hand-run Codex
+  // verdict countersigned by the owner is the only way it reaches the gate
+  // until the App does.
+  const ocv = cfg.ownerCountersignVendors ?? [];
+  if (!Array.isArray(ocv)) fail("ownerCountersignVendors");
+  const seenOcv = new Set();
+  for (const v of ocv) {
+    if (typeof v !== "string" || !cfg.attestationVendors.includes(v)) fail(`ownerCountersignVendors:${v}`);
+    if (seenOcv.has(v)) fail(`ownerCountersignVendors:duplicate:${v}`);
+    seenOcv.add(v);
+    if (!cfg.identities.some((i) => i && i.vendor === v && Array.isArray(i.roles) && i.roles.includes("reviewer") && i.appSlug)) fail(`ownerCountersignVendors:no-app-reviewer:${v}`);
+  }
   const seen = new Set();
   for (const id of cfg.identities) {
     if (!id || typeof id !== "object") fail("identity:not-an-object");
@@ -391,12 +409,16 @@ export function editedAtAll(c) {
  * Vendors that already have a real GitHub-App reviewer identity in the
  * config: `ownerAttestedReview` refuses to countersign for these — the
  * external path exists ONLY for a vendor with no App presence (Claude,
- * human; Codex until #470 gave it `chatgpt-codex-connector[bot]`), never as
- * a weaker shortcut around one that could post real, machine-verified
- * evidence itself.
+ * human), never as a weaker shortcut around one that could post real,
+ * machine-verified evidence itself. One explicit exception, named in the
+ * config's `ownerCountersignVendors` (D-019, Mark 2026-10-23): Codex has an
+ * App reviewer identity (`chatgpt-codex-connector[bot]`, #470) but that App
+ * posts no evidence on this repo today, so the countersign stays open for it
+ * until it does. Every other App vendor (grok, devin, coderabbit,
+ * independent) remains blocked.
  */
-function appReviewerVendors(identities) {
-  return new Set(identities.filter((i) => i.roles.includes("reviewer") && i.appSlug).map((i) => i.vendor));
+function appReviewerVendors(identities, ownerCountersignVendors = []) {
+  return new Set(identities.filter((i) => i.roles.includes("reviewer") && i.appSlug && !ownerCountersignVendors.includes(i.vendor)).map((i) => i.vendor));
 }
 
 // The identity key every `owner-attested-review:v1` item is filed under in
@@ -410,8 +432,8 @@ const OWNER_EXTERNAL_REVIEW_LOGIN = "owner-attested-review";
 /**
  * Owner-countersigned review from a vendor with no GitHub App on this repo
  * (e.g. Claude, run locally — there is no Claude App to post a
- * `review-evidence:v1` comment through; Codex lost this path when #470
- * listed its App as a reviewer, see D-019). Mirrors
+ * `review-evidence:v1` comment through; Codex keeps this path by explicit
+ * config although #470 listed its App as a reviewer, see D-019). Mirrors
  * `ownerAttestation`'s exact trust boundary (OWNER/MEMBER login match,
  * exact-head bound) but carries a review verdict rather than an
  * author-vendor claim. Returns a synthetic reviewer "identity" item, a
@@ -449,10 +471,10 @@ export function ownerAttestedReview(c, ownerLogin, headSha, allowedVendors, bloc
   return { identity: { login: OWNER_EXTERNAL_REVIEW_LOGIN, vendor, roles: ["reviewer"] }, result: b.result, at, id: Number(c?.id ?? 0), source: "comment" };
 }
 
-export function collectEvidence({ reviews, comments, identities, headSha, notBefore = 0, ownerLogin = null, attestationVendors = [] }) {
+export function collectEvidence({ reviews, comments, identities, headSha, notBefore = 0, ownerLogin = null, attestationVendors = [], ownerCountersignVendors = [] }) {
   const reviewers = identities.filter((i) => i.roles.includes("reviewer"));
   const byLogin = new Map(reviewers.map((i) => [norm(i.login), i]));
-  const blockedVendors = appReviewerVendors(identities);
+  const blockedVendors = appReviewerVendors(identities, ownerCountersignVendors);
   const items = [];
   let staleReceipts = 0;
   let staleBase = 0;
@@ -493,7 +515,8 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
       }
     }
     // Owner-countersigned review for a vendor with no GitHub App on this
-    // repo (Claude, human) — see ownerAttestedReview above.
+    // repo (Claude, human), or one the config exempts (Codex) — see
+    // ownerAttestedReview above.
     if (ownerLogin) {
       const ext = ownerAttestedReview(c, ownerLogin, headSha, attestationVendors, blockedVendors);
       if (ext) {
@@ -571,7 +594,7 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   // A base retarget keeps the head SHA but changes the diff (round 4,
   // finding 3): evidence created before the last base_ref_changed is stale.
   const notBefore = lastBaseChange(timeline);
-  const { newest, staleReceipts, staleBase } = collectEvidence({ reviews, comments, identities: config.identities, headSha: head, notBefore, ownerLogin: config.ownerLogin, attestationVendors: config.attestationVendors });
+  const { newest, staleReceipts, staleBase } = collectEvidence({ reviews, comments, identities: config.identities, headSha: head, notBefore, ownerLogin: config.ownerLogin, attestationVendors: config.attestationVendors, ownerCountersignVendors: config.ownerCountersignVendors ?? [] });
   // Owner-identity commits with no named vendor (outside the carve-outs): the
   // author's vendor is unknowable, so only an `independent` reviewer is
   // provably cross-vendor. Without one, the identity stays unresolved.

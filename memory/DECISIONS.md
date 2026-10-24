@@ -367,7 +367,7 @@ full scan every 60 s (~86k REST calls/day); a "review-ready" status set in CI
 Revisit when: probe-started runs review nothing for a week, or App rate-limit
 headroom drops below 1,000 points.
 
-## D-019 · 2026-10-23 · Codex reviews under its own App identity; the Mini author App never reviews; the owner countersign for Codex is closed
+## D-019 · 2026-10-23 · Codex reviews under its own App identity; the Mini author App never reviews; the owner countersign for Codex stays open by explicit config
 Decided (proposed by the #470 lane on 2026-10-23 after Mark asked why Codex is
 only advisory and said it should be a trusted reviewer; the owner's merge of the
 Tier C pull request that carries this record is the sign-off AGENTS.md's ratchet
@@ -394,18 +394,28 @@ requires for a change to who may supply review evidence):
   plus a summary comment ("Codex Review: Didn't find any major issues") with a
   10-character "Reviewed commit" prefix, so it carries neither a verdict under
   the fleet severity contract nor an exact head.
-- Intended consequence: the owner-countersigned `owner-attested-review:v1`
-  path (#366) no longer accepts `reviewer-vendor: codex`, because #366's own
-  rule refuses a countersign for any vendor that has a real App reviewer
-  identity. That path carried Codex verdicts on five Gibson PRs between
-  2026-10-14 and 2026-10-22 (#492, #494, #496, #511, #522). From this merge a
-  shell-run `codex-review.sh` verdict is advisory on the-gibson, which is what
-  D-014 asks: the owner's word on a reviewer's verdict is the owner in the
-  loop, and what Mark's standing order of 2026-10-13 already said ("Go ahead
-  and attest for me for any future sessions I kick off", with the retirement
-  condition "when the-gibson #470 gives Codex a reviewer identity"; recorded
-  in Cortex, scope work/the-gibson, first used on #479). Claude keeps the
-  countersign path because no Claude App exists.
+- The owner-countersigned `owner-attested-review:v1` path (#366) STAYS OPEN
+  for `reviewer-vendor: codex` (Mark, 2026-10-23, "okay make that a change",
+  reversing this record's first draft, which closed it). #366's rule refuses
+  a countersign for any vendor with a real App reviewer identity, so the
+  config now carries an explicit allowance, `ownerCountersignVendors:
+  ["codex"]`, that the evaluator subtracts from the blocked set; every other
+  App vendor (grok, devin, coderabbit, independent) stays blocked, and a
+  countersigned Codex review still obeys the same-vendor rule and the
+  unvendored-commit rule like any other evidence. Why: the Mini App's sweep is
+  the only App path that posts Codex evidence on this repository today, and
+  Mark wants a hand-run `codex-review.sh` verdict to still count, through
+  his countersign, when the sweep has not reached a head. The path carried
+  Codex verdicts on #492, #494, #496, #511 and #522 between 2026-10-14 and
+  2026-10-22. Mark's standing order of 2026-10-13 ("Go ahead and attest for
+  me for any future sessions I kick off", retirement condition "when
+  the-gibson #470 gives Codex a reviewer identity"; recorded in Cortex, scope
+  work/the-gibson, first used on #479) therefore does NOT retire with this
+  record; its retirement moves to the revisit condition below. Claude keeps
+  the countersign path because no Claude App exists. The validator refuses an
+  `ownerCountersignVendors` entry that is not an attestation vendor, has no
+  App reviewer identity in the config, or is listed twice, so the allowance
+  cannot be dead text or a typo.
 - Unvendored commits are unchanged: a Codex pass never clears an owner-identity
   commit with no `Agent-Vendor:` trailer; only the independent reviewer does,
   and a Codex fail still blocks beside an independent pass.
@@ -427,10 +437,11 @@ requires for a change to who may supply review evidence):
   reviewer.
 - How a Codex verdict reaches the gate today is unchanged by this record: the
   Mini App runs Grok then Codex and posts under `independent` (first on
-  the-gibson#531, 2026-10-23). The new identity adds Codex in GitHub as a
-  second path once it posts a `review-evidence:v1` block; as of this record no
-  comment on the-gibson has ever been posted through the App, and the recipe
-  for making Codex in GitHub emit the block is unwritten.
+  the-gibson#531, 2026-10-23; it also cleared the PR carrying this record,
+  #534), or the owner countersigns a hand-run verdict. The new identity adds
+  Codex in GitHub as a third path once it posts a `review-evidence:v1` block;
+  as of this record no comment on the-gibson has ever been posted through the
+  App, and the recipe for making Codex in GitHub emit the block is unwritten.
 Why: #469 on 2026-10-09 (Grok stalled 19 minutes on a 700-line diff while a
 Codex review found six rounds of real defects that could not be recorded as
 evidence), and D-015's accepted risk named reviewer availability as the live
@@ -439,14 +450,20 @@ Codex verdict under the Grok App would misattribute it; posting it under the
 Mini author App would let one login author and review.
 Rejected: adding `reviewer` to the Mini author App (one login authoring and
 reviewing; the `authorCommits` allowlist is author-only by construction);
-keeping the owner countersign for codex beside the App (two paths for one
-vendor, the weaker one resting on the owner's word, the shape #366 refused and
-D-014 removed); parsing Codex's native review summary as a receipt (vendor UI
+closing the owner countersign for codex the moment the App identity exists
+(this record's first draft: two paths for one vendor, the weaker one resting
+on the owner's word, the shape #366 refused and D-014 removed; Mark weighed
+that against losing the hand-run Codex verdict whenever the Mini sweep has not
+reached a head, and kept the path, by explicit config rather than by
+weakening #366 for everyone); an implicit exemption in code (a constant would
+hide a trust decision from the trust file); parsing Codex's native review summary as a receipt (vendor UI
 text, Codex's own severity bar instead of the fleet contract, a prefix instead
 of an exact head); a new vendor name for the reviewer identity (would dodge
 same-vendor exclusion on codex-authored heads).
 Revisit when: Codex in GitHub posts its first `review-evidence:v1` block on
-this repository (write the recipe into gibson-ship); or a `codex-review.sh`
-verdict is needed at the gate and the Mini App has not covered the-gibson for
-a week; or `merged_by` is recorded in delivery receipts (then enforce the
-merger/reviewer separation instead of describing it).
+this repository (write the recipe into gibson-ship, then remove `codex` from
+`ownerCountersignVendors` and retire the 2026-10-13 standing order, as it
+always said); or the Mini sweep has covered every Gibson head for a month
+without a countersign being needed (same removal); or `merged_by` is
+recorded in delivery receipts (then enforce the merger/reviewer separation
+instead of describing it).
