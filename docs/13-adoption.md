@@ -191,5 +191,68 @@ A Tier A issue can go plan→issue→build→test→review→eval→merge→depl
 **zero human touches**, and a Tier C issue stops at exactly the human gates and
 nowhere else.
 
+## Repos governed by the Gibson (as of 2026-10-21)
+
+Two real repos, read from their trees and settings on the date above, so the words "adopted" and
+"not adopted" mean something checkable. Re-read before quoting; both move weekly.
+
+### ConferenceOS — `The-AIE/conference-os`
+
+**Product:** open source conference management platform (events, registration and checkout,
+speakers, sponsors, organizer console, public event sites, an MCP server for agents).
+
+**Gibson pieces installed:**
+
+- Green gate twin: `.agents/gate.json`.
+- Claim isolation: `scripts/check-active-work.mjs`, GitHub-native (the PR body's
+  `- Active-work claim:` / `- Isolation:` lines are the claim), run in CI job `quality`.
+- Review evidence: `scripts/pr-review-evidence.mjs`, `.github/review-evidence-trust.json`,
+  `.github/workflows/pr-review-evidence.yml` publishing the `review-evidence` commit status.
+  Same-actor rule on owner attestations (#925); owner out of the loop since D-014.
+- Merge captain: `.github/workflows/merge-on-green.yml` (squash, `--match-head-commit`,
+  refuses heads behind `main`). Risk classifier: `pr-risk-triage.yml`. Security:
+  `security-gate.yml`.
+- Branch protection on `main`: `quality`, `build-e2e-required`, `DCO`, `review-evidence`.
+  DCO on every commit.
+- Delivery control: `docs/RELEASING.md` release role; Production Branch `release`; production
+  migrations only through the `production-migrate` workflow (rehearsal on a Neon branch, then
+  apply); `scripts/promote-install.mjs` is dry-run only by design.
+- Independent reviewer: the Mac Mini `aie-independent-review` App covers this repo. It is the
+  only repository in that controller's policy today.
+
+**Not installed, or different from the Gibson's templates:** no `.agents/gibson-delivery.json`
+(required contexts come from branch protection); its own test-integrity sensors
+(`agent-test-integrity.mjs`, `check-changed-code-test-ratchet.mjs`) rather than the Gibson's
+`test-integrity.mjs`; the public `AGENTS.md` carries no Gibson pointers since the OSS cleanup.
+
+**Adoption state:** adopted in substance. Several Gibson gates were first proven here and
+generalized back. Routine PRs land with zero human touches when the App passes a head that
+contains the `main` tip. The cost of the exact-head design is visible: conference-os#2357
+(2026-10-21) took over two hours from first push to a verdict, mostly in reviewer ticks and a
+discarded review (ADR-0001, ADR-0002).
+
+### Agent Kontrol — `mrhinkle/agent-kontrol`
+
+**Product:** open source dashboard and MCP server for a fleet of coding agents (status reports,
+task queue, progress board, run observability). Formerly Mission Control; the Vercel project still
+carries that name.
+
+**Gibson pieces installed:** none. No `.agents/` directory, no `check-active-work.mjs`, no
+review-evidence script, trust file or workflow, no merge captain, no risk classifier, no DCO or
+`Agent-Vendor` convention. The only workflow is `ci.yml` (typecheck, tests against Postgres,
+Docker build with a login probe). No branch protection on `main` or `release`. The Mac Mini
+reviewer does not cover it.
+
+**Delivery path (verified from Vercel, not from a promote):** project `mission-control`, team
+`the-aie`, Production Branch `release`, domain `fleet.peripety.com`, git-triggered; last
+production deploy 2026-10-17 from `release` at `1e0b052e` (#39). `docs/DEPLOY.md` documents the
+`main → release` PR as the release step; `scripts/apply-schema.mjs` runs in the build, which is
+not a reviewed-migration path.
+
+**Adoption state:** not adopted. Two observations from the history: #39 was a feature branch
+authored and merged by the Grok lane bot straight into `release`, bypassing `main`; and on
+2026-10-21 `release` was 2 commits ahead of `main` while `main` was 9 ahead of `release`. Start
+with `gibson-audit`, then `gibson-setup`; until then nothing in steps 1 to 5 above applies to it.
+
 ---
 [← 12 · Shipping to Vercel safely](12-vercel.md) · [Home](../index.md) · [14 · The sixteen interruptions →](14-human-gates.md) · [20 · Delivery control](23-delivery-control.md)
