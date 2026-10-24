@@ -9,6 +9,9 @@
     "devin",
     "human"
   ],
+  "ownerCountersignVendors": [
+    "codex"
+  ],
   "identities": [
     {
       "login": "aie-agent-lanes-grok[bot]",
@@ -31,6 +34,15 @@
       "authorCommits": [
         "5ced13878f802c5810bdf098b954e0759cb659e5",
         "a36c6272560b785307c3b47d3f69e6be81ec2979"
+      ]
+    },
+    {
+      "login": "chatgpt-codex-connector[bot]",
+      "appSlug": "chatgpt-codex-connector",
+      "appId": 1144995,
+      "vendor": "codex",
+      "roles": [
+        "reviewer"
       ]
     },
     {
