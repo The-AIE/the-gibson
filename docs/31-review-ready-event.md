@@ -53,10 +53,11 @@ timestamps below).
 
 ## Who consumes it
 
-The independent-review controller on the Mac Mini (`mrhinkle/neuro-hermes-chief-of-staff`,
-PR #45, issue #44) reviews the named head immediately in a per-repository lane, instead of
-waiting for its 900 s tick. The tick stays as the fallback sweep. The controller holds an
-outbound connection to a relay; the host has no inbound path.
+The operator's independent-review controller (the host that posts the `aie-independent-review`
+verdicts; its code lives in the operator's private repository) reviews the named head
+immediately in a per-repository lane, instead of waiting for its 900 s tick. The tick stays as
+the fallback sweep. The controller holds an outbound connection to a relay; its host has no
+inbound path. Its change is tracked in #562 (item 2).
 
 ## Measurement
 
