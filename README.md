@@ -62,7 +62,7 @@ Three layers:
 
 The Gibson is the **harness**. Mission Control, the companion project,
 remains the **runtime control plane** (task queue, telemetry, cross-vendor dispatch).
-They compose: Mission Control decides *who* works; The Gibson decides *how* they work.
+They compose: Mission Control queues, dispatches, and tracks the work (the person or coordinating agent who files a task chooses *who* works on it, following the routing playbook); The Gibson decides *how* they work.
 
 ## The pipeline at a glance
 
