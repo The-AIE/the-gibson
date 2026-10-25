@@ -57,7 +57,8 @@ export PATH="$BIN:$PATH"
 
 # fixture NAME — bare origin + clone holding this repo's scripts/ and .githooks/ on main
 fixture() {
-  local name="$1" bare="$ROOT/$1.git" wc="$ROOT/$1"
+  local name="$1" bare wc
+  bare="$ROOT/$name.git"; wc="$ROOT/$name"
   git init -q --bare -b main "$bare"
   git clone -q "$bare" "$wc" 2>/dev/null
   git -C "$wc" checkout -q -b main 2>/dev/null || true
