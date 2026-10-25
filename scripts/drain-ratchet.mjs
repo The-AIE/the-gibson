@@ -56,15 +56,18 @@ const PAGE_CAP = 60;
 const FILES_PAGE_CAP = 30;
 const CONFIG_KEYS = [
   "mode", "windowDays", "baselineDays", "marginPct", "consecutiveWindows",
-  "floorOpened", "stalePrDays", "deadlineDays", "maxSuspects", "stopLabels",
+  "floorOpened", "ownerLogins", "stalePrDays", "deadlineDays", "maxSuspects", "stopLabels",
   "stopTitlePattern", "processPaths",
 ];
 
 export class Incomplete extends Error {}
 
-/** Sensor-owned only when BOTH the title prefix and the hidden marker are present. */
-export function isRatchetIssue(x) {
-  return x.title.startsWith(TITLE_PREFIX) && x.body.includes(MARKER);
+/**
+ * Sensor-owned only when the title prefix, the hidden marker AND a trusted author (the
+ * identity the workflow writes as) are all present: title and body are forgeable by anyone.
+ */
+export function isRatchetIssue(x, cfg) {
+  return x.title.startsWith(TITLE_PREFIX) && x.body.includes(MARKER) && cfg.ownerLogins.includes(x.author);
 }
 
 function fail(msg) {
@@ -98,6 +101,7 @@ export function validateConfig(c) {
   }
   if (!Number.isInteger(c.floorOpened) || c.floorOpened < 0) fail("config.floorOpened: integer >= 0 required");
   if (typeof c.marginPct !== "number" || c.marginPct < 0 || c.marginPct >= 100) fail("config.marginPct: number in [0,100) required");
+  if (!Array.isArray(c.ownerLogins) || c.ownerLogins.length === 0 || c.ownerLogins.some((x) => typeof x !== "string")) fail("config.ownerLogins: non-empty string[] required");
   if (!Array.isArray(c.stopLabels) || c.stopLabels.some((x) => typeof x !== "string")) fail("config.stopLabels: string[] required");
   try {
     new RegExp(c.stopTitlePattern);
@@ -200,7 +204,7 @@ export function analyze({ pulls, issues, config, now }) {
   const win = cfg.windowDays * DAY;
   const base = cfg.baselineDays * DAY;
   const lookbackStart = now - (cfg.consecutiveWindows * win + base);
-  const own = isRatchetIssue;
+  const own = (x) => isRatchetIssue(x, cfg);
   const ratchetIssues = issues.filter(own);
   const workIssues = issues.filter((x) => !own(x));
 
@@ -211,7 +215,10 @@ export function analyze({ pulls, issues, config, now }) {
     const cur = measure(pulls, workIssues, start, end);
     const baseline = measure(pulls, workIssues, start - base, start);
     const floorOk = cur.opened >= cfg.floorOpened && baseline.opened >= cfg.floorOpened;
-    const below = cur.rate !== null && baseline.rate !== null && cur.rate < baseline.rate * (1 - cfg.marginPct / 100);
+    // Exact integer comparison: drained/opened < baseDrained/baseOpened * (100 - margin)/100.
+    // The rounded display rates must never decide a boundary case.
+    const below = cur.opened > 0 && baseline.opened > 0
+      && cur.drained * baseline.opened * 100 < baseline.drained * cur.opened * (100 - cfg.marginPct);
     let status = "ok";
     if (cur.rate === null || baseline.rate === null) status = "suppressed-no-data";
     else if (!floorOk) status = "suppressed-floor";

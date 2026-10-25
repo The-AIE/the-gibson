@@ -7,6 +7,7 @@
   "marginPct": 25,
   "consecutiveWindows": 2,
   "floorOpened": 8,
+  "ownerLogins": ["github-actions[bot]"],
   "stalePrDays": 7,
   "deadlineDays": 7,
   "maxSuspects": 10,

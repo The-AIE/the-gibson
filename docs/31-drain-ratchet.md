@@ -53,8 +53,10 @@ the suspects, a recovery owner (author of the most recent suspect), a deadline (
 kept on later runs), and the default action if the deadline passes: revert the suspect,
 or for an open freeze lift it and make the parked queue the first day's work (a drain
 day). If an issue is already open it is updated, never duplicated; the next run where
-the breach clears closes it. The sensor only touches issues that carry its hidden marker
-in the body; a lookalike title written by a person is ordinary backlog.
+the breach clears closes it. The sensor only touches issues that carry its title prefix, its hidden
+marker AND an author in `ownerLogins` (`github-actions[bot]`, the identity the workflow
+writes as); a lookalike written by anyone else is ordinary backlog. The below-baseline test
+compares exact ratios, never the rounded display rates.
 
 The weekly workflow has a read-only `report` job and a separate `open-issue` job, the
 only one with `issues: write`, which runs only when the config says `enforce`.

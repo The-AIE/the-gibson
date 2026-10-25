@@ -78,11 +78,19 @@ if (scenario === "steady") {
   pr({ d: 40, files: ["scripts/gate.sh"], author: "carol" });
   pr({ d: 22, files: ["config/drain-ratchet.v1.json"], author: "erin" });
   issue({ d: 1, close: false, title: "Drain ratchet breach: 2026-10-24 (user note)", author: "mallory", body: "no marker here" });
+  issue({ d: 1, close: false, title: "Drain ratchet breach: 2026-10-01", author: "mallory2", body: "<!-- drain-ratchet -->\n- Recovery deadline: 2026-12-31\n" });
+  issue({ d: 1, close: false, title: "Drain ratchet breach: 2026-10-02", author: "github-actions[bot]", body: "bot title, no marker" });
 } else if (scenario === "mini") {
   // Every second day: the stubbed-gh live tests fetch one file list per merged PR, so keep it small.
   days(28, 55).filter((d) => d % 2 === 0).forEach((d) => { pr({ d }); issue({ d }); });
   days(0, 27).filter((d) => d % 2 === 0).forEach((d) => { pr({ d, merge: false }); issue({ d, close: false }); });
   pr({ d: 21, files: ["docs/notes.md"], author: "dave" });
+} else if (scenario === "boundary" || scenario === "boundary-below") {
+  // Four 14-day windows (w0 newest). Boundary: w0 and w1 are 1/8, w2 1/4, w3 1/8, so each baseline is
+  // exactly 2/12 and 1/8 sits exactly on the 25% margin (not below). Below: 1/9, 1/3, 1/9 (1/9 is below).
+  const [o, o2] = scenario === "boundary" ? [8, 4] : [9, 3];
+  const win = (k, opened, drained) => days(1, opened).forEach((i) => issue({ d: k * 14 + i, close: i <= drained }));
+  win(0, o, 1); win(1, o, 1); win(2, o2, 1); win(3, o, 1);
 } else if (scenario === "one-low") {
   steady(0, 13);
   stalled(14, 27);
@@ -93,15 +101,16 @@ if (scenario === "steady") {
 } else if (scenario === "recovered") {
   steady(0, 55);
   issue({
-    d: 3, close: false, title: "Drain ratchet breach: 2026-10-20", author: "gibson-bot",
+    d: 3, close: false, title: "Drain ratchet breach: 2026-10-20", author: "github-actions[bot]",
     body: "<!-- drain-ratchet -->\n- Breach first seen: 2026-10-20\n- Recovery deadline: 2026-10-27\n",
   });
 } else if (scenario === "existing") {
   steady(28, 55);
   stalled(0, 27);
   issue({ d: 26, close: false, title: "FREEZE 2026-09-29: halt feature work", author: "alice" });
+  issue({ d: 1, close: false, title: "Drain ratchet breach: 2026-10-01", author: "mallory2", body: "<!-- drain-ratchet -->\n- Recovery deadline: 2026-12-31\n" });
   issue({
-    d: 2, close: false, title: "Drain ratchet breach: 2026-10-23", author: "gibson-bot",
+    d: 2, close: false, title: "Drain ratchet breach: 2026-10-23", author: "github-actions[bot]",
     body: "<!-- drain-ratchet -->\n- Breach first seen: 2026-10-23\n- Recovery deadline: 2026-10-30\n",
   });
 } else {
@@ -112,7 +121,7 @@ writeFileSync(`${dir}/pulls.json`, JSON.stringify(pulls));
 writeFileSync(`${dir}/issues.json`, JSON.stringify(issues));
 EOF
 
-for s in steady freeze mini one-low quiet recovered existing; do
+for s in steady freeze mini boundary boundary-below one-low quiet recovered existing; do
   node "$ROOT/gen.mjs" "$s" "$ROOT/fx-$s" || { echo "drain-ratchet.test.sh: fixture $s failed"; exit 1; }
 done
 
@@ -211,6 +220,14 @@ suite() {
   expect "one low window: no breach" "$ROOT/one-low.json" "r.breach" "false"
   expect "one low window: statuses" "$ROOT/one-low.json" "r.windows.map(w => w.status).join()" "ok,below"
 
+  echo "# margin boundary uses exact ratios, not rounded rates"
+  run_sensor boundary boundary
+  expect "boundary: 1/8 against 2/12 sits exactly on the 25% margin: not below" "$ROOT/boundary.json" "r.windows.map((w) => w.status).join()" "ok,ok"
+  expect "boundary: no breach" "$ROOT/boundary.json" "r.breach" "false"
+  run_sensor boundary-below boundary-below
+  expect "just below: 1/9 against 2/12 is below in both windows" "$ROOT/boundary-below.json" "r.windows.map((w) => w.status).join()" "below,below"
+  expect "just below: breach" "$ROOT/boundary-below.json" "r.breach" "true"
+
   echo "# floor suppresses a quiet-week breach"
   run_sensor quiet quiet
   expect "quiet: no breach" "$ROOT/quiet.json" "r.breach" "false"
@@ -243,10 +260,12 @@ suite() {
   expect "enforce: title is dated" "$ROOT/en1-actions.json" "r[0].title" "Drain ratchet breach: 2026-10-25"
   expect "enforce: body carries owner, deadline, action" "$ROOT/en1-actions.json" "['@bob', 'Recovery deadline: 2026-11-01', 'Default action', 'FREEZE 2026-09-29'].every(x => r[0].body.includes(x))" "true"
   run_sensor existing en2 --open-issue --actions-out "$ROOT/en2-actions.json"
+  bot=$(jget "$ROOT/fx-existing/issues.json" "r.find((x) => x.user.login === 'github-actions[bot]').number")
+  expect "forged human-authored marker issue is never the one updated" "$ROOT/en2-actions.json" "r.length === 1 && r[0].number === $bot" "true"
   expect "idempotent: an open issue is updated, never duplicated" "$ROOT/en2-actions.json" "r.map(a => a.op).join()" "update"
   expect "idempotent: the deadline set on first sight is kept" "$ROOT/en2-actions.json" "r[0].body.includes('Recovery deadline: 2026-10-30') && r[0].body.includes('Breach first seen: 2026-10-23')" "true"
-  expect "idempotent: the ratchet's own marked issue is not counted as backlog" "$ROOT/en2.json" "r.windows[0].issuesOpened" "14"
-  expect "a lookalike title without the marker is ordinary backlog" "$ROOT/freeze.json" "r.windows[0].issuesOpened" "15"
+  expect "idempotent: the ratchet's own marked issue is not counted as backlog" "$ROOT/en2.json" "r.windows[0].issuesOpened" "15"
+  expect "lookalikes (no marker; marker but human author; bot without marker) are ordinary backlog" "$ROOT/freeze.json" "r.windows[0].issuesOpened" "17"
   run_sensor recovered en3 --open-issue --actions-out "$ROOT/en3-actions.json"
   expect "recovery: breach cleared closes the open issue" "$ROOT/en3-actions.json" "r.map(a => a.op).join()" "close"
   expect "recovery: no breach" "$ROOT/en3.json" "r.breach" "false"
@@ -406,7 +425,9 @@ mutate always-create 'if (existing.length === 0) {' 'if (true) {'
 mutate no-auto-close 'for (const x of existing) ops.push({ op: "close", number: x.number, comment: `Breach condition no longer met' 'for (const x of []) ops.push({ op: "close", number: x.number, comment: `Breach condition no longer met'
 mutate report-only-writes 'if (opt.openIssue && config.mode === "enforce") {' 'if (opt.openIssue) {'
 mutate swallow-bad-date 'if (typeof v !== "string" || Number.isNaN(Date.parse(v))) {' 'if (false) {'
-mutate no-marker-check 'return x.title.startsWith(TITLE_PREFIX) && x.body.includes(MARKER);' 'return x.title.startsWith(TITLE_PREFIX);'
+mutate rounded-comparison '&& cur.drained * baseline.opened * 100 < baseline.drained * cur.opened * (100 - cfg.marginPct);' '&& cur.rate < baseline.rate * (1 - cfg.marginPct / 100);'
+mutate no-author-check ' && cfg.ownerLogins.includes(x.author);' ';'
+mutate no-marker-check 'x.body.includes(MARKER) && cfg.ownerLogins' 'cfg.ownerLogins'
 mutate file-cap-truncates 'if (page > cap) fail(`PR' 'if (page > cap) break; if (false) fail(`PR'
 mutate first-file-page-only '      files.push(...rows.map((f) => f.filename));
       if (rows.length < PAGE) break;' '      files.push(...rows.map((f) => f.filename));
