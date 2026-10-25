@@ -64,8 +64,8 @@ For repos where deploys apply schema (Prisma + Neon/Postgres pattern):
 
 ## Preview database isolation (Neon branch per Vercel preview)
 
-> Target-side doctrine (from TargetApp #934/#678, tracked as Gibson #108).
-> Mechanism is generic; first target was `example-org/target-app`.
+> Target-side doctrine (from the first production target's #934/#678, tracked as Gibson #108).
+> Mechanism is generic; the first target was a production app deployed on Vercel.
 
 ### Problem
 

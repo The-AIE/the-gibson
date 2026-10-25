@@ -32,7 +32,7 @@ with an owner and a date.
 
 ## Recommended free tool baseline (2026-08)
 
-Dogfooded first on TargetApp ([target-app#1074](https://github.com/example-org/target-app/pull/1074)). Targets should adopt the same scripts and CI patterns:
+Dogfooded first on the first production target (its security-layer pull request). Targets should adopt the same scripts and CI patterns:
 
 **Local / package.json scripts (recommended for Next.js / TypeScript targets):**
 ```json
