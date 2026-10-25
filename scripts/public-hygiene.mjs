@@ -113,13 +113,19 @@ export function loadConfig(path) {
   if (cfg.algorithm !== "sha256") die(`${path}: algorithm must be sha256`);
   if (!Array.isArray(cfg.denylist) || cfg.denylist.length === 0) die(`${path}: denylist must be a non-empty array`);
   const ids = new Set();
+  const digests = new Map();
   for (const e of cfg.denylist) {
     if (!e || typeof e.id !== "string" || !/^[0-9a-f]{64}$/.test(e.digest || "")) die(`${path}: bad denylist entry`);
     if (ids.has(e.id)) die(`${path}: duplicate denylist id ${e.id}`);
+    // One digest must map to one id: the scanner reports a single id per match, so a shared digest
+    // would let an id-scoped exemption of one entry hide a finding that the other should report.
+    if (digests.has(e.digest)) die(`${path}: denylist entries ${digests.get(e.digest)} and ${e.id} share a digest`);
+    digests.set(e.digest, e.id);
     ids.add(e.id);
   }
   const allow = cfg.allow || [];
   const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  const targets = new Set();
   for (const a of allow) {
     if (!a || typeof a !== "object") die(`${path}: every allow entry must be an object`);
     const hasPath = has(a, "path");
@@ -130,6 +136,11 @@ export function loadConfig(path) {
       die(`${path}: allow pathDigest must be 64 lowercase hex characters`);
     }
     if (typeof a.reason !== "string" || a.reason.trim() === "") die(`${path}: every allow entry needs a non-empty reason`);
+    // Key every entry by the digest of its path (a plain path is hashed), so a path entry and a
+    // pathDigest entry for the same file also collide. The path itself is never printed: it may be protected.
+    const target = hasPath ? digest(a.path) : a.pathDigest;
+    if (targets.has(target)) die(`${path}: two allow entries target the same path; merge them into one`);
+    targets.add(target);
     if (has(a, "ids") && !(Array.isArray(a.ids) && a.ids.length > 0 && a.ids.every((x) => typeof x === "string" && ids.has(x)))) {
       die(`${path}: allow ids must be a non-empty array of deny-list entry ids`);
     }

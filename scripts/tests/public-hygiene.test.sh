@@ -223,20 +223,24 @@ write_cfg "$ROOT/cfg-whole.json" '[{"path":"policy.md","reason":"whole file"}]'
 node "$PH" --root "$R" --config "$ROOT/cfg-whole.json" >/dev/null 2>&1; rc=$?
 [[ $rc -eq 0 ]] && ok "an entry without ids still exempts the whole file (unchanged)" || bad "whole-file rc=$rc"
 
-echo "# a term added to a scoped file later is caught (the regression the review found)"
-printf 'contact: Zorblax Quux here\nand a second term: plainword\n' > "$R/policy.md"
-printf 'contact: Zorblax Quux here\n' > "$R/policy2.md"; commit_all "$R"
+echo "# a different term added to a scoped file later is caught (hermetic: this repo holds only the scoped file)"
+R3="$ROOT/scoped-later"; new_repo "$R3"
+printf 'contact: Zorblax Quux here\n' > "$R3/policy2.md"; commit_all "$R3"
 write_cfg "$ROOT/cfg-scope-p2.json" '[{"path":"policy2.md","reason":"approved contact","ids":["T1"]}]'
-out=$(node "$PH" --root "$R" --config "$ROOT/cfg-scope-p2.json" 2>&1)
-if grep -q 'policy2' <<<"$out"; then bad "policy2 flagged before any new term was added: $out"; else ok "scoped file with only the approved term passes"; fi
-printf 'contact: Zorblax Quux here\nnew line naming plainword\n' > "$R/policy2.md"; commit_all "$R"
-node "$PH" --root "$R" --config "$ROOT/cfg-scope-p2.json" >/dev/null 2>&1; rc=$?
-[[ $rc -eq 1 ]] && ok "adding a different private term to the scoped file fails the gate" || bad "added term not caught rc=$rc"
+out=$(node "$PH" --root "$R3" --config "$ROOT/cfg-scope-p2.json" 2>&1); rc=$?
+[[ $rc -eq 0 ]] && ok "the scoped file holding only the approved term passes (exit 0)" || bad "scoped file alone rc=$rc (want 0): $out"
+printf 'contact: Zorblax Quux here\nnew line naming plainword\n' > "$R3/policy2.md"; commit_all "$R3"
+out=$(node "$PH" --root "$R3" --config "$ROOT/cfg-scope-p2.json" 2>&1); rc=$?
+if [[ $rc -eq 1 ]] && grep -q 'policy2.md:2  \[T2\]' <<<"$out"; then ok "adding a different private term to the scoped file fails, naming the file, line and id"; else bad "added term not caught rc=$rc out=$out"; fi
+# prove the check can fail: with the scoped file removed from the scan the same assertions must NOT hold
+write_cfg "$ROOT/cfg-scope-none.json" '[{"path":"does-not-exist.md","reason":"x","ids":["T1"]}]'
+out=$(node "$PH" --root "$R3" --config "$ROOT/cfg-scope-none.json" 2>&1)
+if grep -q 'policy2.md:1  \[T1\]' <<<"$out"; then ok "control: without the exemption the approved term itself is reported"; else bad "control failed, the fixture does not exercise the scan: $out"; fi
 
 echo "# ids also work on pathDigest entries; bad ids are a config error"
 PDS=$(node "$PH" --path-digest "policy2.md")
 write_cfg "$ROOT/cfg-scope-dig.json" "[{\"pathDigest\":\"$PDS\",\"reason\":\"approved\",\"ids\":[\"T1\"]}]"
-out=$(node "$PH" --root "$R" --config "$ROOT/cfg-scope-dig.json" 2>&1)
+out=$(node "$PH" --root "$R3" --config "$ROOT/cfg-scope-dig.json" 2>&1)
 grep -q 'policy2.md:2  \[T2\]' <<<"$out" && ok "pathDigest entry with ids scopes the same way" || bad "digest+ids: $out"
 for bad_ids in '[]' '["NOPE"]' '"T1"' '[1]'; do
   write_cfg "$ROOT/cfg-badids.json" "[{\"path\":\"policy.md\",\"reason\":\"x\",\"ids\":$bad_ids}]"
@@ -249,6 +253,20 @@ printf 'harmless\n' > "$R/big2.txt"; head -c 400 /dev/zero | tr '\0' 'a' >> "$R/
 write_cfg "$ROOT/cfg-scope-big.json" '[{"path":"big2.txt","reason":"x","ids":["T1"]}]'
 out=$(PUBLIC_HYGIENE_MAX_BYTES=100 node "$PH" --root "$R" --config "$ROOT/cfg-scope-big.json" 2>&1); rc=$?
 [[ $rc -eq 1 && "$out" == *"UNSCANNABLE-too-large"* ]] && ok "an oversized file stays a finding under an ids exemption" || bad "unscannable suppressed rc=$rc out=$out"
+
+echo "# ambiguous config is rejected: shared deny-list digests and duplicate allow targets"
+cat > "$ROOT/cfg-dupdigest.json" <<CFGDD
+{"version":1,"algorithm":"sha256","denylist":[{"id":"T1","digest":"$D1"},{"id":"T9","digest":"$D1"}],"allow":[]}
+CFGDD
+out=$(node "$PH" --root "$R3" --config "$ROOT/cfg-dupdigest.json" 2>&1); rc=$?
+[[ $rc -eq 2 && "$out" == *"share a digest"* ]] && ok "two deny-list entries with one digest are a config error (exit 2)" || bad "dup digest rc=$rc out=$out"
+write_cfg "$ROOT/cfg-dupallow.json" '[{"path":"policy2.md","reason":"a","ids":["T1"]},{"path":"policy2.md","reason":"b","ids":["T2"]}]'
+out=$(node "$PH" --root "$R3" --config "$ROOT/cfg-dupallow.json" 2>&1); rc=$?
+[[ $rc -eq 2 && "$out" == *"target the same path"* ]] && ok "two allow entries for one path are a config error (exit 2)" || bad "dup allow rc=$rc out=$out"
+write_cfg "$ROOT/cfg-dupmixed.json" "[{\"path\":\"policy2.md\",\"reason\":\"a\"},{\"pathDigest\":\"$PDS\",\"reason\":\"b\",\"ids\":[\"T1\"]}]"
+out=$(node "$PH" --root "$R3" --config "$ROOT/cfg-dupmixed.json" 2>&1); rc=$?
+[[ $rc -eq 2 ]] && ok "a path entry and a pathDigest entry for the same file collide (exit 2)" || bad "mixed dup rc=$rc out=$out"
+if grep -q -i 'policy2' <<<"$out"; then bad "the error printed a path: $out"; else ok "the duplicate-target error does not print the path"; fi
 
 echo "# config errors exit 2"
 echo '{"version":2}' > "$ROOT/bad.json"
