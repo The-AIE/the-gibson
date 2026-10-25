@@ -41,11 +41,19 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           if [ "${EVENT_NAME}" != "pull_request" ]; then
             echo "::notice::DCO trailer check skipped on ${EVENT_NAME} (not a pull_request)"
             echo "DCO trailer check skipped on ${EVENT_NAME} (not a pull_request)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Dependabot cannot sign off. Key on the PR author login GitHub sets, never on commit
+          # author metadata (anyone can forge that); exactly one bot is named.
+          if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
+            echo "::notice::DCO trailer check exempt: pull request authored by dependabot[bot]"
+            echo "DCO trailer check exempt: pull request authored by dependabot[bot]" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ -z "${BASE_SHA:-}" ]; then
