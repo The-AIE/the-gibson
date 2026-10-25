@@ -908,6 +908,39 @@ function readPrClaimsOnce() {
 }
 
 /**
+ * Expired PR-body claims (#557). Returns Map<"<pr>\t<claim id>", row> for every
+ * claim `pr-claims.sh expiry` calls `stale`. FAILS CLOSED toward blocking: if
+ * the read fails, or a row is not exactly the eight-field shape, or its state
+ * is anything but the literal `stale`, that claim is NOT in the map, so it
+ * keeps blocking. A claim this reader cannot judge is never displaced.
+ */
+function readStaleClaims() {
+  const stale = new Map();
+  let out;
+  try {
+    out = execFileSync(prClaimsScriptPath(), ["expiry", opt.repo], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch {
+    return stale;
+  }
+  for (const line of out.split("\n")) {
+    if (!line.trim()) continue;
+    const cols = line.split("\t");
+    if (cols.length !== 8) continue;
+    if (cols[2] !== "stale" || !/^\d+$/.test(cols[0])) continue;
+    stale.set(`${cols[0]}\t${cols[1]}`, {
+      number: Number(cols[0]),
+      id: cols[1],
+      expires: cols[5],
+    });
+  }
+  return stale;
+}
+
+/**
  * Space two reads apart, using a wait that CANNOT be resolved through the
  * caller's environment (#153 review round 4, P1).
  *
@@ -1336,7 +1369,19 @@ assertScopeTokens(opt.scopes, "proposed --scope");
 // Non-admission paths load the ledger once here (fail closed on unreadable).
 const ledgerClaims =
   settledLedgerClaims != null ? settledLedgerClaims : loadClaims();
-const live = [...ledgerClaims, ...prClaims].filter((c) => c.id !== opt.claimId);
+// An expired PR-body claim no longer blocks scope (#557): the displacement is
+// recorded below so the caller can write it to both PR bodies. It still holds
+// its ISSUE (same-issue exclusivity above is unchanged). Only an unambiguous
+// `stale` verdict displaces; every other state keeps the claim blocking.
+const staleClaims = opt.repo ? readStaleClaims() : new Map();
+const displaced = [];
+const blockingPrClaims = prClaims.filter((c) => {
+  const row = staleClaims.get(`${c.number}\t${c.id}`);
+  if (!row || c.id === opt.claimId) return true;
+  displaced.push({ claim: c, expires: row.expires });
+  return false;
+});
+const live = [...ledgerClaims, ...blockingPrClaims].filter((c) => c.id !== opt.claimId);
 
 // stem / tokensOverlap: pure kernel at top of file (#181 parity with Bash).
 
@@ -1432,10 +1477,27 @@ if (opt.admitPr != null && yielded.length && !opt.json) {
   }
 }
 
+// Only an expired claim whose scope this claimant actually overlaps was
+// displaced; a stale claim on unrelated files displaced nothing. The machine
+// line is what claim.sh reads to write the displacement into both PR bodies.
+const displacedHere = displaced
+  .map((d) => ({ ...d, hits: scopesOverlap(opt.scopes, d.claim.scope) }))
+  .filter((d) => d.hits.length)
+  .map((d) => ({ claimId: d.claim.id, prNumber: d.claim.number, expires: d.expires }));
+if (displacedHere.length && !opt.json) {
+  for (const d of displacedHere) {
+    console.log(
+      `scope-overlap: displaced expired claim ${d.claimId} (PR #${d.prNumber}, expired ${d.expires}) — its scope no longer blocks`
+    );
+    console.log(`scope-overlap: displaced-claim ${d.claimId} ${d.prNumber} ${d.expires}`);
+  }
+}
+
 ok({
   liveClaims: live.length,
   proposed: opt.scopes,
   ref: ref.trim(),
+  displaced: displacedHere,
   ...(opt.admitPr != null
     ? {
         admitPr: opt.admitPr,

@@ -13,6 +13,7 @@ USAGE
   pr-claims.sh find-open-pr <owner/repo> <claim-id> <pull-request-number>
   pr-claims.sh find-terminal <owner/repo> <claim-id>
   pr-claims.sh find-terminal-pr <owner/repo> <claim-id> <pull-request-number>
+  pr-claims.sh expiry <owner/repo>
   pr-claims.sh close <owner/repo> <pull-request-number>
 
 `list`/`find` cover live (open) claims. The list output is tab-separated:
@@ -132,6 +133,26 @@ VALIDATION (#153 blocker 6)
   ambiguity refusal is not. A number that is OPEN, missing, carries some
   other claim id, or fails any evidence check yields no row (or a nonzero
   exit) exactly as find-terminal would.
+
+`expiry` (#557) reports whether each live PR-body claim is still held. It is a
+SEPARATE read from `list` on purpose: `list` has a fixed 8-column contract that
+claim.sh, release-claim.sh, claim-reaper.sh and scope-overlap.mjs all validate,
+and a ninth column would turn every one of them into a hard refusal. One row per
+open PR carrying an `- Active-work claim:` marker, tab-separated:
+  number, claim id, state, claimed, claim-expires, effective-expires,
+  last-commit, reason
+
+state is `fresh`, `stale` or `unknown`. `stale` means the claim is expired:
+  effective-expires = max(Claim-expires, last-commit + 7 days) < now
+so a push to the claim branch renews it without anyone editing the PR body.
+It FAILS CLOSED toward "still held": a missing, duplicated or unparseable
+`- Claim-expires:` line, or a missing head-commit date, yields `unknown`, never
+`stale` — a claim this reader cannot read is never displaced. Unlike `list` it
+does not poison the whole command over a malformed body (that is `list`'s job);
+a row it cannot judge is simply `unknown`. Only a gh/jq/pagination failure exits
+nonzero. Rows are emitted for every claim PR so a caller can see why.
+
+`list` is unchanged and does not carry expiry.
 
 LEGACY TERMINAL-CLAIM SCHEMA (#153 follow-up, find-terminal only)
   Real claims merged before the machine markers existed carry the claim
@@ -295,6 +316,61 @@ list_claims() {
 # rewritten — the exact hostile case this closes. The GraphQL operation is
 # NAMED (openPrNumbers) so the query is distinguishable from list_claims' own
 # `states: [OPEN]` query by anything inspecting the request.
+# Expiry of every live PR-body claim (#557). Deliberately tolerant: a body this
+# cannot judge is `unknown` (still held), never an error and never `stale`.
+list_claim_expiry() {
+  gh api graphql --paginate \
+    -f query='
+      query claimExpiry($owner: String!, $name: String!, $endCursor: String) {
+        repository(owner: $owner, name: $name) {
+          pullRequests(first: 100, after: $endCursor, states: [OPEN]) {
+            nodes {
+              number
+              body
+              commits(last: 1) { nodes { commit { committedDate } } }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }' \
+    -f owner="$REPO_OWNER" -f name="$REPO_NAME" \
+    --jq '
+      def iso: if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+               then (try fromdateiso8601 catch null) else null end;
+      def field($p): split("\n") | map(select(startswith($p)) | sub("[ \t\r]+$"; "")) ;
+      .data.repository.pullRequests.nodes[]
+      | select((.number | type) == "number")
+      | (.body // "") as $body
+      | ($body | field("- Active-work claim: ")) as $claimLines
+      | select(($claimLines | length) > 0)
+      | ($claimLines[0] | sub("^- Active-work claim: "; "")) as $claim
+      | ($body | field("- Claim-expires: ")) as $expLines
+      | ($body | field("- Claimed: ")) as $claimedLines
+      | (if ($claimedLines | length) == 1 then ($claimedLines[0] | sub("^- Claimed: "; "")) else "" end) as $claimed
+      | (if ($expLines | length) == 1 then ($expLines[0] | sub("^- Claim-expires: "; "")) else "" end) as $expires
+      | ((.commits.nodes // [])[0].commit.committedDate // "") as $last
+      | ($expires | iso) as $expEpoch
+      | ($last | iso) as $lastEpoch
+      | (if ($claim == "" or ($claimLines | length) != 1) then "unreadable claim marker"
+         elif ($expLines | length) == 0 then "no Claim-expires"
+         elif ($expLines | length) > 1 then "duplicate Claim-expires"
+         elif $expEpoch == null then "unparseable Claim-expires"
+         elif $lastEpoch == null then "no head commit date"
+         else "" end) as $reason
+      | (if $reason == "" then ([$expEpoch, $lastEpoch + 604800] | max) else null end) as $eff
+      | [
+          (.number | tostring),
+          $claim,
+          (if $reason != "" then "unknown" elif $eff < now then "stale" else "fresh" end),
+          $claimed,
+          $expires,
+          (if $eff == null then "" else ($eff | todate) end),
+          $last,
+          $reason
+        ]
+      | @tsv'
+}
+
 list_open_pr_numbers() {
   gh api graphql --paginate \
     -f query='
@@ -607,6 +683,12 @@ case "$COMMAND" in
     # truncated inventory is exactly as dangerous as an unreadable one — emit
     # all pages or none.
     rows=$(list_claims) || exit 1
+    [[ -z "$rows" ]] || printf '%s\n' "$rows"
+    ;;
+  expiry)
+    [[ $# -eq 0 ]] || { usage >&2; exit 2; }
+    # Buffered all-or-none for the same reason `list` is.
+    rows=$(list_claim_expiry) || exit 1
     [[ -z "$rows" ]] || printf '%s\n' "$rows"
     ;;
   list-open-numbers)
