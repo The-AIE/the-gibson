@@ -191,5 +191,25 @@ A Tier A issue can go plan→issue→build→test→review→eval→merge→depl
 **zero human touches**, and a Tier C issue stops at exactly the human gates and
 nowhere else.
 
+## Reference adopter (as of 2026-10-21)
+
+One real repository, read from its tree and settings on the date above, so the word "adopted" describes what was observed installed, not what was intended. It is described by role and deliberately not named here: the public tree does not name private deployments, and the maintainers hold the mapping from this profile to its repository. This page describes a positive example only; it does not publish the gaps or weaknesses of any specific deployment. Treat it as a dated observation, and re-read any target before quoting its state, because adoption moves weekly.
+
+### A conference-management platform (production; payments and personal data)
+
+**Gibson pieces installed:**
+
+- Green gate twin: `.agents/gate.json`.
+- Claim isolation: `scripts/check-active-work.mjs`, GitHub-native (the PR body's `- Active-work claim:` / `- Isolation:` lines are the claim), run in the repository's CI quality job.
+- Review evidence: `scripts/pr-review-evidence.mjs`, a trust file under `.github/`, and a workflow publishing the `review-evidence` commit status. Same-actor rule on owner attestations; owner out of the loop since D-014.
+- Merge captain: a workflow that squash-merges with `--match-head-commit` and refuses heads behind `main`. A risk-classifier workflow and a security-gate workflow.
+- Branch protection on `main`: quality, build and end-to-end, DCO and `review-evidence` as required checks. DCO on every commit.
+- Delivery control: a release role in its release doc; a dedicated production branch; production migrations only through a workflow that rehearses on a database branch and then applies; a promote script that is dry-run only by design.
+- Independent reviewer: a dedicated reviewer App covers it (see the G14 setup above).
+
+**Not installed, or different from the Gibson's templates:** no `.gibson-delivery.json` (required contexts come from branch protection); its own test-integrity sensors rather than the Gibson's `test-integrity.mjs`.
+
+**Adoption state:** adopted in substance. Several Gibson gates were first proven here and generalized back. By its documented design, routine PRs land with zero human touches when the reviewer passes a head that contains the `main` tip; that behavior was not re-measured on 2026-10-21. The cost of the exact-head design is visible in one observed PR, which took over two hours from first push to a verdict, mostly in reviewer ticks and a discarded review.
+
 ---
 [← 12 · Shipping to Vercel safely](12-vercel.md) · [Home](../index.md) · [14 · The sixteen interruptions →](14-human-gates.md) · [20 · Delivery control](23-delivery-control.md)
