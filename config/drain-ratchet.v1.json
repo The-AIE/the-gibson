@@ -25,7 +25,7 @@
     },
     {
       "kind": "review-or-size-rule",
-      "pattern": "^config/(review|pr-size|policy/|architecture-fitness|sensor-|self-gate)"
+      "pattern": "^config/(review|pr-size|policy/|architecture-fitness|sensor-|self-gate|drain-ratchet)"
     }
   ]
 }

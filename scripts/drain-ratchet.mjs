@@ -52,7 +52,8 @@ const DAY = 86_400_000;
 const HOUR = 3_600_000;
 const PAGE = 100;
 const PAGE_CAP = 60;
-const FILES_PAGE_CAP = 3;
+// GitHub serves at most 3000 files per PR (30 pages of 100).
+const FILES_PAGE_CAP = 30;
 const CONFIG_KEYS = [
   "mode", "windowDays", "baselineDays", "marginPct", "consecutiveWindows",
   "floorOpened", "stalePrDays", "deadlineDays", "maxSuspects", "stopLabels",
@@ -60,6 +61,11 @@ const CONFIG_KEYS = [
 ];
 
 export class Incomplete extends Error {}
+
+/** Sensor-owned only when BOTH the title prefix and the hidden marker are present. */
+export function isRatchetIssue(x) {
+  return x.title.startsWith(TITLE_PREFIX) && x.body.includes(MARKER);
+}
 
 function fail(msg) {
   throw new Incomplete(msg);
@@ -194,7 +200,7 @@ export function analyze({ pulls, issues, config, now }) {
   const win = cfg.windowDays * DAY;
   const base = cfg.baselineDays * DAY;
   const lookbackStart = now - (cfg.consecutiveWindows * win + base);
-  const own = (x) => x.title.startsWith(TITLE_PREFIX);
+  const own = isRatchetIssue;
   const ratchetIssues = issues.filter(own);
   const workIssues = issues.filter((x) => !own(x));
 
@@ -309,7 +315,7 @@ export function planActions(report) {
       for (const x of existing.slice(1)) ops.push({ op: "close", number: x.number, comment: `Duplicate of #${keep.number}: exactly one drain-ratchet issue stays open.` });
     }
   } else {
-    for (const x of existing) ops.push({ op: "close", number: x.number, comment: `Breach cleared as of ${day}: the drain rate recovered. Closing.` });
+    for (const x of existing) ops.push({ op: "close", number: x.number, comment: `Breach condition no longer met as of ${day}: the drain rate is not below its baseline by more than ${report.thresholds.marginPct}% in every one of the last ${report.thresholds.consecutiveWindows} windows (latest ${report.windows[0].rate} vs baseline ${report.windows[0].baseline.rate}, ${report.windows[0].status}). Closing; the next breach opens a new issue.` });
   }
   return ops;
 }
@@ -375,12 +381,18 @@ function loadLive(repo, lookbackStart) {
   const pulls = pagedUntil(`repos/${repo}/pulls?state=all&sort=updated&direction=desc`, lookbackStart, "updated_at");
   const sinceIssues = pagedUntil(`repos/${repo}/issues?state=all&sort=updated&direction=desc&since=${since}`, lookbackStart, "updated_at");
   const openIssues = pagedUntil(`repos/${repo}/issues?state=open`, 0, null);
+  // Open PRs untouched for the whole lookback never reach the updated-sorted list above.
+  for (const p of pagedUntil(`repos/${repo}/pulls?state=open`, 0, null)) {
+    if (!pulls.some((x) => x.number === p.number)) pulls.push(p);
+  }
   const byNumber = new Map();
   for (const x of [...sinceIssues, ...openIssues]) if (!x.pull_request) byNumber.set(x.number, x);
   for (const p of pulls) {
     if (!p.merged_at || Date.parse(p.merged_at) < lookbackStart) continue;
     const files = [];
-    for (let page = 1; page <= FILES_PAGE_CAP; page++) {
+    const cap = Number(process.env.DRAIN_RATCHET_FILES_PAGE_CAP) || FILES_PAGE_CAP;
+    for (let page = 1; ; page++) {
+      if (page > cap) fail(`PR #${p.number}: file list not complete after ${cap} full pages`);
       const rows = gh([`repos/${repo}/pulls/${p.number}/files?per_page=${PAGE}&page=${page}`]);
       if (!Array.isArray(rows)) fail(`PR #${p.number} files: expected an array`);
       files.push(...rows.map((f) => f.filename));
