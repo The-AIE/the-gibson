@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/The-AIE/the-gibson/blob/main/SECURITY.md
+    about: Please do not file vulnerabilities as public issues. Follow the instructions in SECURITY.md.
+  - name: Read the docs first
+    url: https://the-aie.github.io/the-gibson/
+    about: The quickstart, the guide and the doctrine docs answer most "how do I" questions.
