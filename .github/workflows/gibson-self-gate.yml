@@ -42,18 +42,13 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "${EVENT_NAME}" != "pull_request" ]; then
             echo "::notice::DCO trailer check skipped on ${EVENT_NAME} (not a pull_request)"
             echo "DCO trailer check skipped on ${EVENT_NAME} (not a pull_request)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          # Dependabot cannot sign off. Key on the PR author login GitHub sets, never on commit
-          # author metadata (anyone can forge that); exactly one bot is named.
-          if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
-            echo "::notice::DCO trailer check exempt: pull request authored by dependabot[bot]"
-            echo "DCO trailer check exempt: pull request authored by dependabot[bot]" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ -z "${BASE_SHA:-}" ]; then
@@ -88,6 +83,20 @@ jobs:
               exit 1
             }
             if ! printf '%s\n' "$trailers" | grep '^Signed-off-by:' >/dev/null; then
+              # Dependabot cannot sign off (#554). The exemption is per COMMIT, never per PR:
+              # GitHub lets anyone with push access add commits to a Dependabot PR, so a PR-level
+              # skip would green-light an unsigned human commit (Codex finding on #555). A commit
+              # is exempt only when the PR author is dependabot[bot] AND GitHub's own record of
+              # the commit says its author is dependabot[bot] and the commit is GitHub-verified
+              # (Dependabot's commits are signed by GitHub). Local author metadata is never trusted.
+              if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
+                rec=$(gh api "repos/${REPO}/commits/${sha}" --jq '[(.author.login // ""), (.commit.verification.verified // false)] | @tsv' 2>/dev/null) || rec=""
+                if [ "$rec" = "$(printf 'dependabot[bot]\ttrue')" ]; then
+                  echo "::notice::DCO exempt: ${sha} is a GitHub-verified dependabot[bot] commit on a dependabot[bot] pull request"
+                  echo "DCO exempt: ${sha} is a GitHub-verified dependabot[bot] commit" >> "$GITHUB_STEP_SUMMARY"
+                  continue
+                fi
+              fi
               unsigned="${unsigned}${sha}"$'\n'
             fi
           done
