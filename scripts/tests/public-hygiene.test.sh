@@ -208,6 +208,48 @@ write_cfg "$ROOT/cfg-pd.json" "[{\"pathDigest\":\"$PD\",\"reason\":\"fixture\"}]
 node "$PH" --root "$R2" --config "$ROOT/cfg-pd.json" >/dev/null 2>&1; rc=$?
 [[ $rc -eq 0 ]] && ok "a protected path allow-listed by digest passes" || bad "digest-allowed protected path rc=$rc"
 
+echo "# an allow entry can be scoped to specific deny-list ids; other findings in the file still fail"
+R="$ROOT/scoped"; new_repo "$R"
+printf 'contact: Zorblax Quux here\nand a second term: plainword\n' > "$R/policy.md"; commit_all "$R"
+write_cfg "$ROOT/cfg-scope-t1.json" '[{"path":"policy.md","reason":"approved contact","ids":["T1"]}]'
+out=$(node "$PH" --root "$R" --config "$ROOT/cfg-scope-t1.json" 2>&1); rc=$?
+[[ $rc -eq 1 ]] && ok "scoped to T1: the file still fails on its other term" || bad "scoped T1 rc=$rc out=$out"
+grep -q 'policy.md:2  \[T2\]' <<<"$out" && ok "the un-exempted id (T2) is still reported with its line" || bad "T2 not reported: $out"
+grep -q 'policy.md:1' <<<"$out" && bad "the exempted id (T1) was still reported: $out" || ok "the exempted id (T1) is suppressed"
+write_cfg "$ROOT/cfg-scope-both.json" '[{"path":"policy.md","reason":"both approved","ids":["T1","T2"]}]'
+node "$PH" --root "$R" --config "$ROOT/cfg-scope-both.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 0 ]] && ok "scoped to every id the file hits: passes" || bad "scoped both rc=$rc"
+write_cfg "$ROOT/cfg-whole.json" '[{"path":"policy.md","reason":"whole file"}]'
+node "$PH" --root "$R" --config "$ROOT/cfg-whole.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 0 ]] && ok "an entry without ids still exempts the whole file (unchanged)" || bad "whole-file rc=$rc"
+
+echo "# a term added to a scoped file later is caught (the regression the review found)"
+printf 'contact: Zorblax Quux here\nand a second term: plainword\n' > "$R/policy.md"
+printf 'contact: Zorblax Quux here\n' > "$R/policy2.md"; commit_all "$R"
+write_cfg "$ROOT/cfg-scope-p2.json" '[{"path":"policy2.md","reason":"approved contact","ids":["T1"]}]'
+out=$(node "$PH" --root "$R" --config "$ROOT/cfg-scope-p2.json" 2>&1)
+if grep -q 'policy2' <<<"$out"; then bad "policy2 flagged before any new term was added: $out"; else ok "scoped file with only the approved term passes"; fi
+printf 'contact: Zorblax Quux here\nnew line naming plainword\n' > "$R/policy2.md"; commit_all "$R"
+node "$PH" --root "$R" --config "$ROOT/cfg-scope-p2.json" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "adding a different private term to the scoped file fails the gate" || bad "added term not caught rc=$rc"
+
+echo "# ids also work on pathDigest entries; bad ids are a config error"
+PDS=$(node "$PH" --path-digest "policy2.md")
+write_cfg "$ROOT/cfg-scope-dig.json" "[{\"pathDigest\":\"$PDS\",\"reason\":\"approved\",\"ids\":[\"T1\"]}]"
+out=$(node "$PH" --root "$R" --config "$ROOT/cfg-scope-dig.json" 2>&1)
+grep -q 'policy2.md:2  \[T2\]' <<<"$out" && ok "pathDigest entry with ids scopes the same way" || bad "digest+ids: $out"
+for bad_ids in '[]' '["NOPE"]' '"T1"' '[1]'; do
+  write_cfg "$ROOT/cfg-badids.json" "[{\"path\":\"policy.md\",\"reason\":\"x\",\"ids\":$bad_ids}]"
+  node "$PH" --root "$R" --config "$ROOT/cfg-badids.json" >/dev/null 2>&1; rc=$?
+  [[ $rc -eq 2 ]] && ok "ids=$bad_ids is a config error (exit 2)" || bad "ids=$bad_ids rc=$rc (want 2)"
+done
+
+echo "# UNSCANNABLE findings are never suppressed by an ids exemption"
+printf 'harmless\n' > "$R/big2.txt"; head -c 400 /dev/zero | tr '\0' 'a' >> "$R/big2.txt"; commit_all "$R"
+write_cfg "$ROOT/cfg-scope-big.json" '[{"path":"big2.txt","reason":"x","ids":["T1"]}]'
+out=$(PUBLIC_HYGIENE_MAX_BYTES=100 node "$PH" --root "$R" --config "$ROOT/cfg-scope-big.json" 2>&1); rc=$?
+[[ $rc -eq 1 && "$out" == *"UNSCANNABLE-too-large"* ]] && ok "an oversized file stays a finding under an ids exemption" || bad "unscannable suppressed rc=$rc out=$out"
+
 echo "# config errors exit 2"
 echo '{"version":2}' > "$ROOT/bad.json"
 node "$PH" --root "$R" --config "$ROOT/bad.json" >/dev/null 2>&1; rc=$?

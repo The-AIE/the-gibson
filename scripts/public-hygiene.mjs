@@ -24,6 +24,11 @@
  *   checkout. NUL bytes are stripped before scanning, so UTF-16 text is scanned,
  *   and no file is skipped for its extension.
  *
+ *   Allow entries: `{path|pathDigest, reason}` skips that file entirely. Add
+ *   `ids: ["H04", ...]` to scope the exemption to those deny-list entries only:
+ *   the file is still scanned and any other finding in it still fails. Prefer
+ *   `ids` whenever the exemption exists for one specific term.
+ *
  *   Fail closed: the config file itself is scanned (its free-text fields must not
  *   name a protected term), a blob too large to scan is a finding, and a blob Git
  *   cannot read is a finding. Never a silent skip.
@@ -125,6 +130,9 @@ export function loadConfig(path) {
       die(`${path}: allow pathDigest must be 64 lowercase hex characters`);
     }
     if (typeof a.reason !== "string" || a.reason.trim() === "") die(`${path}: every allow entry needs a non-empty reason`);
+    if (has(a, "ids") && !(Array.isArray(a.ids) && a.ids.length > 0 && a.ids.every((x) => typeof x === "string" && ids.has(x)))) {
+      die(`${path}: allow ids must be a non-empty array of deny-list entry ids`);
+    }
   }
   return cfg;
 }
@@ -155,8 +163,15 @@ export function scan(root, cfg) {
   const byDigest = new Map(cfg.denylist.map((e) => [e.digest, e.id]));
   // An entry names a path in plain text, or by the SHA-256 of the path when the
   // path itself contains a protected term and so must not be spelled in this file.
-  const allowed = new Set((cfg.allow || []).filter((a) => typeof a.path === "string").map((a) => a.path));
-  const allowedDigests = new Set((cfg.allow || []).filter((a) => typeof a.pathDigest === "string").map((a) => a.pathDigest));
+  const allow = cfg.allow || [];
+  const whole = (a) => !Object.prototype.hasOwnProperty.call(a, "ids");
+  const allowed = new Set(allow.filter((a) => whole(a) && typeof a.path === "string").map((a) => a.path));
+  const allowedDigests = new Set(allow.filter((a) => whole(a) && typeof a.pathDigest === "string").map((a) => a.pathDigest));
+  // Id-scoped exemptions: the file is still scanned; only these deny-list ids are suppressed in it.
+  const scoped = new Map();
+  for (const a of allow.filter((x) => !whole(x))) {
+    scoped.set(typeof a.path === "string" ? `p:${a.path}` : `d:${a.pathDigest}`, new Set(a.ids));
+  }
   // Entry ids whose digest matches any candidate token of `text`.
   const idsIn = (text) => {
     const hit = new Set();
@@ -183,21 +198,26 @@ export function scan(root, cfg) {
     // A path that itself contains a protected term is reported by digest, never by name.
     const pathIds = idsIn(rel);
     const shown = pathIds.size > 0 ? `<redacted-path sha256:${digest(rel).slice(0, 12)}>` : rel;
-    for (const id of pathIds) findings.push({ path: shown, line: 0, id });
+    const exempt = new Set([...(scoped.get(`p:${rel}`) || []), ...(scoped.get(`d:${digest(rel)}`) || [])]);
+    // Exempt ids only ever name deny-list entries, so an UNSCANNABLE finding is never suppressed.
+    const push = (f) => {
+      if (!exempt.has(f.id)) findings.push(f);
+    };
+    for (const id of pathIds) push({ path: shown, line: 0, id });
     const blob = blobs.get(sha);
     if (!blob) {
-      findings.push({ path: shown, line: 0, id: "UNSCANNABLE-unreadable" });
+      push({ path: shown, line: 0, id: "UNSCANNABLE-unreadable" });
       continue;
     }
     if (blob.length > MAX_BYTES) {
-      findings.push({ path: shown, line: 0, id: "UNSCANNABLE-too-large" });
+      push({ path: shown, line: 0, id: "UNSCANNABLE-too-large" });
       continue;
     }
     // UTF-16 text has a NUL between letters; stripping NULs makes it scannable.
     const text = (blob.includes(0) ? Buffer.from(blob.filter((b) => b !== 0)) : blob).toString("utf8");
     const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
-      for (const id of idsIn(lines[i])) findings.push({ path: shown, line: i + 1, id });
+      for (const id of idsIn(lines[i])) push({ path: shown, line: i + 1, id });
     }
   }
   return findings;
