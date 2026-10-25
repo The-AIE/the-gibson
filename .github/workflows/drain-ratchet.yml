@@ -1,0 +1,31 @@
+name: Drain ratchet
+# Weekly backlog drain-rate sensor (#559). Report-only while config/drain-ratchet.v1.json
+# says mode report-only: the summary is written, no issue is opened, no PR is blocked.
+# Fail-closed on bad data; no continue-on-error / || true / set +e.
+on:
+  schedule:
+    - cron: "41 12 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: drain-ratchet
+  cancel-in-progress: false
+jobs:
+  drain-ratchet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Measure drain rate and write the job summary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          node scripts/drain-ratchet.mjs --repo "$REPO" --open-issue \
+            --json-out "${RUNNER_TEMP}/drain-ratchet.json" --md-out "$GITHUB_STEP_SUMMARY"
