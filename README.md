@@ -163,8 +163,7 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 | [docs/10-vendor-adapters.md](docs/10-vendor-adapters.md) | Running the harness on Claude Code / Codex / Grok / Hermes |
 | [docs/11-solo-loop.md](docs/11-solo-loop.md) | Single-platform continuous mode (one agent, e.g. Grok, runs the whole loop) |
 | [docs/12-vercel.md](docs/12-vercel.md) | Deployment doctrine: previews, promotion, schema safety |
-| [docs/13-adoption.md](docs/13-adoption.md) | Installing The Gibson into a target repo; lists the repos governed today and their verified state |
-
+| [docs/13-adoption.md](docs/13-adoption.md) | Installing The Gibson into a target repo; includes two dated reference adoption profiles (one adopted, one not) |
 | [docs/14-human-gates.md](docs/14-human-gates.md) | Rationale and history for the G1–G16 stops listed in AGENTS.md |
 | [docs/15-model-economics.md](docs/15-model-economics.md) | Which model for which task: G/S/F grades, flat-rate-first, escalation ladder |
 | [docs/16-nontechnical-operation.md](docs/16-nontechnical-operation.md) | Operator tier: chat-only interface, decision cards, the never-stuck ladder |

@@ -193,7 +193,7 @@ nowhere else.
 
 ## Reference adopters (as of 2026-10-21)
 
-Two real repositories, read from their trees and settings on the date above, so the words "adopted" and "not adopted" mean something checkable. They are described by role, not by name. Re-read any target before quoting its state; adoption moves weekly.
+Two real repositories, read from their trees and settings on the date above, so the words "adopted" and "not adopted" describe what was observed installed, not what was intended. They are described by role and are deliberately not named here: the public tree does not name private deployments, and the maintainers hold the mapping from each profile to its repository. Treat these as dated observations; re-read any target before quoting its state, because adoption moves weekly.
 
 ### A conference-management platform (production; payments and personal data)
 
@@ -209,7 +209,7 @@ Two real repositories, read from their trees and settings on the date above, so 
 
 **Not installed, or different from the Gibson's templates:** no `.agents/gibson-delivery.json` (required contexts come from branch protection); its own test-integrity sensors rather than the Gibson's `test-integrity.mjs`.
 
-**Adoption state:** adopted in substance. Several Gibson gates were first proven here and generalized back. Routine PRs land with zero human touches when the reviewer passes a head that contains the `main` tip. The cost of the exact-head design is visible: one recent PR took over two hours from first push to a verdict, mostly in reviewer ticks and a discarded review.
+**Adoption state:** adopted in substance. Several Gibson gates were first proven here and generalized back. By its documented design, routine PRs land with zero human touches when the reviewer passes a head that contains the `main` tip; that behavior was not re-measured on 2026-10-21. The cost of the exact-head design is visible in one observed PR, which took over two hours from first push to a verdict, mostly in reviewer ticks and a discarded review.
 
 ### An agent-fleet dashboard (deployed on Vercel)
 
