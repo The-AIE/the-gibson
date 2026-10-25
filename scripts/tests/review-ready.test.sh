@@ -18,7 +18,7 @@ set -uo pipefail
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
-WF="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
+WF="${REVIEW_READY_WORKFLOW:-$REPO_ROOT/.github/workflows/gibson-self-gate.yml}"  # override: mutation proofs
 
 PASS=0
 FAIL=0
@@ -36,7 +36,7 @@ job_block() {
   awk '
     /^  review-ready:[[:space:]]*$/ { injob = 1; print; next }
     injob && /^  [A-Za-z0-9_-]+:/   { exit }
-    injob                           { print }
+    injob && $0 !~ /^[[:space:]]*#/ { print }   # comments never count as configuration
   ' "$WF"
 }
 
@@ -184,18 +184,35 @@ if [[ $RC -eq 0 && -n "$STATUS_LOG" && -n "$DISPATCH_LOG" && "$SUMMARY" == *"sen
 echo "# the YAML properties the script cannot show"
 BLOCK=$(job_block)
 [[ -n "$BLOCK" ]] || bad "review-ready job not found in the workflow"
-if [[ "$BLOCK" == *"needs: [claim-isolation, sensors]"* ]]; then ok "needs claim-isolation and sensors"; else bad "needs line missing"; fi
-if [[ "$BLOCK" == *"github.event.pull_request.draft == false"* && "$BLOCK" == *"github.event_name == 'pull_request'"* && "$BLOCK" == *"head.repo.full_name == github.repository"* ]]; then ok "job-level if: pull_request, non-draft, same-repo head"; else bad "job if: guard incomplete"; fi
+# has_line TEXT — TEXT is a whole line of the job (comments already removed), not a substring
+has_line() { grep -Fxq -- "$1" <<< "$BLOCK"; }
+if has_line "    needs: [claim-isolation, sensors]"; then ok "needs claim-isolation and sensors"; else bad "needs line missing"; fi
+if_lines=$(awk '/^    if: >-$/ {p=1; next} p && /^      / {print; next} p {exit}' <<< "$BLOCK")
+want_if="      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository"
+if [[ "$if_lines" == "$want_if" ]]; then ok "job-level if: exactly pull_request, non-draft, same-repo head"; else bad "job if: guard is: $if_lines"; fi
 perms=$(awk '/^    permissions:/ {p=1; next} p && /^      [a-z-]+:/ {print $1 $2; next} p {exit}' <<< "$BLOCK" | sort | tr '\n' ' ')
 if [[ "$perms" == "actions:read contents:write statuses:write " ]]; then ok "permissions are exactly actions: read, contents: write, statuses: write"; else bad "permissions: $perms"; fi
-coe=$(grep -c 'continue-on-error: true' <<< "$BLOCK")
-if [[ "$coe" == 1 ]]; then ok "continue-on-error appears once, on the emit step"; else bad "continue-on-error count: $coe"; fi
-step_coe=$(awk '/^      - name: Emit review-ready/ {s=1; next} s && /continue-on-error: true/ {print "yes"; exit} s && /^        run:/ {exit}' <<< "$BLOCK")
-if [[ "$step_coe" == yes ]]; then ok "that continue-on-error belongs to the Emit review-ready step"; else bad "continue-on-error is not on the emit step"; fi
-if [[ "$BLOCK" != *"actions/checkout"* ]]; then ok "no checkout: the PR's code is never executed with write scopes"; else bad "job checks out the repo"; fi
+coe=$(awk '/^[[:space:]]*continue-on-error:/ {n++} END {print n + 0}' <<< "$BLOCK")
+if [[ "$coe" == 1 ]]; then ok "exactly one continue-on-error key in the job"; else bad "continue-on-error count: $coe"; fi
+step_coe=$(awk '/^      - name: Emit review-ready$/ {s=1; next} s && /^        continue-on-error: true$/ {print "yes"; exit} s && /^        run:/ {exit}' <<< "$BLOCK")
+if [[ "$step_coe" == yes ]]; then ok "that key is 'continue-on-error: true' on the Emit review-ready step"; else bad "continue-on-error is not on the emit step"; fi
+uses_n=$(awk '/^[[:space:]]*-?[[:space:]]*uses:/ {n++} END {print n + 0}' <<< "$BLOCK")
+if [[ "$uses_n" == 0 ]]; then ok "no uses: in the job (no checkout, no third-party action with write scopes)"; else bad "job has $uses_n uses: lines"; fi
 uses_bad=$(awk '/^[[:space:]]*-?[[:space:]]*uses:/ && $0 !~ /@[0-9a-f]{40} # v/ {n++} END {print n + 0}' <<< "$BLOCK")
-if [[ "$uses_bad" == 0 ]]; then ok "every action in the job is pinned by commit SHA with a version comment"; else bad "unpinned actions in the job"; fi
-if grep -q 'ready_for_review' "$WF"; then ok "pull_request triggers include ready_for_review (a draft marked ready is emitted)"; else bad "ready_for_review trigger missing"; fi
+if [[ "$uses_bad" == 0 ]]; then ok "any action in the job would be pinned by commit SHA with a version comment"; else bad "unpinned actions in the job"; fi
+# The trigger: the `types:` line under on.pull_request, comments excluded.
+types_line=$(awk '
+  /^[[:space:]]*#/ { next }
+  /^on:[[:space:]]*$/ { inon = 1; next }
+  inon && /^[^ ]/ { exit }
+  inon && /^  pull_request:[[:space:]]*$/ { inpr = 1; next }
+  inon && /^  [A-Za-z_]+:/ { inpr = 0 }
+  inpr && /^    types:/ { print; exit }
+' "$WF")
+types_words=" ${types_line//[\[\],]/ } "
+if [[ "$types_line" == "    types: ["*"]" && "$types_words" == *" ready_for_review "* ]]; then ok "on.pull_request.types includes ready_for_review (a draft marked ready is emitted)"; else bad "on.pull_request.types line: '$types_line'"; fi
 if [[ "$(cat "$STEP")" != *"\${{"* ]]; then ok "run: script has no \${{ }} expressions (github context goes through env)"; else bad "run: script interpolates github context"; fi
 gate_hits=$(grep -lE 'review-ready' "$REPO_ROOT"/config/*.json 2>/dev/null || true)
 if [[ -z "$gate_hits" ]]; then ok "review-ready is not named in any config/*.json (signal, not gate)"; else bad "review-ready named in: $gate_hits"; fi
