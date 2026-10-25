@@ -5,13 +5,14 @@
 #   The DCO step is inline YAML, so nothing exercised it. This test extracts its
 #   `run:` script and executes it against throwaway repositories, which locks both
 #   the rule (every commit in a PR carries Signed-off-by) and its one exemption:
-#   inside a pull request AUTHORED by dependabot[bot], a commit that GitHub's API
-#   records as authored by dependabot[bot] AND GitHub-verified is exempt. The
-#   exemption is per commit, never per PR (a human can push onto a Dependabot PR,
-#   Codex finding on #555); it keys on the PR author login and the API record,
-#   never on local commit metadata (anyone can set any author name); exactly one
-#   bot is named. The API is stubbed here with a fake `gh` on PATH that answers
-#   from a fixture directory, so the test never touches GitHub.
+#   inside a pull request AUTHORED by dependabot[bot], a commit is exempt only if
+#   GitHub's API records author dependabot[bot], committer web-flow (GitHub) and a
+#   verified signature. The exemption is per commit, never per PR (a human can push
+#   onto a Dependabot PR), and `verified` alone is not enough (a human can forge the
+#   Dependabot author email and sign with their own key); it never trusts local
+#   commit metadata; exactly one bot is named. The API is stubbed with a fake `gh`
+#   on PATH that serves JSON fixtures and applies the REAL --jq expression through
+#   jq, so the filter in the workflow is under test. The test never touches GitHub.
 #
 # USAGE
 #   scripts/tests/dco-bot-exemption.test.sh
@@ -69,29 +70,44 @@ add_commit() {
   fi
 }
 
-# run_step DIR PR_AUTHOR [EVENT] — prints output, sets RC
+# run_step DIR PR_AUTHOR [EVENT] [NCOMMITS] — prints output, sets RC. The range is
+# HEAD~NCOMMITS..HEAD; if the base does not resolve the test setup is wrong, which would
+# make every negative assertion pass vacuously, so that is a hard failure, not a pass.
 run_step() {
-  local dir="$1" author="$2" event="${3:-pull_request}" base head
-  base=$(git -C "$dir" rev-parse HEAD~"${NCOMMITS:-1}")
+  local dir="$1" author="$2" event="${3:-pull_request}" n="${4:-1}" base head
+  if ! base=$(git -C "$dir" rev-parse "HEAD~${n}" 2>/dev/null); then
+    bad "test setup: HEAD~${n} does not resolve in $dir (a vacuous run); fix the fixture"
+    OUT="setup error"; RC=99; return
+  fi
   head=$(git -C "$dir" rev-parse HEAD)
   OUT=$(cd "$dir" && PATH="$ROOT/stub-bin:$PATH" GH_FIXTURE="$ROOT/fixture" EVENT_NAME="$event" BASE_SHA="$base" HEAD_SHA="$head" \
         PR_AUTHOR="$author" REPO="example/repo" GH_TOKEN="test" GITHUB_STEP_SUMMARY="$ROOT/summary.md" bash "$STEP" 2>&1)
   RC=$?
 }
 
-# The stub: `gh api repos/<repo>/commits/<sha> --jq <expr>` prints $GH_FIXTURE/<sha> verbatim
-# (the test writes the already-jq'd "login<TAB>verified" line); a missing fixture is an API error.
+# The stub: `gh api repos/<repo>/commits/<sha> [--jq EXPR]` serves the JSON fixture for <sha>
+# and applies EXPR with the real jq (gh's --jq is jq -r); a missing fixture is an API error.
+command -v jq >/dev/null || { echo "dco-bot-exemption.test.sh: jq required"; exit 1; }
 mkdir -p "$ROOT/stub-bin" "$ROOT/fixture"
 cat > "$ROOT/stub-bin/gh" <<'STUB'
 #!/usr/bin/env bash
 [ "${1:-}" = "api" ] || { echo "stub gh: unexpected args: $*" >&2; exit 2; }
-sha=${2##*/}
+sha=${2##*/}; shift 2
+expr=""
+while [ $# -gt 0 ]; do
+  case "$1" in --jq) expr="$2"; shift 2 ;; *) shift ;; esac
+done
 [ -f "$GH_FIXTURE/$sha" ] || { echo "stub gh: no fixture for $sha" >&2; exit 1; }
-cat "$GH_FIXTURE/$sha"
+if [ -n "$expr" ]; then jq -r "$expr" "$GH_FIXTURE/$sha"; else cat "$GH_FIXTURE/$sha"; fi
 STUB
 chmod +x "$ROOT/stub-bin/gh"
-# verified SHA [LOGIN] [VERIFIED] — record what the API would say about a commit
-verified() { printf '%s\t%s\n' "${2:-dependabot[bot]}" "${3:-true}" > "$ROOT/fixture/$1"; }
+# record SHA [AUTHOR] [COMMITTER] [VERIFIED] — what the API would say about a commit; the defaults
+# are the shape of a genuine Dependabot commit (author dependabot[bot], committer web-flow, verified)
+record() {
+  jq -n --arg a "${2-dependabot[bot]}" --arg c "${3-web-flow}" --argjson v "${4-true}" \
+    '{author:{login:$a}, committer:{login:$c}, commit:{verification:{verified:$v, reason:(if $v then "valid" else "unsigned" end)}}}' \
+    > "$ROOT/fixture/$1"
+}
 
 echo "# the rule: a human's unsigned commit fails"
 R="$ROOT/unsigned"; new_repo "$R"; add_commit "$R" "feature without a sign-off"
@@ -107,32 +123,36 @@ run_step "$R" "a-human"
 echo "# the exemption: a PR authored by dependabot[bot] passes with a visible notice"
 R="$ROOT/bot"; new_repo "$R"
 add_commit "$R" "chore(deps): bump an action" "dependabot[bot]" "49699333+dependabot[bot]@users.noreply.github.com"
-verified "$(git -C "$R" rev-parse HEAD)"
+record "$(git -C "$R" rev-parse HEAD)"
 run_step "$R" "dependabot[bot]"
-if [[ $RC -eq 0 && "$OUT" == *"DCO exempt"* && "$OUT" == *"dependabot[bot]"* ]]; then ok "GitHub-verified dependabot[bot] commit on a dependabot[bot] PR passes and says why"; else bad "bot PR rc=$RC out=$OUT"; fi
+if [[ $RC -eq 0 && "$OUT" == *"DCO exempt"* && "$OUT" == *"1 exempt"* ]]; then ok "GitHub-signed dependabot[bot] commit on a dependabot[bot] PR passes, says why, and counts the exemption"; else bad "bot PR rc=$RC out=$OUT"; fi
 
 echo "# the exemption is per commit: a human's unsigned commit pushed onto a Dependabot PR still fails"
 add_commit "$R" "human tweak without sign-off"
-human_sha=$(git -C "$R" rev-parse HEAD); verified "$human_sha" "a-human" "false"
-NCOMMITS=2 run_step "$R" "dependabot[bot]"
+human_sha=$(git -C "$R" rev-parse HEAD); record "$human_sha" "a-human" "a-human" false
+run_step "$R" "dependabot[bot]" pull_request 2
 if [[ $RC -ne 0 && "$OUT" == *"$human_sha"* ]]; then ok "unsigned human commit on a dependabot[bot] PR fails and is named"; else bad "human-on-bot-PR rc=$RC out=$OUT"; fi
 echo x >> "$R/f"; git -C "$R" add f; git -C "$R" commit -q -s -m "human tweak with sign-off"
 # range: bot commit + unsigned human + signed human — still fails on the unsigned one
-NCOMMITS=3 run_step "$R" "dependabot[bot]"
+run_step "$R" "dependabot[bot]" pull_request 3
 [[ $RC -ne 0 ]] && ok "a later signed commit does not launder the unsigned one" || bad "laundered rc=$RC out=$OUT"
 
-echo "# the API record decides, not local metadata: unverified or non-bot records fail, and an API error fails closed"
+echo "# the API record decides, not local metadata (author, committer AND signature must all match)"
 R="$ROOT/apisays"; new_repo "$R"
 add_commit "$R" "looks like the bot" "dependabot[bot]" "49699333+dependabot[bot]@users.noreply.github.com"
 s=$(git -C "$R" rev-parse HEAD)
-verified "$s" "dependabot[bot]" "false"; run_step "$R" "dependabot[bot]"
-[[ $RC -ne 0 ]] && ok "API says unverified: fails" || bad "unverified passed: $OUT"
-verified "$s" "a-human" "true";          run_step "$R" "dependabot[bot]"
-[[ $RC -ne 0 ]] && ok "API says the author is not dependabot[bot]: fails" || bad "non-bot author passed: $OUT"
-rm -f "$ROOT/fixture/$s";                run_step "$R" "dependabot[bot]"
-[[ $RC -ne 0 ]] && ok "API unreachable: fails closed" || bad "api error passed: $OUT"
-verified "$s";                           run_step "$R" "dependabot[bot]"
-[[ $RC -eq 0 ]] && ok "control: the same commit passes once the API record is bot+verified" || bad "control failed rc=$RC out=$OUT"
+record "$s" "dependabot[bot]" "web-flow" false; run_step "$R" "dependabot[bot]"
+[[ $RC -ne 0 && "$OUT" == *"$s"* ]] && ok "bot author + web-flow committer but NOT verified: fails" || bad "unverified passed rc=$RC: $OUT"
+record "$s" "a-human" "web-flow" true;          run_step "$R" "dependabot[bot]"
+[[ $RC -ne 0 && "$OUT" == *"$s"* ]] && ok "author is not dependabot[bot]: fails" || bad "non-bot author passed rc=$RC: $OUT"
+record "$s" "dependabot[bot]" "a-human" true;   run_step "$R" "dependabot[bot]"
+[[ $RC -ne 0 && "$OUT" == *"$s"* ]] && ok "forged Dependabot author, verified with the HUMAN's own key (committer is the human): fails (the Codex/Grok finding)" || bad "forged-author human-signed commit passed rc=$RC: $OUT"
+record "$s" "dependabot[bot]" "dependabot[bot]" true; run_step "$R" "dependabot[bot]"
+[[ $RC -ne 0 && "$OUT" == *"$s"* ]] && ok "committer is not web-flow (even if it claims to be the bot): fails" || bad "non-web-flow committer passed rc=$RC: $OUT"
+rm -f "$ROOT/fixture/$s";                       run_step "$R" "dependabot[bot]"
+[[ $RC -ne 0 && "$OUT" == *"$s"* ]] && ok "API unreachable: fails closed" || bad "api error passed rc=$RC: $OUT"
+record "$s";                                    run_step "$R" "dependabot[bot]"
+[[ $RC -eq 0 ]] && ok "control: the same commit passes once the API record is bot + web-flow + verified" || bad "control failed rc=$RC out=$OUT"
 
 echo "# spoof: commits that CLAIM a dependabot author, in a human's PR, still fail"
 R="$ROOT/spoof"; new_repo "$R"
@@ -155,7 +175,7 @@ echo "# a multi-commit human PR with one unsigned commit fails and names it"
 R="$ROOT/mixed"; new_repo "$R"
 echo a >> "$R/f"; git -C "$R" add f; git -C "$R" commit -q -s -m "signed one"
 add_commit "$R" "unsigned one"
-NCOMMITS=2 run_step "$R" "a-human"
+run_step "$R" "a-human" pull_request 2
 bad_sha=$(git -C "$R" rev-parse HEAD)
 if [[ $RC -ne 0 && "$OUT" == *"$bad_sha"* ]]; then ok "the unsigned commit is named in the failure"; else bad "mixed rc=$RC out=$OUT"; fi
 

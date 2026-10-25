@@ -68,6 +68,7 @@ jobs:
             exit 1
           fi
           unsigned=""
+          exempt=0
           shas=$(git rev-list "${BASE_SHA}..${HEAD_SHA}") || {
             echo "error: git rev-list ${BASE_SHA}..${HEAD_SHA} failed" >&2
             exit 1
@@ -85,15 +86,22 @@ jobs:
             if ! printf '%s\n' "$trailers" | grep '^Signed-off-by:' >/dev/null; then
               # Dependabot cannot sign off (#554). The exemption is per COMMIT, never per PR:
               # GitHub lets anyone with push access add commits to a Dependabot PR, so a PR-level
-              # skip would green-light an unsigned human commit (Codex finding on #555). A commit
-              # is exempt only when the PR author is dependabot[bot] AND GitHub's own record of
-              # the commit says its author is dependabot[bot] and the commit is GitHub-verified
-              # (Dependabot's commits are signed by GitHub). Local author metadata is never trusted.
+              # skip would green-light an unsigned human commit. A commit is exempt only when the
+              # PR author is dependabot[bot] AND GitHub's own record of the commit says: author
+              # dependabot[bot], COMMITTER web-flow (GitHub itself), signature verified. Dependabot
+              # commits are created and signed by GitHub, so that is the shape of every real one
+              # (checked against a live Dependabot commit). `verified` alone is not enough: a human
+              # can set the Dependabot author email and sign with their own key, which GitHub also
+              # calls verified, but then the committer is the human, not web-flow. Local commit
+              # metadata is never trusted. Residual: someone with write access who deliberately
+              # forges an author through GitHub's contents API gets a web-flow commit; the DCO check
+              # certifies contributions, it does not defend against a malicious maintainer.
               if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
-                rec=$(gh api "repos/${REPO}/commits/${sha}" --jq '[(.author.login // ""), (.commit.verification.verified // false)] | @tsv' 2>/dev/null) || rec=""
-                if [ "$rec" = "$(printf 'dependabot[bot]\ttrue')" ]; then
-                  echo "::notice::DCO exempt: ${sha} is a GitHub-verified dependabot[bot] commit on a dependabot[bot] pull request"
-                  echo "DCO exempt: ${sha} is a GitHub-verified dependabot[bot] commit" >> "$GITHUB_STEP_SUMMARY"
+                rec=$(gh api "repos/${REPO}/commits/${sha}" --jq '[(.author.login // ""), (.committer.login // ""), (.commit.verification.verified // false)] | @tsv' 2>/dev/null) || rec=""
+                if [ "$rec" = "$(printf 'dependabot[bot]\tweb-flow\ttrue')" ]; then
+                  echo "::notice::DCO exempt: ${sha} is a GitHub-signed dependabot[bot] commit on a dependabot[bot] pull request"
+                  echo "DCO exempt: ${sha} is a GitHub-signed dependabot[bot] commit" >> "$GITHUB_STEP_SUMMARY"
+                  exempt=$((exempt + 1))
                   continue
                 fi
               fi
@@ -105,7 +113,7 @@ jobs:
             printf '%s' "$unsigned" >&2
             exit 1
           fi
-          echo "DCO: every commit in ${BASE_SHA}..${HEAD_SHA} has a Signed-off-by trailer"
+          echo "DCO: every commit in ${BASE_SHA}..${HEAD_SHA} has a Signed-off-by trailer (${exempt} exempt as GitHub-signed dependabot[bot] commits)"
 
       # Law 9 ledger hygiene (#306) — invoked directly so the lint is a gate
       # caller of record (#307's reachability ratchet) and enforced on every PR,
