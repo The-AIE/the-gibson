@@ -50,7 +50,7 @@ One-line definitions for Gibson terms. Plain language first; doc links second.
 | **Lesson** | Append-only memory entry that turns a failure into harness improvement. [docs/09](09-memory-and-self-improvement.md) |
 | **Local overlay** | `local/**` in a fork — org overrides upstream never touches. [docs/18](18-fork-and-upstream.md) |
 | **Loop state** | `gibson/loop-state.md` — only file a fresh context needs to resume. [docs/11](11-solo-loop.md) |
-| **Mission Control (MC)** | Runtime control plane: queue, telemetry, dispatch (separate repo). |
+| **Agent Kontrol (AK)** | Runtime control plane and fleet manager: queue, telemetry, dispatch, progress board, morning brief (separate repo; formerly Mission Control). Never merge authority. [docs/31](31-agent-kontrol.md) |
 | **Operator tier** | Non-technical owner interface: chat + decision cards only. [docs/16](16-nontechnical-operation.md) |
 | **Parked** | Work set aside after bounded retries; safe queue, not failed forever. [docs/11](11-solo-loop.md) |
 | **Playbook** | Portable role prompt: frontmatter + dispatch text. [playbooks/](../playbooks/) |

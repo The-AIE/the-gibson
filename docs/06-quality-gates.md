@@ -279,7 +279,7 @@ Six lenses; findings cite file:line and state the failure scenario, not just the
   reviewer runs **read-only**, verdict must end `VERDICT: APPROVE` or
   `VERDICT: REQUEST_CHANGES`.
 - **Fail closed:** a missing or broken reviewer blocks the merge; it never silently
-  skips. (Deliberate hardening of Mission Control's current lenient behavior.)
+  skips. (Deliberate hardening of Agent Kontrol's current lenient behavior.)
 
 ## Merge gate
 

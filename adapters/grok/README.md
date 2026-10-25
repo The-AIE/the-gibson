@@ -142,7 +142,7 @@ yet). Full format: [`templates/fleet/README.md`](../../templates/fleet/README.md
 ### 6. Telemetry
 
 - `MC_HEARTBEAT_URL` env for `loop.sh` curl heartbeat
-- MCP `report_status` / `remember` when Mission Control MCP is configured
+- MCP `report_status` / `remember` when Agent Kontrol MCP is configured
 - 15 minutes silence ⇒ presumed dead (fleet rule)
 
 ### 7. Cost capture
