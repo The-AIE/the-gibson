@@ -53,8 +53,7 @@ timestamps below).
 
 ## Who consumes it
 
-The operator's independent-review controller (the host that posts the `aie-independent-review`
-verdicts; its code lives in the operator's private repository) reviews the named head
+The independent-review controller (the job that posts the reviewer App's verdicts) reviews the named head
 immediately in a per-repository lane, instead of waiting for its 900 s tick. The tick stays as
 the fallback sweep. The controller holds an outbound connection to a relay; its host has no
 inbound path. Its change is tracked in #562 (item 2).
