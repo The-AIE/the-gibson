@@ -191,9 +191,9 @@ A Tier A issue can go plan→issue→build→test→review→eval→merge→depl
 **zero human touches**, and a Tier C issue stops at exactly the human gates and
 nowhere else.
 
-## Reference adopters (as of 2026-10-21)
+## Reference adopter (as of 2026-10-21)
 
-Two real repositories, read from their trees and settings on the date above, so the words "adopted" and "not adopted" describe what was observed installed, not what was intended. They are described by role and are deliberately not named here: the public tree does not name private deployments, and the maintainers hold the mapping from each profile to its repository. Treat these as dated observations; re-read any target before quoting its state, because adoption moves weekly.
+One real repository, read from its tree and settings on the date above, so the word "adopted" describes what was observed installed, not what was intended. It is described by role and deliberately not named here: the public tree does not name private deployments, and the maintainers hold the mapping from this profile to its repository. This page describes a positive example only; it does not publish the gaps or weaknesses of any specific deployment. Treat it as a dated observation, and re-read any target before quoting its state, because adoption moves weekly.
 
 ### A conference-management platform (production; payments and personal data)
 
@@ -207,14 +207,9 @@ Two real repositories, read from their trees and settings on the date above, so 
 - Delivery control: a release role in its release doc; a dedicated production branch; production migrations only through a workflow that rehearses on a database branch and then applies; a promote script that is dry-run only by design.
 - Independent reviewer: a dedicated reviewer App covers it (see the G14 setup above).
 
-**Not installed, or different from the Gibson's templates:** no `.agents/gibson-delivery.json` (required contexts come from branch protection); its own test-integrity sensors rather than the Gibson's `test-integrity.mjs`.
+**Not installed, or different from the Gibson's templates:** no `.gibson-delivery.json` (required contexts come from branch protection); its own test-integrity sensors rather than the Gibson's `test-integrity.mjs`.
 
 **Adoption state:** adopted in substance. Several Gibson gates were first proven here and generalized back. By its documented design, routine PRs land with zero human touches when the reviewer passes a head that contains the `main` tip; that behavior was not re-measured on 2026-10-21. The cost of the exact-head design is visible in one observed PR, which took over two hours from first push to a verdict, mostly in reviewer ticks and a discarded review.
 
-### An agent-fleet dashboard (deployed on Vercel)
-
-**Gibson pieces installed:** none. No `.agents/` directory, no claim-isolation script, no review-evidence script, trust file or workflow, no merge captain, no risk classifier, no DCO or `Agent-Vendor` convention. The only workflow is a single CI job (typecheck, tests against Postgres, a Docker build). No branch protection on its default or production branches. The dedicated reviewer does not cover it.
-
-**Delivery path (verified from Vercel, not from a promote):** git-triggered, with a dedicated production branch; the last production deploy came from that branch. Its deploy doc describes a `main` to production-branch PR as the release step, and its schema script runs inside the build, which is not a reviewed-migration path.
-
-**Adoption state:** not adopted. Two observations from its history: a feature branch was authored and merged by an agent lane straight into the production branch, bypassing `main`; and on 2026-10-21 the production branch was 2 commits ahead of `main` while `main` was 9 ahead of it. Start with `gibson-audit`, then `gibson-setup`; until then nothing in steps 1 to 5 above applies to it.
+---
+[← 12 · Shipping to Vercel safely](12-vercel.md) · [Home](../index.md) · [14 · The sixteen interruptions →](14-human-gates.md) · [20 · Delivery control](23-delivery-control.md)
