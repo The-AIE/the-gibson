@@ -48,6 +48,14 @@
     {
       "path": "memory/DECISIONS.md",
       "reason": "Removed or scrubbed by #528; delete this entry when #528 lands."
+    },
+    {
+      "path": "SECURITY.md",
+      "reason": "Owner-designated public contact for security and conduct reports (decision recorded on the-gibson#549, 2026-10-25)."
+    },
+    {
+      "path": "CODE_OF_CONDUCT.md",
+      "reason": "Owner-designated public contact for security and conduct reports (decision recorded on the-gibson#549, 2026-10-25)."
     }
   ]
 }

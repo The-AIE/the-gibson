@@ -1,0 +1,44 @@
+name: Feature request
+description: "Propose a change to the harness: a gate, a sensor, a role, an adapter, or the docs."
+title: "feat: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What goes wrong today, for whom? Describe the problem before the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would change
+      description: The smallest change that would fix it.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: How we would know it is done
+      description: Acceptance criteria, one per line. Each should be something a test or a command can check.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other ways to solve it, and why you did not pick them.
+  - type: dropdown
+    id: tier
+    attributes:
+      label: How risky is it?
+      description: See the tier table in AGENTS.md. Pick your best guess; reviewers will adjust it.
+      options:
+        - A - routine (docs, tests, isolated changes)
+        - B - elevated (shared modules, larger changes)
+        - C - sensitive (money, auth, personal data, security boundaries, schema)
+    validations:
+      required: true
