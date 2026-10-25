@@ -463,6 +463,42 @@ fi
 if ! git fetch origin "$BASE" >/dev/null 2>&1; then
   die "cannot fetch origin/$BASE — refuse claim (no local/stale ledger fallback; #106)"
 fi
+# --- stale-copy check begin (#556) -------------------------------------------
+# The reservation commit this script writes is what every later gate reads
+# (Agent-Vendor trailer placement, DCO line, committer identity). A copy of this
+# script that predates a fix to that commit publishes a defective reservation,
+# and the only remedy the harness offered was close-and-reclaim: the 2026-10-25
+# audit traced 19 of 61 unmerged closures to exactly that (#507, #508 ran a
+# claim.sh from before #467). So when this script lives inside the canonical
+# repository it must be byte-identical to the copy on origin/$BASE, which was
+# just fetched. Origin's blob unreadable is a refusal, not a pass (#106 style).
+# A copy running from outside the canonical repository (another checkout, a
+# test fixture) has no published blob to prove against; that is reported, not
+# refused, because cross-repository use is legitimate and was never the
+# failure mode. GIBSON_CLAIM_ALLOW_STALE=1 is the one escape hatch, loud, for
+# developing this script on a branch.
+self_dir=$(CDPATH='' cd -- "$SCRIPT_DIR" && pwd -P)
+self_file="$self_dir/$(basename -- "${BASH_SOURCE[0]}")"
+self_top=$(git -C "$self_dir" rev-parse --show-toplevel 2>/dev/null || true)
+canon_top=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [[ -n "$self_top" && -n "$canon_top" && "$self_top" == "$canon_top" ]]; then
+  self_rel="$(git -C "$self_dir" rev-parse --show-prefix 2>/dev/null)$(basename -- "${BASH_SOURCE[0]}")"
+  self_blob=$(git hash-object -- "$self_file" 2>/dev/null) ||
+    die "cannot hash the running copy of claim.sh at $self_file — refuse claim (#556)"
+  if ! main_blob=$(git rev-parse --verify --quiet "origin/$BASE:$self_rel" 2>/dev/null) || [[ -z "$main_blob" ]]; then
+    die "cannot read $self_rel at origin/$BASE — refuse claim: the running copy cannot be proven current (#556)"
+  fi
+  if [[ "$self_blob" != "$main_blob" ]]; then
+    if [[ "${GIBSON_CLAIM_ALLOW_STALE:-}" == "1" ]]; then
+      info "WARNING: running a STALE copy of claim.sh (${self_blob:0:12} here, ${main_blob:0:12} on origin/$BASE) because GIBSON_CLAIM_ALLOW_STALE=1 — the reservation it writes may not satisfy current gates (#556)"
+    else
+      die "stale copy of claim.sh: running ${self_blob:0:12}, origin/$BASE has ${main_blob:0:12} — re-run from an up-to-date checkout of $BASE (git checkout $BASE && git pull --ff-only); a stale copy writes a reservation commit later gates reject (#556, #507, #508)"
+    fi
+  fi
+else
+  info "NOTICE: claim.sh is running from outside the canonical repository ($self_file); its currency against origin/$BASE cannot be proven here (#556)"
+fi
+# --- stale-copy check end (#556) ---------------------------------------------
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 
 # Live claims are read from origin's tip, not the working tree: the canonical
