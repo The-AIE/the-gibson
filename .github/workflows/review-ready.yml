@@ -1,0 +1,182 @@
+# #562: the push half of "agents push, nobody polls" (docs/01-principles.md:109).
+# Contract: docs/32-review-ready-event.md.
+#
+# WHY A SEPARATE WORKFLOW. A `pull_request` workflow runs the workflow file FROM THE
+# PULL REQUEST, so any job in gibson-self-gate.yml that held `statuses: write` could be
+# rewritten by the PR it judges and used to forge a required status. `workflow_run` and
+# `pull_request_target` run the file on the DEFAULT BRANCH, which a PR cannot change.
+# Nothing here ever checks out or executes PR code, and every value that reaches a
+# `run:` block comes through env and is re-read from the API before anything is written.
+#
+# A SIGNAL, not a gate: `review-ready` is not a required check. The failure mode of every
+# path below is a MISSING signal (the controller's fallback sweep still finds the head),
+# never a false green.
+#
+# pull_request_target is safe here because nothing from the PR is checked out or
+# executed and the job only reads/writes via the API after re-validating the head.
+# gibson:approved-pr-target 562
+name: review-ready
+
+on:
+  workflow_run:
+    workflows: [gibson-self-gate]
+    types: [completed]
+  # A PR opened as a draft and later marked ready has no new self-gate run to wait for;
+  # this event lets the signal fire for the green run it already has.
+  pull_request_target:
+    types: [ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: review-ready-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  review-ready:
+    name: emit review-ready
+    if: >-
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Least privilege: actions (the completed run and its jobs), pull-requests (the PR's
+    # current state), statuses (the commit status), contents (repository_dispatch is a
+    # contents-write endpoint).
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Emit review-ready
+        # Signal only: never let a failure to emit turn anything red.
+        continue-on-error: true
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          # workflow_run payload (empty on pull_request_target)
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          # pull_request_target payload (empty on workflow_run)
+          PRT_DRAFT: ${{ github.event.pull_request.draft }}
+          PRT_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PRT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          # both
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          SELF_GATE_PATH=.github/workflows/gibson-self-gate.yml
+          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          skip() {
+            echo "::notice::review-ready skipped: $1"
+            summary "- review-ready: skipped, $1"
+            exit 0
+          }
+          fail() {
+            echo "::warning::review-ready not fully emitted: $1"
+            summary "- review-ready: NOT fully emitted, $1"
+            exit 1
+          }
+
+          # 1. Which event, which run, which PR (payload values are only a starting point).
+          case "${EVENT_NAME}" in
+            workflow_run)
+              [ "${RUN_EVENT}" = "pull_request" ] || skip "the self-gate run was a ${RUN_EVENT} run, not pull_request"
+              [ "${RUN_CONCLUSION}" = "success" ] || skip "the self-gate run concluded ${RUN_CONCLUSION}"
+              [ "${RUN_HEAD_REPO}" = "${REPO}" ] || skip "the run's head is in ${RUN_HEAD_REPO}; no signal for a fork"
+              run_id=${RUN_ID}
+              pr=${RUN_PR_NUMBER}
+              ;;
+            pull_request_target)
+              [ "${PRT_DRAFT}" = "false" ] || skip "draft pull request"
+              [ "${PRT_HEAD_REPO}" = "${REPO}" ] || skip "head is in ${PRT_HEAD_REPO}; no signal for a fork"
+              pr=${PRT_PR_NUMBER}
+              # The latest completed successful self-gate pull_request run for this exact head, if any.
+              run_id=$(gh api "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&event=pull_request&status=completed&per_page=100" \
+                --jq "[.workflow_runs[] | select(.path == \"${SELF_GATE_PATH}\" and .conclusion == \"success\")] | sort_by(.run_started_at) | last | .id // empty") \
+                || fail "could not list self-gate runs at ${HEAD_SHA}"
+              [ -n "${run_id}" ] || skip "no successful self-gate run at ${HEAD_SHA} yet; the workflow_run event will signal when it finishes"
+              ;;
+            *) skip "event is ${EVENT_NAME}" ;;
+          esac
+          [ -n "${HEAD_SHA:-}" ] || skip "no head SHA in the event"
+          [ -n "${pr:-}" ] || skip "no pull request is associated with the run"
+          [ -n "${run_id:-}" ] || skip "no run id in the event"
+
+          # 2. Confirm the run itself, from the API: right workflow file, right event, right head, success.
+          run_line=$(gh api "repos/${REPO}/actions/runs/${run_id}" \
+            --jq '[.path, .event, .conclusion, .head_sha, .head_repository.full_name] | @tsv') \
+            || fail "could not read run ${run_id}"
+          IFS=$'\t' read -r r_path r_event r_conclusion r_head r_repo <<< "${run_line}"
+          r_path=${r_path%%@*}
+          [ "${r_path}" = "${SELF_GATE_PATH}" ] || skip "run ${run_id} is ${r_path}, not ${SELF_GATE_PATH}"
+          [ "${r_event}" = "pull_request" ] || skip "run ${run_id} event is ${r_event}"
+          [ "${r_conclusion}" = "success" ] || skip "run ${run_id} concluded ${r_conclusion}"
+          [ "${r_head}" = "${HEAD_SHA}" ] || skip "run ${run_id} is for ${r_head}, not ${HEAD_SHA}"
+          [ "${r_repo}" = "${REPO}" ] || skip "run ${run_id} head is in ${r_repo}"
+
+          # 3. Both gates green for that head.
+          jobs=$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs" --paginate \
+            --jq '.jobs[] | select(.name == "sensors" or .name == "claim-isolation") | [.name, .conclusion, .completed_at] | @tsv') \
+            || fail "could not read the jobs of run ${run_id}"
+          sensors_green_at=""
+          for job in sensors claim-isolation; do
+            row=$(awk -F'\t' -v j="${job}" '$1 == j && $2 == "success" { print $3; exit }' <<< "${jobs}")
+            [ -n "${row}" ] || skip "the ${job} job of run ${run_id} is not success"
+            [ "${job}" != sensors ] || sensors_green_at=${row}
+          done
+
+          # 4. The PR as it is NOW: open, not a draft, same-repo, and still at this head.
+          pr_line=$(gh api "repos/${REPO}/pulls/${pr}" \
+            --jq '[.state, .draft, .head.sha, .base.sha, .created_at, .head.repo.full_name] | @tsv') \
+            || fail "could not read pull request ${pr}"
+          IFS=$'\t' read -r p_state p_draft p_head base_sha p_created p_repo <<< "${pr_line}"
+          [ "${p_state}" = "open" ] || skip "pull request ${pr} is ${p_state}"
+          [ "${p_draft}" = "false" ] || skip "pull request ${pr} is a draft"
+          [ "${p_repo}" = "${REPO}" ] || skip "pull request ${pr} head is in ${p_repo}"
+          [ "${p_head}" = "${HEAD_SHA}" ] || skip "pull request ${pr} moved to ${p_head}; ${HEAD_SHA} is stale"
+
+          # 5. Idempotent per head.
+          existing=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/statuses" --paginate \
+            --jq '.[] | select(.context == "review-ready" and .state == "success") | .id') \
+            || fail "could not read existing statuses at ${HEAD_SHA}"
+          if [ -n "${existing}" ]; then
+            skip "a review-ready status already exists at ${HEAD_SHA} (idempotent: no second status, no second dispatch)"
+          fi
+
+          # 6. Emit: the status first (the record), then the dispatch.
+          ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh api "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -f state=success -f context=review-ready \
+            -f description="claim-isolation and sensors green; ready for independent review" >/dev/null \
+            || fail "could not post the review-ready status at ${HEAD_SHA}"
+          payload=$(jq -nc --arg repo "${REPO}" --argjson pr "${pr}" --arg head "${HEAD_SHA}" \
+            --arg base "${base_sha}" --arg ts "${ts}" \
+            '{event_type: "review-ready", client_payload: {repo: $repo, pr: $pr, head_sha: $head, base_sha: $base, "tier-unknown": true, ts: $ts}}') \
+            || fail "could not build the dispatch payload"
+          dispatched=yes
+          if ! gh api "repos/${REPO}/dispatches" --input - >/dev/null <<< "${payload}"; then
+            dispatched="no (the status was posted; the dispatch call failed)"
+          fi
+
+          # 7. Measurement (#562 item 3).
+          {
+            echo "### review-ready"
+            echo "- head: ${HEAD_SHA} (pull request ${pr}, self-gate run ${run_id}, trigger ${EVENT_NAME})"
+            echo "- pr_opened_at: ${p_created}"
+            echo "- sensors_green_at: ${sensors_green_at}"
+            echo "- ready_emitted_at: ${ts}"
+            echo "- status posted: yes; repository_dispatch sent: ${dispatched}"
+            echo "- sensors green to ready emitted: $(jq -n --arg a "${sensors_green_at}" --arg b "${ts}" '(($b | fromdateiso8601) - ($a | fromdateiso8601))') s"
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "${dispatched}" in yes) ;; *) fail "repository_dispatch failed after the status was posted" ;; esac

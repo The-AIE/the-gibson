@@ -7,9 +7,6 @@ name: gibson-self-gate
 
 on:
   pull_request:
-    # ready_for_review is not a default type: without it a draft that is marked
-    # ready would never reach the review-ready job (#562).
-    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -373,97 +370,3 @@ jobs:
             exit 2
           fi
           node "$trusted/scripts/pr-size.mjs" --base "$GIBSON_PR_BASE" --head "$GIBSON_PR_HEAD"
-
-  # #562: the push half of "agents push, nobody polls" (docs/01-principles.md:109).
-  # A SIGNAL for the independent reviewer, never a gate: it is not a required
-  # check and a failure to emit does not fail the PR. Contract: docs/31-review-ready-event.md.
-  # No checkout: nothing from the PR is ever executed with this job's write scopes.
-  # Least privilege: statuses (the commit status), contents (repository_dispatch is
-  # a contents-write endpoint), actions: read (job timestamps for the measurement).
-  review-ready:
-    name: emit review-ready
-    needs: [claim-isolation, sensors]
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: read
-      contents: write
-      statuses: write
-    steps:
-      - name: Emit review-ready
-        # Signal only: never let a failure to emit turn the PR red.
-        continue-on-error: true
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          IS_DRAFT: ${{ github.event.pull_request.draft }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_OPENED_AT: ${{ github.event.pull_request.created_at }}
-          RUN_ID: ${{ github.run_id }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -uo pipefail
-          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
-          skip() {
-            echo "::notice::review-ready skipped: $1"
-            summary "- review-ready: skipped, $1"
-            exit 0
-          }
-          fail() {
-            echo "::warning::review-ready not fully emitted: $1"
-            summary "- review-ready: NOT fully emitted, $1"
-            exit 1
-          }
-          [ "${EVENT_NAME}" = "pull_request" ] || skip "event is ${EVENT_NAME}, not pull_request"
-          [ "${IS_DRAFT}" = "false" ] || skip "draft pull request"
-          [ "${HEAD_REPO}" = "${REPO}" ] || skip "head is in ${HEAD_REPO}; GITHUB_TOKEN cannot write for a fork"
-          [ -n "${HEAD_SHA:-}" ] || fail "pull_request head SHA is empty"
-          [ -n "${BASE_SHA:-}" ] || fail "pull_request base SHA is empty"
-
-          existing=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/statuses" --paginate \
-            --jq '.[] | select(.context == "review-ready" and .state == "success") | .id') \
-            || fail "could not read existing statuses at ${HEAD_SHA}"
-          if [ -n "${existing}" ]; then
-            skip "a review-ready status already exists at ${HEAD_SHA} (idempotent: no second status, no second dispatch)"
-          fi
-
-          # Measurement (#562 item 3): never blocks the emit.
-          sensors_green_at=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
-            --jq '.jobs[] | select(.name == "sensors") | .completed_at' 2>/dev/null) || sensors_green_at=""
-          sensors_green_at=${sensors_green_at%%$'\n'*}
-          [ -n "${sensors_green_at}" ] || sensors_green_at=unknown
-          ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-          gh api "repos/${REPO}/statuses/${HEAD_SHA}" \
-            -f state=success -f context=review-ready \
-            -f description="claim-isolation and sensors green; ready for independent review" >/dev/null \
-            || fail "could not post the review-ready status at ${HEAD_SHA}"
-
-          payload=$(jq -nc --arg repo "${REPO}" --argjson pr "${PR_NUMBER}" --arg head "${HEAD_SHA}" \
-            --arg base "${BASE_SHA}" --arg ts "${ts}" \
-            '{event_type: "review-ready", client_payload: {repo: $repo, pr: $pr, head_sha: $head, base_sha: $base, "tier-unknown": true, ts: $ts}}') \
-            || fail "could not build the dispatch payload"
-          dispatched=yes
-          if ! gh api "repos/${REPO}/dispatches" --input - >/dev/null <<< "${payload}"; then
-            dispatched="no (the status was posted; the dispatch call failed)"
-          fi
-
-          {
-            echo "### review-ready"
-            echo "- head: ${HEAD_SHA}"
-            echo "- pr_opened_at: ${PR_OPENED_AT}"
-            echo "- sensors_green_at: ${sensors_green_at}"
-            echo "- ready_emitted_at: ${ts}"
-            echo "- status posted: yes; repository_dispatch sent: ${dispatched}"
-            if [ "${sensors_green_at}" != unknown ]; then
-              echo "- sensors green to ready emitted: $(jq -n --arg a "${sensors_green_at}" --arg b "${ts}" '(($b | fromdateiso8601) - ($a | fromdateiso8601))') s"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-          case "${dispatched}" in yes) ;; *) fail "repository_dispatch failed after the status was posted" ;; esac
