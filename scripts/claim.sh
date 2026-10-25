@@ -212,6 +212,10 @@ if [[ "${1:-}" == "--renew" ]]; then
     exit 2
   }
   _rn_issue="$2"
+  command -v gh >/dev/null || {
+    echo "claim.sh: ERROR: gh (GitHub CLI) required" >&2
+    exit 1
+  }
   _rn_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
   _rn_repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || {
     echo "claim.sh: ERROR: cannot resolve the repository to renew in" >&2
