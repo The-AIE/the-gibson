@@ -1,0 +1,8 @@
+{
+  "schema": "gibson.lesson-debt-baseline.v1",
+  "windowDays": 14,
+  "proseOnlyCount": 34,
+  "statusMarker": "no sensor yet",
+  "measuredOn": "2026-10-25",
+  "$comment": "proseOnlyCount is the measured number of lessons whose Status line contains statusMarker. The sensor does not rewrite this file. The count may fall. A rise is a finding. windowDays is the ledger window, not an observation-freshness window."
+}
