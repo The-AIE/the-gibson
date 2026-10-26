@@ -564,7 +564,7 @@ if [[ -n "$PR_REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
       _ex_id=$(cut -f2 <<<"$_ex_line")
       _ex_state=$(cut -f3 <<<"$_ex_line")
       _ex_eff=$(cut -f6 <<<"$_ex_line")
-      [[ "$_ex_state" == "stale" ]] || continue
+      [[ "$_ex_state" == "stale" || "$_ex_state" == "displaced" ]] || continue
       [[ "$_ex_n" =~ ^[0-9]+$ ]] || continue
       [[ "$_ex_id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+- ]] || continue
       if [[ "$CLAIM_ID_FILTER_SET" -eq 1 && "$_ex_id" != "$CLAIM_ID_FILTER" ]]; then

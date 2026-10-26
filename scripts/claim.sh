@@ -237,6 +237,46 @@ if [[ "${1:-}" == "--renew" ]]; then
     echo "claim.sh: ERROR: cannot read the body of PR #$_rn_pr" >&2
     exit 1
   }
+  # A displaced claim is terminal (#557): a newer claim already took its scope,
+  # so renewing would recreate two overlapping live claims. Refuse, naming the
+  # displacer. A Displaced-by line this cannot parse is refused too (fail closed).
+  _rn_disp=$(grep '^- Displaced by: ' <<<"$_rn_body" || true)
+  if [[ -n "$_rn_disp" ]]; then
+    if grep -qvE '^- Displaced by: issue-[A-Za-z0-9-]+ \(PR #[0-9]+\)$' <<<"$_rn_disp"; then
+      echo "claim.sh: ERROR: PR #$_rn_pr carries a Displaced-by record this cannot read — refusing to renew a claim that may already be displaced" >&2
+    else
+      echo "claim.sh: ERROR: $_rn_id (PR #$_rn_pr) was displaced and cannot be renewed: ${_rn_disp//- Displaced by: /} — re-claim issue #$_rn_issue from current main" >&2
+    fi
+    exit 1
+  fi
+  # A renewal is an admission, not a bookkeeping edit: re-run the overlap check
+  # against every live claim before moving the date.
+  command -v node >/dev/null || {
+    echo "claim.sh: ERROR: node required to re-check overlap before renewing" >&2
+    exit 1
+  }
+  _rn_canon="${GIBSON_CANONICAL:-$(pwd)}"
+  if git -C "$_rn_canon" ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
+    _rn_base=main
+  elif git -C "$_rn_canon" ls-remote --exit-code --heads origin master >/dev/null 2>&1; then
+    _rn_base=master
+  else
+    echo "claim.sh: ERROR: cannot find origin/main or origin/master — refusing to renew without an overlap check" >&2
+    exit 1
+  fi
+  _rn_scope=$(awk -F'\t' -v n="$_rn_pr" '$1 == n { print $3 }' <<<"$_rn_rows")
+  _rn_args=(--repo-path "$_rn_canon" --base "$_rn_base" --claim-id "$_rn_id" --repo "$_rn_repo" --issue "$_rn_issue")
+  for _rn_s in $_rn_scope; do
+    _rn_args+=(--scope "$_rn_s")
+  done
+  [[ -n "$_rn_scope" ]] || {
+    echo "claim.sh: ERROR: could not read the claim scope of PR #$_rn_pr — refusing to renew" >&2
+    exit 1
+  }
+  if ! env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE node "$_rn_dir/scope-overlap.mjs" "${_rn_args[@]}"; then
+    echo "claim.sh: ERROR: renewing $_rn_id would overlap a live claim — not renewed; resolve the overlap or re-claim" >&2
+    exit 1
+  fi
   _rn_new=$(utc_after_ttl)
   _rn_file=$(mktemp "${TMPDIR:-/tmp}/gibson-claim-renew.XXXXXX")
   # Exactly one Claim-expires line is replaced; none present => insert after
@@ -1405,28 +1445,38 @@ if [[ "$_adm_rc" -ne 0 ]]; then
 fi
 info "admission: PR #$PR_NUMBER holds $CLAIM_ID (verified against the live claim inventory)"
 
-# Expired claims this claim displaced (#557): write it into both PR bodies so
-# the history survives. Best effort and never fatal — the claim is already
-# admitted, and a failed note must not roll back real work.
-record_displacement() { # pr-number line
+# Expired claims this claim displaced (#557). The record on the DISPLACED PR is
+# what makes displacement irreversible (pr-claims.sh reads `Displaced by` as
+# terminal, so a later push or --renew cannot revive it), so it is written
+# first, read back, and a failure rolls this claim back rather than leaving two
+# claims able to be live at once. The note on this PR is informational.
+record_displacement() { # pr-number line -> 0 only when the line is readable back
   local n="$1" line="$2" body tmp
-  body=$(gh pr view "$n" --repo "$REPO" --json body -q .body 2>/dev/null) || {
-    info "WARNING: could not read PR #$n to record: $line"
-    return 0
-  }
-  tmp=$(mktemp "${TMPDIR:-/tmp}/gibson-claim-displace.XXXXXX")
-  { printf '%s\n' "$body"; printf '%s\n' "$line"; } > "$tmp"
-  gh pr edit "$n" --repo "$REPO" --body-file "$tmp" >/dev/null 2>&1 ||
-    info "WARNING: could not record on PR #$n: $line"
-  rm -f "$tmp"
+  body=$(gh pr view "$n" --repo "$REPO" --json body -q .body 2>/dev/null) || return 1
+  if ! grep -qxF -- "$line" <<<"$body"; then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/gibson-claim-displace.XXXXXX")
+    { printf '%s\n' "$body"; printf '%s\n' "$line"; } > "$tmp"
+    gh pr edit "$n" --repo "$REPO" --body-file "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+    body=$(gh pr view "$n" --repo "$REPO" --json body -q .body 2>/dev/null) || return 1
+  fi
+  grep -qxF -- "$line" <<<"$body"
 }
 while IFS= read -r _dl; do
   [[ "$_dl" == "scope-overlap: displaced-claim "* ]] || continue
   read -r _ _ _d_id _d_pr _d_exp <<<"$_dl"
   [[ "$_d_id" == issue-* && "$_d_pr" =~ ^[0-9]+$ ]] || continue
-  record_displacement "$PR_NUMBER" "- Displaced claim: ${_d_id} (PR #${_d_pr}, expired ${_d_exp})"
-  record_displacement "$_d_pr" "- Displaced by: ${CLAIM_ID} (PR #${PR_NUMBER})"
+  record_displacement "$_d_pr" "- Displaced by: ${CLAIM_ID} (PR #${PR_NUMBER})" ||
+    die "could not durably record the displacement of ${_d_id} (PR #${_d_pr}) — without it that claim could be renewed back into overlap; rolling this claim back"
+  gh label create claim-expired --repo "$REPO" --color BFD4F2 \
+    --description "PR-body claim expired or displaced (#557)" >/dev/null 2>&1 || true
+  gh pr edit "$_d_pr" --repo "$REPO" --add-label claim-expired >/dev/null 2>&1 ||
+    info "WARNING: could not label PR #${_d_pr} claim-expired"
+  record_displacement "$PR_NUMBER" "- Displaced claim: ${_d_id} (PR #${_d_pr}, expired ${_d_exp})" ||
+    info "WARNING: could not record the displacement of ${_d_id} on PR #${PR_NUMBER}"
 done <<EOF
+$_adm_out
+EOF
 $_adm_out
 EOF
 

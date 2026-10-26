@@ -130,6 +130,10 @@ claim_node() {
   printf '{"number":%s,"body":"%s","headRefName":"feat/%s","url":"https://github.com/acme/app/pull/%s","createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-02T00:00:00Z","isCrossRepository":false,"commits":{"nodes":[{"commit":{"committedDate":"%s"}}]}}' \
     "$n" "$body" "${id#issue-}" "$n" "$last"
 }
+# Same node plus extra raw body lines ($6, '\n'-separated, JSON-escaped already).
+claim_node_extra() {
+  claim_node "$1" "$2" "$3" "$4" "$5" | sed 's|- Claimed: 2026-10-01T00:00:00Z|- Claimed: 2026-10-01T00:00:00Z\\n'"$6"'|'
+}
 stage() { printf '[[%s]]' "$1" > "$GH_PAGES"; }
 state_of() { awk -F'\t' -v n="$2" '$1 == n { print $3 }' <<<"$1"; }
 
@@ -178,6 +182,19 @@ check "duplicate Claim-expires is unknown" "$(state_of "$out" 17)" "unknown"
 stage "$(claim_node 18 issue-27-nodate 'lib/**' "$EXPIRED" '')"
 out=$("$PC" expiry acme/app 2>&1)
 check "missing head commit date is unknown" "$(state_of "$out" 18)" "unknown"
+
+echo "pr-claims expiry · displacement is terminal"
+DISP='- Displaced by: issue-31-mine (PR #99)'
+stage "$(claim_node_extra 61 issue-60-gone 'lib/**' "$EXPIRED" "$OLD_PUSH" "$DISP")"
+out=$("$PC" expiry acme/app 2>&1)
+check "expired + Displaced by is displaced" "$(state_of "$out" 61)" "displaced"
+contains "the displacer is named" "$out" "displaced by issue-31-mine (PR #99)"
+stage "$(claim_node_extra 62 issue-60-gone 'lib/**' "$FRESH" "$RECENT_PUSH" "$DISP")"
+out=$("$PC" expiry acme/app 2>&1)
+check "a fresh date and a recent push do not revive a displaced claim" "$(state_of "$out" 62)" "displaced"
+stage "$(claim_node_extra 63 issue-60-gone 'lib/**' "$EXPIRED" "$OLD_PUSH" '- Displaced by: someone maybe')"
+out=$("$PC" expiry acme/app 2>&1)
+check "an unreadable Displaced by record is unknown (blocks)" "$(state_of "$out" 63)" "unknown"
 
 echo "pr-claims list · the 8-column contract is untouched"
 stage "$(claim_node 19 issue-28-cols 'lib/**' "$FRESH" "$RECENT_PUSH")"
@@ -235,21 +252,52 @@ stage "$(claim_node 36 issue-30-held 'components/nav/**' '' "$OLD_PUSH")"
 out=$(run_so --scope 'components/nav/Item.tsx' --claim-id issue-31-mine --issue 31); rc=$?
 [[ "$rc" -ne 0 ]] && ok "missing expiry blocks" || bad "missing expiry displaced a claim (rc=$rc): $out"
 
+echo "scope-overlap · a displaced claim stays non-blocking, even with a fresh date and a push"
+stage "$(claim_node_extra 37 issue-30-held 'components/nav/**' "$FRESH" "$RECENT_PUSH" "$DISP")"
+out=$(run_so --json --scope 'components/nav/Item.tsx' --claim-id issue-31-mine --issue 31); rc=$?
+check "displaced claim does not block" "$rc" "0"
+check "it is not displaced a second time" "$(jq -r '.displaced | length' <<<"$out")" "0"
+echo "scope-overlap · an unreadable displacement record blocks (fail closed)"
+stage "$(claim_node_extra 38 issue-30-held 'components/nav/**' "$EXPIRED" "$OLD_PUSH" '- Displaced by: ???')"
+out=$(run_so --scope 'components/nav/Item.tsx' --claim-id issue-31-mine --issue 31); rc=$?
+[[ "$rc" -ne 0 ]] && ok "unreadable Displaced by blocks" || bad "unreadable displacement record revived/displaced a claim (rc=$rc): $out"
+
 # --- claim.sh --renew -------------------------------------------------------
 echo "claim.sh --renew moves the date"
 stage "$(claim_node 41 issue-40-renewme 'lib/**' "$EXPIRED" "$OLD_PUSH")"
 printf '%b\n' "- Claim schema: gibson.claim/v2\n- Active-work claim: issue-40-renewme\n- Issue: #40\n- Claim scope: lib/**\n- Claimed: 2026-10-01T00:00:00Z\n- Claim-expires: ${EXPIRED}\n\nbody text" > "$ROOT/body-41"
-out=$(bash "$CLAIM" --renew 40 2>&1); rc=$?
+out=$(GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 40 2>&1); rc=$?
 check "renew exits 0" "$rc" "0"
 new=$(sed -n 's/^- Claim-expires: //p' "$ROOT/body-41")
 [[ "$new" > "$(iso_at $((7 * DAY - 300)))" ]] && ok "Claim-expires moved to about now + 7 days ($new)" ||
   bad "Claim-expires did not move out 7 days (got '$new')"
 contains "the rest of the body is untouched" "$(cat "$ROOT/body-41")" "body text"
 check "exactly one Claim-expires line remains" "$(grep -c '^- Claim-expires: ' "$ROOT/body-41")" "1"
-out=$(bash "$CLAIM" --renew 99 2>&1); rc=$?
+out=$(GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 99 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "renewing an issue with no live claim refuses" || bad "renew of an unclaimed issue passed: $out"
 out=$(bash "$CLAIM" --renew abc 2>&1); rc=$?
 check "non-numeric issue is a usage error" "$rc" "2"
+
+echo "claim.sh --renew refuses a displaced claim"
+stage "$(claim_node_extra 43 issue-42-gone 'lib/**' "$EXPIRED" "$OLD_PUSH" "$DISP")"
+printf '%b\n' "- Claim schema: gibson.claim/v2\n- Active-work claim: issue-42-gone\n- Issue: #42\n- Claim scope: lib/**\n- Claimed: 2026-10-01T00:00:00Z\n- Claim-expires: ${EXPIRED}\n- Displaced by: issue-31-mine (PR #99)" > "$ROOT/body-43"
+before=$(cat "$ROOT/body-43")
+out=$(GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 42 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "renew after displacement refuses" || bad "renew revived a displaced claim: $out"
+contains "the refusal names the displacer" "$out" "issue-31-mine (PR #99)"
+check "the body is untouched" "$(cat "$ROOT/body-43")" "$before"
+printf '%b\n' "- Active-work claim: issue-42-gone\n- Issue: #42\n- Claim scope: lib/**\n- Claimed: 2026-10-01T00:00:00Z\n- Claim-expires: ${EXPIRED}\n- Displaced by: garbage" > "$ROOT/body-43"
+out=$(GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 42 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "an unreadable Displaced by record refuses the renew" || bad "renew passed on an unreadable displacement record: $out"
+
+echo "claim.sh --renew is an admission: it refuses when it would overlap a live claim"
+stage "$(claim_node 44 issue-43-mine 'lib/**' "$EXPIRED" "$OLD_PUSH"),$(claim_node 45 issue-44-rival 'lib/util/**' "$FRESH" "$RECENT_PUSH")"
+printf '%b\n' "- Claim schema: gibson.claim/v2\n- Active-work claim: issue-43-mine\n- Issue: #43\n- Claim scope: lib/**\n- Claimed: 2026-10-01T00:00:00Z\n- Claim-expires: ${EXPIRED}" > "$ROOT/body-44"
+before=$(cat "$ROOT/body-44")
+out=$(GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 43 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "renew that overlaps a live claim refuses" || bad "renew admitted an overlap: $out"
+contains "the overlap is named" "$out" "issue-44-rival"
+check "the date did not move" "$(cat "$ROOT/body-44")" "$before"
 
 # --- claim-reaper.sh --------------------------------------------------------
 echo "claim-reaper labels an expired claim and closes nothing"
@@ -277,7 +325,7 @@ LEGACY
   $GIT branch -M main
   $GIT push -q -u origin main
 ) >/dev/null 2>&1
-stage "$(claim_node 51 issue-50-dead 'lib/**' "$EXPIRED" "$OLD_PUSH"),$(claim_node 52 issue-51-unreadable 'src/**' 'garbage' "$OLD_PUSH"),$(claim_node 53 issue-52-live 'app/**' "$FRESH" "$RECENT_PUSH")"
+stage "$(claim_node 51 issue-50-dead 'lib/**' "$EXPIRED" "$OLD_PUSH"),$(claim_node 52 issue-51-unreadable 'src/**' 'garbage' "$OLD_PUSH"),$(claim_node 53 issue-52-live 'app/**' "$FRESH" "$RECENT_PUSH"),$(claim_node_extra 54 issue-53-displaced 'x/**' "$FRESH" "$RECENT_PUSH" "$DISP")"
 
 : > "$GH_LOG"
 out=$(cd "$ROOT/reap/canon" && GIBSON_CANONICAL="$ROOT/reap/canon" bash "$REAPER" --repo acme/app 2>&1); rc=$?
@@ -291,6 +339,7 @@ out=$(cd "$ROOT/reap/canon" && GIBSON_CANONICAL="$ROOT/reap/canon" bash "$REAPER
 check "apply exits 0" "$rc" "0"
 log=$(cat "$GH_LOG")
 contains "apply labels the expired claim's PR" "$log" "pr edit 51 --repo acme/app --add-label claim-expired"
+contains "a displaced claim is labelled too" "$log" "pr edit 54 --repo acme/app --add-label claim-expired"
 lacks "the unreadable-expiry claim is not labelled" "$log" "pr edit 52"
 lacks "the live claim is not labelled" "$log" "pr edit 53"
 lacks "no PR is closed" "$log" "pr close"

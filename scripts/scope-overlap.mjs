@@ -930,11 +930,12 @@ function readStaleClaims() {
     if (!line.trim()) continue;
     const cols = line.split("\t");
     if (cols.length !== 8) continue;
-    if (cols[2] !== "stale" || !/^\d+$/.test(cols[0])) continue;
+    if ((cols[2] !== "stale" && cols[2] !== "displaced") || !/^\d+$/.test(cols[0])) continue;
     stale.set(`${cols[0]}\t${cols[1]}`, {
       number: Number(cols[0]),
       id: cols[1],
       expires: cols[5],
+      state: cols[2],
     });
   }
   return stale;
@@ -1378,7 +1379,9 @@ const displaced = [];
 const blockingPrClaims = prClaims.filter((c) => {
   const row = staleClaims.get(`${c.number}\t${c.id}`);
   if (!row || c.id === opt.claimId) return true;
-  displaced.push({ claim: c, expires: row.expires });
+  // A claim displaced EARLIER is terminal and already recorded on both
+  // sides: it stays non-blocking but is not displaced a second time.
+  if (row.state === "stale") displaced.push({ claim: c, expires: row.expires });
   return false;
 });
 const live = [...ledgerClaims, ...blockingPrClaims].filter((c) => c.id !== opt.claimId);

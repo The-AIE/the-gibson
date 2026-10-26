@@ -142,7 +142,12 @@ open PR carrying an `- Active-work claim:` marker, tab-separated:
   number, claim id, state, claimed, claim-expires, effective-expires,
   last-commit, reason
 
-state is `fresh`, `stale` or `unknown`. `stale` means the claim is expired:
+state is `fresh`, `stale`, `displaced` or `unknown`. `displaced` means a newer
+claim took this one's scope (`- Displaced by: <claim id> (PR #n)` in the body):
+it is TERMINAL — non-blocking, and neither a push nor a renewal revives it; the
+owner re-claims from current main. A `Displaced by` line that does not match
+that exact shape is `unknown` (the record is unreadable, so the claim blocks).
+`stale` means the claim is expired:
   effective-expires = max(Claim-expires, last-commit + 7 days) < now
 so a push to the claim branch renews it without anyone editing the PR body.
 It FAILS CLOSED toward "still held": a missing, duplicated or unparseable
@@ -351,22 +356,28 @@ list_claim_expiry() {
       | ((.commits.nodes // [])[0].commit.committedDate // "") as $last
       | ($expires | iso) as $expEpoch
       | ($last | iso) as $lastEpoch
+      | ($body | field("- Displaced by: ")) as $dispLines
+      | (if ($dispLines | length) > 0 and ($dispLines | all(test("^- Displaced by: issue-[A-Za-z0-9-]+ \\(PR #[0-9]+\\)$"))) then
+           ($dispLines | map(sub("^- Displaced by: "; "")) | join(", "))
+         else "" end) as $displacer
       | (if ($claim == "" or ($claimLines | length) != 1) then "unreadable claim marker"
+         elif ($dispLines | length) > 0 and $displacer == "" then "unreadable Displaced by record"
+         elif $displacer != "" then ""
          elif ($expLines | length) == 0 then "no Claim-expires"
          elif ($expLines | length) > 1 then "duplicate Claim-expires"
          elif $expEpoch == null then "unparseable Claim-expires"
          elif $lastEpoch == null then "no head commit date"
          else "" end) as $reason
-      | (if $reason == "" then ([$expEpoch, $lastEpoch + 604800] | max) else null end) as $eff
+      | (if $reason == "" and $displacer == "" then ([$expEpoch, $lastEpoch + 604800] | max) else null end) as $eff
       | [
           (.number | tostring),
           $claim,
-          (if $reason != "" then "unknown" elif $eff < now then "stale" else "fresh" end),
+          (if $reason != "" then "unknown" elif $displacer != "" then "displaced" elif $eff < now then "stale" else "fresh" end),
           $claimed,
           $expires,
           (if $eff == null then "" else ($eff | todate) end),
           $last,
-          $reason
+          (if $displacer != "" then "displaced by " + $displacer else $reason end)
         ]
       | @tsv'
 }
