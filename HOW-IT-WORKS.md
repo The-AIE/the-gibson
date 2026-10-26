@@ -379,8 +379,8 @@ AI-surface, and runtime findings.
 **Gate:** hard-fail layers pass; report-only findings receive owners and follow-up.
 
 Tier C surfaces — authentication, money, consent/PII, security boundaries, schema,
-and production data — require frontier-grade adversarial review and a human merge
-gate.
+and production data — require frontier-grade adversarial review, cross-vendor review at the exact head
+(E3), and green required checks. No owner merge step (D-015).
 
 #### 7. Merge
 
