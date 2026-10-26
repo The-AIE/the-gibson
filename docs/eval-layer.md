@@ -3,6 +3,8 @@ title: "Eval layer (Langfuse)"
 nav_exclude: true
 ---
 
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 # Eval layer
 
 > **Non-normative.** Binding rules live in [`AGENTS.md`](../AGENTS.md). This page explains the eval scripts added in #583.
@@ -22,7 +24,7 @@ dataset.v1.jsonl ──► eval-run.mjs   ──► .gibson-evals/runs/<variant>
 |---|---|
 | `scripts/eval-dataset-lint.mjs` | Shape-check `evals/dataset.v1.jsonl` (15-30 cases, unique ids, machine-checkable `expect`, tier A/B/C) |
 | `scripts/eval-run.mjs` | Run every case against `--runner`, score it, save a run file, send traces + scores. `--compare A B` diffs two saved runs |
-| `scripts/eval-gate.mjs` | Exit nonzero below `--min-pass-rate`. Missing, empty, forged or grader-errored results fail |
+| `scripts/eval-gate.mjs` | Exit nonzero below `--min-pass-rate`. Missing, empty, forged, grader-errored or case-set-mismatched results fail (run must cover every ID in `--dataset`, default `evals/dataset.v1.jsonl`) |
 | `scripts/eval-trace.mjs` | Convert cost-ledger rows into Langfuse traces |
 
 ## Try it with no account

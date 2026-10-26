@@ -12,12 +12,15 @@
  *   Some happy paths must always work. This is the deployment gate that checks
  *   them, and a gate that passes on missing evidence is worse than no gate.
  *
+ *   The saved run must cover exactly the case IDs in --dataset (default
+ *   evals/dataset.v1.jsonl); a run over a reduced or different dataset fails.
+ *
  * RISKS
  *   It trusts the run file it is given. It does not re-run anything. Keep the
  *   job opt-in until the dataset has earned a threshold you believe.
  *
  * USAGE
- *   node scripts/eval-gate.mjs --variant NAME --min-pass-rate 0.8 [--out-dir DIR]
+ *   node scripts/eval-gate.mjs --variant NAME --min-pass-rate 0.8 [--dataset PATH] [--out-dir DIR]
  *   node scripts/eval-gate.mjs --help
  *
  * EXIT
@@ -36,7 +39,7 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
 }
 
 const toRate = (v) => {
-  const n = Number(v);
+  const n = String(v).trim() === "" ? NaN : Number(v); // "" would otherwise become 0 and pass anything
   if (!Number.isFinite(n) || n < 0 || n > 1) {
     console.error(`eval-gate: --min-pass-rate must be between 0 and 1, got ${JSON.stringify(v)}`);
     process.exit(2);
@@ -48,6 +51,7 @@ const args = parseFlags(process.argv.slice(2), {
   flags: {
     "--variant": { key: "variant" },
     "--min-pass-rate": { key: "min", transform: toRate },
+    "--dataset": { key: "dataset", default: "evals/dataset.v1.jsonl" },
     "--out-dir": { key: "outDir", default: DEFAULT_OUT_DIR },
   },
   prefix: "eval-gate: ",
@@ -89,6 +93,28 @@ const cases = Array.isArray(run.cases) ? run.cases : [];
 const counted = cases.filter((c) => c && c.pass === true).length;
 if (cases.length !== run.total || counted !== run.passed) {
   console.error(`eval-gate: FAIL — ${file} summary does not match its case list (tampered or truncated)`);
+  process.exit(1);
+}
+
+// Bind the run to the expected case set: a 21-of-22 run must not clear the gate.
+let expectedIds;
+try {
+  expectedIds = readFileSync(String(args.dataset), "utf8")
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l).id);
+} catch (e) {
+  console.error(`eval-gate: FAIL — cannot read expected dataset ${args.dataset} (${e instanceof Error ? e.message : e})`);
+  process.exit(1);
+}
+const have = new Set(cases.map((c) => c && c.id));
+const want = new Set(expectedIds);
+const missing = [...want].filter((id) => !have.has(id));
+const extra = [...have].filter((id) => !want.has(id));
+if (missing.length || extra.length || have.size !== cases.length) {
+  console.error(
+    `eval-gate: FAIL — run does not cover ${args.dataset} (missing: ${missing.join(",") || "none"}; unexpected: ${extra.join(",") || "none"})`,
+  );
   process.exit(1);
 }
 

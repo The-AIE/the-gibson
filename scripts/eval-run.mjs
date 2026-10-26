@@ -176,8 +176,10 @@ function sh(cmd, payload, timeoutMs, extraEnv) {
     let stderr = "";
     let timedOut = false;
     const MAX = 1_000_000; // cap captured output so a runaway runner cannot eat memory
+    // The runner is the agent under test: it never needs the Langfuse keys, so it never gets them.
+    const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("LANGFUSE_")));
     const child = spawn("sh", ["-c", cmd], {
-      env: { ...process.env, ...extraEnv },
+      env: { ...baseEnv, ...extraEnv },
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     });

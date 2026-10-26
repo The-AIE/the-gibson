@@ -143,6 +143,7 @@ mk_ds "$DS" \
   "$(case_line wrong '{"type":"contains","value":"yes"}')" \
   "$(case_line leak '{"type":"not_contains","value":"zzz"}')" \
   "$(case_line crash '{"type":"exit_code","value":3}')"
+cp "$DS" "$ROOT/run4.jsonl" # DS is reassigned for the one-case grader tests below
 out=$(node "$S/eval-run.mjs" --variant base --runner "$ROOT/runner.sh" --dataset "$DS" --out-dir "$ROOT/r" 2>&1); rc=$?
 [[ $rc -eq 0 ]] && has "$out" '3/4 passed' && ok "scores 3 of 4 (one real failure)" || bad "run rc=$rc: $out"
 has "$out" 'FAIL  wrong' && ok "failure reported with its id" || bad "failure line"
@@ -205,12 +206,13 @@ has "$(run_g nogr "does-not-exist.sh")" '0/1 passed' && ok "missing grader comma
 grep -q '"grader_errors": 1' "$ROOT/r/runs/g-crash.json" && ok "grader errors are counted in the run file" || bad "grader_errors count"
 
 echo "AC5 gate"
-G() { node "$S/eval-gate.mjs" --out-dir "$ROOT/r" "$@"; }
-G --variant g-pass --min-pass-rate 1 >/dev/null 2>&1 && ok "at threshold passes" || bad "gate at threshold"
+GDS="$ROOT/run4.jsonl"
+G() { node "$S/eval-gate.mjs" --out-dir "$ROOT/r" --dataset "$GDS" "$@"; }
+GDS="$DS" G --variant g-pass --min-pass-rate 1 >/dev/null 2>&1 && ok "at threshold passes" || bad "gate at threshold"
 G --variant base --min-pass-rate 0.8 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "below threshold fails" || bad "gate below"
 G --variant base --min-pass-rate 0.75 >/dev/null 2>&1 && ok "exactly at 0.75 passes" || bad "gate boundary"
 G --variant never-ran --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "MISSING result fails even at threshold 0" || bad "gate missing result passed"
-G --variant g-crash --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "grader errors fail the gate even at threshold 0" || bad "gate ignored grader errors"
+GDS="$DS" G --variant g-crash --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "grader errors fail the gate even at threshold 0" || bad "gate ignored grader errors"
 mkdir -p "$ROOT/r/runs"
 echo '{"schema":"gibson.eval-run.v1","variant":"empty","total":0,"passed":0,"cases":[]}' > "$ROOT/r/runs/empty.json"
 G --variant empty --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "zero-case run fails (no evidence)" || bad "empty run passed"
@@ -221,6 +223,21 @@ G --variant forged --min-pass-rate 1 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "forg
 G --variant base --min-pass-rate 2 >/dev/null 2>&1; [[ $? -eq 2 ]] && ok "out-of-range threshold is a usage error" || bad "threshold range"
 G --variant base >/dev/null 2>&1; [[ $? -eq 2 ]] && ok "threshold required" || bad "threshold required"
 G --variant '../x' --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 2 ]] && ok "traversal variant refused" || bad "gate traversal"
+G --variant base --min-pass-rate "" >/dev/null 2>&1; [[ $? -eq 2 ]] && ok "empty threshold is a usage error (not 0)" || bad "empty threshold accepted"
+G --variant base --min-pass-rate "  " >/dev/null 2>&1; [[ $? -eq 2 ]] && ok "blank threshold is a usage error" || bad "blank threshold accepted"
+head -n 3 "$GDS" > "$ROOT/reduced.jsonl"
+node "$S/eval-gate.mjs" --out-dir "$ROOT/r" --dataset "$ROOT/reduced.jsonl" --variant base --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "run over a different case set fails the gate" || bad "case-set mismatch passed"
+node "$S/eval-gate.mjs" --out-dir "$ROOT/r" --dataset "$ROOT/nope.jsonl" --variant base --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "unreadable expected dataset fails closed" || bad "missing expected dataset passed"
+cat > "$ROOT/envrunner.sh" <<'RUN'
+#!/bin/sh
+cat >/dev/null
+echo "key=${LANGFUSE_SECRET_KEY:-absent} pub=${LANGFUSE_PUBLIC_KEY:-absent}"
+RUN
+chmod +x "$ROOT/envrunner.sh"
+printf '{"id":"env1","input":"x","tier":"A","expect":{"type":"contains","value":"key=absent pub=absent"}}\n' > "$ROOT/env.jsonl"
+LANGFUSE_SECRET_KEY=sk-lf-aaaaaaaa LANGFUSE_PUBLIC_KEY=pk-lf-bbbbbbbb LANGFUSE_HOST=http://127.0.0.1:1 \
+  node "$S/eval-run.mjs" --variant envcheck --runner "$ROOT/envrunner.sh" --dataset "$ROOT/env.jsonl" --out-dir "$ROOT/r" >/dev/null 2>&1
+grep -q '"passed": 1' "$ROOT/r/runs/envcheck.json" && ok "runner child does not receive LANGFUSE_* variables" || bad "LANGFUSE_* leaked to runner"
 
 echo ""
 echo "eval-layer: $PASS passed, $FAIL failed"
