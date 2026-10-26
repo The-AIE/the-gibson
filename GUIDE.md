@@ -64,7 +64,7 @@ scripts/loop.sh --runner hermes --repo ~/Code/<target>   # cron-shaped iteration
 ```
 
 - **Watch it:** `gibson/journal.md` in the target repo (one entry per iteration),
-  plus the MC dashboard heartbeat.
+  plus the AK dashboard heartbeat.
 - **Stop it:** add the `gibson-halt` label to the target repo, or drop the kill
   flag — checked at the top of every iteration (doc 11).
 - **It stopped itself?** Either the queue is empty, all remaining work is
@@ -184,7 +184,7 @@ Same pipeline, one runner:
 |---|---|
 | Start a feature | Brief → approve PLAN.md |
 | Quick fix | Issue with acceptance criteria |
-| See status | MC dashboard / digest / `gh issue list -l gibson` |
+| See status | AK dashboard / digest / `gh issue list -l gibson` |
 | Approve a Tier C merge | Reply on the PR (G12) |
 | Stop everything on a repo | `gibson-halt` label |
 | Overnight grind | `scripts/loop.sh --runner grok` |

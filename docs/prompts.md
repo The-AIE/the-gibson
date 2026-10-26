@@ -10,7 +10,7 @@ nav_order: 4
 
 > 🙂 **In plain English:** Ready-made things to say to the crew. Copy one, send it, answer the plain questions that come back.
 
-Use these with Hermes / chat / Mission Control. You do not need to remember special commands.
+Use these with Hermes / chat / Agent Kontrol. You do not need to remember special commands.
 
 **Start here if you are not technical:** [VIBECODING.md](../VIBECODING.md) — this page is the cheat sheet of *what to say*; that page is *how the whole thing works for you*.
 

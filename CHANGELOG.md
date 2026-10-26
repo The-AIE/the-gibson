@@ -10,6 +10,12 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### Docs: Mission Control is now Agent Kontrol; new doc 31 explains how the two work together
+
+- **What changed:** Every reference to Mission Control (and its "MC" abbreviation) in the README, FAQ, guides, adapters, playbooks, `docs/` and script help text now says Agent Kontrol (AK). `docs/31-agent-kontrol.md` is new: the law/manager split, each hand-off point and which side is authoritative, role mapping, setup, and what the pairing deliberately does not do. The glossary, docs index, README and FAQ link to it. `docs/09` no longer says the runtime store is Supabase (Agent Kontrol uses Postgres).
+- **Why:** The Gibson now runs with Agent Kontrol as its fleet manager, and the old name sent readers to a retired repo.
+- **Migration:** None. Agent Kontrol kept the `MC_URL`/`MC_TOKEN` environment variables, `~/.mission-control/` and the dispatcher's launchd label, so no configuration changes. `memory/` ledgers keep the old name as a historical record. No rule, gate, tier or sensor changed.
+
 ### Undeclared lanes and `--no-verify` commits are caught before review time (follow-up to #523)
 
 - **What changed:** `scripts/loop.sh` walks the handed-off range for commits `review-evidence`

@@ -8,7 +8,7 @@
  *   "done": doctor (preflight), check (clean tree + non-empty diff + gate +
  *   truthful-status), prove (check + .gibson-receipts/<HEAD>.json), verdict
  *   lint (second-opinion.sh parse_isolated_verdict, mirrored), report
- *   (Mission Control /api/ingest milestone: verified or claim-only).
+ *   (Agent Kontrol /api/ingest milestone: verified or claim-only).
  *
  * WHY
  *   Law 8 / L-008: prose is not proof and a no-op run is not success.
@@ -38,7 +38,7 @@ function help() {
 
 WHAT IT DOES
   Machine-readable proof bound to an exact head SHA before an agent claims
-  done; reports verified or claim-only to Mission Control.
+  done; reports verified or claim-only to Agent Kontrol.
 
 WHY
   Law 8 / L-008: prose is not proof; a run that changed nothing is not success.
@@ -295,7 +295,7 @@ async function report(o) {
     console.error(`${PREFIX}report POST failed: ${e.message}`);
     return 1;
   }
-  // Mission Control answers {ok:true, demo:true} when it has no database: the
+  // Agent Kontrol answers {ok:true, demo:true} when it has no database: the
   // event was dropped. A dropped event is not a delivered report (L-008).
   const delivered = res.ok && body.ok === true && body.demo !== true;
   out({ subcommand: "report", dry_run: false, status, delivered, http_status: res.status, payload });

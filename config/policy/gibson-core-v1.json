@@ -22,35 +22,35 @@
         "id": "src.agents-contract",
         "path": "AGENTS.md",
         "digestAlgorithm": "sha256",
-        "digest": "4158ed640803546c93ff3b8e03cbba3b8779a8064b16a881eca4db295d9d9c7e",
+        "digest": "b4de2d130408b9a26255a83b8d8467366a0414dc080a066f5f6b0644ee9343d0",
         "role": "human-readable-contract"
       },
       {
         "id": "src.human-gates",
         "path": "docs/14-human-gates.md",
         "digestAlgorithm": "sha256",
-        "digest": "2a775da934bec92d85658402d772d2adedc6f25bcc35e2507503f85efa8c5cc9",
+        "digest": "7883794bf1136e01a5bcb1437f2b4978a1ee56803b9b1f102eaeeab2b7315814",
         "role": "explanatory-history"
       },
       {
         "id": "src.quality-gates",
         "path": "docs/06-quality-gates.md",
         "digestAlgorithm": "sha256",
-        "digest": "7c8505ff68c7a1dacc4eaed1d40e16baf0c20b00062d7024b7c22ad668365013",
+        "digest": "6b406bf905f8267cac7d75fe6378c1b06990b772eba2092215c380f8a01ae96e",
         "role": "explanatory-history"
       },
       {
         "id": "src.roles",
         "path": "docs/03-roles.md",
         "digestAlgorithm": "sha256",
-        "digest": "126c0f616e598d950366cbfadaca40d2aaa857bcfade56bc19e132fe32ffc8dc",
+        "digest": "f81bfca3a82cb7690defab5efb67b48fa3c31a11465e96008878a0ec5483ee79",
         "role": "explanatory-history"
       },
       {
         "id": "src.sdlc-pipeline",
         "path": "docs/02-sdlc-pipeline.md",
         "digestAlgorithm": "sha256",
-        "digest": "ccfa6072142d72cdbfaba10c11cd74ee78fa325fc6e710a74457050fe324ce72",
+        "digest": "0ebcc16c6b2bbd9e2c9da44c5e75b298132dc71c1995d638c08ce89075b32af4",
         "role": "explanatory-history"
       },
       {

@@ -135,7 +135,7 @@ Details: `docs/09-memory-and-self-improvement.md`.
 
 ## Pipeline variants
 
-- **Fleet mode:** stages run as separate dispatched agents (Mission Control queue),
+- **Fleet mode:** stages run as separate dispatched agents (Agent Kontrol queue),
   many issues in flight, max 3 mutating lanes per repo.
 - **Solo loop:** one agent (e.g. Grok, continuously) cycles all stages with file
   handoffs between role hats: `docs/11-solo-loop.md`.

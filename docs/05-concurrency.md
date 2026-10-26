@@ -522,7 +522,7 @@ from **evidence**, not assertion:
   "no siblings" — which is how a live lane could lose its label to a janitor.
   A failed or malformed inventory read now preserves the label and reports
   incomplete; the claim is re-reaped on a later run.
-- Scheduling and Mission Control integration are follow-ups; this script is the
+- Scheduling and Agent Kontrol integration are follow-ups; this script is the
   standalone Tier B janitor.
 
 ## Layer 3 — Hot-file rules isolate merge conflicts
@@ -550,10 +550,10 @@ Target repos list their specific hot files in their `AGENTS.md` Gibson section.
 - **Max 3 active mutating lanes** per target repo (claims + worktrees). Read-only
   work — recon, review, evaluation, research — parallelizes freely and doesn't
   count.
-- Mission Control's dispatcher claims tasks atomically (guarded compare-and-set on
+- Agent Kontrol's dispatcher claims tasks atomically (guarded compare-and-set on
   the queue row), so two dispatchers can't win the same task.
-- **Known seam (roadmap):** the MC task queue and per-repo claim rows are separate
-  systems. Until the dispatcher understands repo claims, route MC tasks for the
+- **Known seam (roadmap):** the AK task queue and per-repo claim rows are separate
+  systems. Until the dispatcher understands repo claims, route AK tasks for the
   same repo through the claim protocol above — the dispatched agent's first act is
   claiming, and a claim conflict re-queues the task rather than racing.
 

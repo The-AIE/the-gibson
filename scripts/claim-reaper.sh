@@ -2,7 +2,7 @@
 # claim-reaper.sh — expire dead lanes' claims from evidence (issue #73 / docs/05)
 #
 # Standalone Tier B janitor. Dry-run by default. Never closes an issue.
-# Automatic scheduling and Mission Control integration are follow-ups.
+# Automatic scheduling and Agent Kontrol integration are follow-ups.
 set -euo pipefail
 
 usage() {

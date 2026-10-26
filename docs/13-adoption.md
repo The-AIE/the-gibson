@@ -155,8 +155,8 @@ so "it looked green" stops being available as an answer.
 
 ## Step 5 — Wire the fleet
 
-1. Register the repo in Mission Control (project name, workdir on each machine).
-2. Verify each intended runtime can: clone, run the gate, reach MC. One canary
+1. Register the repo in Agent Kontrol (project name, workdir on each machine).
+2. Verify each intended runtime can: clone, run the gate, reach AK. One canary
    issue per runtime (a real but Tier A task) proves the loop end-to-end.
 3. Seed `memory/`: adoption report becomes the repo's first DECISIONS entries.
 
