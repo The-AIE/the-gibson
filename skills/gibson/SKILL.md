@@ -60,7 +60,7 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
   distinct-vendor review of the exact SHA being handed off, and a missing, stale,
   or failed review blocks the handoff (the branch stays queued in loop-state).
 - Law 7: Tier C — money, auth, consent/PII, security boundaries, production
-  data — always ends at a human merge gate. Devin does not override the owner.
+  data — clears only on the G12 floor (E3 at the exact head plus required checks, D-015). Devin does not override it.
 - Owner interruptions: product direction and human gates (`AGENTS.md` G1–G16) only.
   Batch everything else into the digest.
 - Kill switch: the `gibson/HALT` file is the permanent stop `loop.sh` checks

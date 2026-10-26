@@ -182,8 +182,8 @@ builder and reviewer share one account (L-015 / L-021 / issue #67). Setup once:
    `second-opinion.sh` so a `VERDICT: approve` becomes a formal review under the
    reviewer identity.
 
-Tier C still stops for Mark (G12). Formal review unblocks Tier A/B mergeability;
-it does not replace human gates.
+Tier C clears on the G12 floor (E3 at the exact head plus required checks, D-015), not on a formal review alone. Formal review unblocks Tier A/B mergeability;
+it does not replace the remaining human gates.
 
 ## Definition of adopted
 

@@ -523,7 +523,7 @@ fi
 
 if [[ ${#ADMIN_REASONS[@]} -gt 0 ]]; then
   if [[ "$TIER" == "tier-c" ]]; then
-    BLOCKERS+=("Tier C is a human merge gate (Law 7) — no admin path, whatever the CI is doing")
+    BLOCKERS+=("Tier C has no admin-merge path (Law 7, G12 floor) — fix the check, whatever the CI is doing")
     ADMIN_REASONS=()
   elif [[ "$LAUNCHED" -eq 1 ]]; then
     BLOCKERS+=("post-launch posture (--launched): no admin merge on any red — escalate to the owner")

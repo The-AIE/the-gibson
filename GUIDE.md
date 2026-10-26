@@ -151,7 +151,7 @@ Different agents (or fresh solo-loop hats):
 | UX (if UI) | `playbooks/ux-evaluator.md` | `BASE_URL=$(scripts/preview-url.sh N)` + Playwright |
 | Security | `playbooks/security.md` + CI | layers table on PR |
 
-You only intervene for Tier C / schema (G12) or other [human gates](docs/14-human-gates.md).
+Tier C / schema clears on cross-vendor review plus green checks (G12 floor, D-015), with no owner step. You only intervene for the [human gates](docs/14-human-gates.md).
 
 ### 7.6 Merge + deploy + cleanup (release hat)
 
@@ -185,7 +185,7 @@ Same pipeline, one runner:
 | Start a feature | Brief → approve PLAN.md |
 | Quick fix | Issue with acceptance criteria |
 | See status | AK dashboard / digest / `gh issue list -l gibson` |
-| Approve a Tier C merge | Reply on the PR (G12) |
+| Tier C merge | No action: E3 review plus required checks clear it (G12 floor, D-015) |
 | Stop everything on a repo | `gibson-halt` label |
 | Overnight grind | `scripts/loop.sh --runner grok` |
 | Teach the fleet | PR a lesson to `memory/LESSONS.md` |

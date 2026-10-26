@@ -78,7 +78,7 @@ approval) is detectable rather than assumed away. **Superseded** entries are nev
 rewritten; a correction is a new entry that links back, matching the append-only
 convention `memory/DECISIONS.md` and `memory/LESSONS.md` already use.
 
-This is not a new gate — G10/G12 ([doc 14](14-human-gates.md)) still decide *when* a
+This is not a new gate — G10 ([doc 14](14-human-gates.md)) and the G12 review floor still decide *when* a
 human reviews something. This only says: once reviewed, record what exactly was
 reviewed, so "approved" can't silently drift to mean "approved, plus whatever changed
 after."
