@@ -10,6 +10,9 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### pr-size: document-only PRs are exempt from the size budgets
+`config/pr-size.v1.json` sets `docsOnlyExempt: true` (owner sign-off: Mark, 2026-10-26). A PR whose every file is in the docs class, binary attachments under docs paths included, no longer fails `pr-size` for being large. One non-docs file voids it, the decision is by path in the trusted base config, and an empty diff does not qualify. Product and mixed PRs are unchanged.
+
 ### Docs: Mission Control is now Agent Kontrol; new doc 31 explains how the two work together
 
 - **What changed:** Every reference to Mission Control (and its "MC" abbreviation) in the README, FAQ, guides, adapters, playbooks, `docs/` and script help text now says Agent Kontrol (AK). `docs/31-agent-kontrol.md` is new: the law/manager split, each hand-off point and which side is authoritative, role mapping, setup, and what the pairing deliberately does not do. The glossary, docs index, README and FAQ link to it. `docs/09` no longer says the runtime store is Supabase (Agent Kontrol uses Postgres).

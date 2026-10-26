@@ -247,6 +247,27 @@ for f in "${WF_FILES[@]}"; do
   grep -q 'git cat-file -e "\$GIBSON_PR_BASE:\$f"' "$f" && ok "$f: proves base-file absence before skipping" || bad "$f: absence not proven with cat-file"
 done
 
+# --- docs-only exemption (opt-in config; path-decided)
+sed 's/"exceptionLabel"/"docsOnlyExempt": true, "exceptionLabel"/' "$TMP/cfg.json" >"$TMP/cfg-docs.json"
+run_docs() { env -u GITHUB_ACTIONS -u GITHUB_STEP_SUMMARY node "$SENSOR" --config "$TMP/cfg-docs.json" --numstat "$@"; }
+printf '900%s0%sdocs/big.md\n-%s-%sdocs/img/diagram.png\n' "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/docsonly.txt"
+run_sensor "$TMP/docsonly.txt" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "docs-only PR still fails when config does not opt in" || bad "default config exempted docs rc=$rc"
+out=$(run_docs "$TMP/docsonly.txt" 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == *"docs-only-exempt"* ]] && ok "docs-only PR with attachment is exempt when opted in" || bad "docs-only not exempt rc=$rc: $out"
+printf '900%s0%sdocs/big.md\n1%s0%ssrc/a.ts\n' "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/mixed.txt"
+run_docs "$TMP/mixed.txt" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "one non-docs file voids the exemption" || bad "mixed PR exempted rc=$rc"
+printf '' >"$TMP/empty.txt"
+out=$(run_docs "$TMP/empty.txt" 2>&1); rc=$?
+[[ "$out" != *"docs-only-exempt"* ]] && ok "empty diff is not reported as docs-only" || bad "empty diff reported docs-only"
+printf '900%s0%sdocs/big.md\n-%s-%sscripts/evil.png\n' "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/attach-out.txt"
+run_docs "$TMP/attach-out.txt" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "attachment outside docs paths voids the exemption" || bad "attachment outside docs exempted rc=$rc"
+printf '{"docsOnlyExempt":"yes","exceptionLabel":"x","budgets":{"productLines":1,"productFiles":1,"totalLines":1,"totalFiles":1},"classes":{"generated":["a"],"tests":["b"],"docs":["c"]}}' >"$TMP/cfg-bad.json"
+node "$SENSOR" --config "$TMP/cfg-bad.json" --numstat "$TMP/docsonly.txt" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 2 ]] && ok "non-boolean docsOnlyExempt is a config error" || bad "bad docsOnlyExempt rc=$rc"
+
 echo
 if [[ $FAIL -eq 0 ]]; then
   echo "pr-size.test.sh: $PASS passed"

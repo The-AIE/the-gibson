@@ -5,6 +5,8 @@
 //   Measures a PR's diff (`git diff --numstat -z -M base...head`), classifies each
 //   file as product / tests / docs / generated using config/pr-size.v1.json,
 //   and fails when the product or total size exceeds the configured budgets.
+//   A PR whose every file is in the docs class (including binary attachments
+//   under docs paths) is exempt when config sets docsOnlyExempt: true.
 //   Local --exception or GIBSON_PR_SIZE_EXCEPTION=1 downgrades a breach to a
 //   warning for operator-run checks; CI does not wire labels to this override.
 //
@@ -106,7 +108,10 @@ export function loadConfig(path) {
     }
     classes[c] = pats;
   }
-  return { exceptionLabel: cfg.exceptionLabel, budgets, classes };
+  if (cfg.docsOnlyExempt !== undefined && typeof cfg.docsOnlyExempt !== "boolean") {
+    throw new Error("config docsOnlyExempt must be a boolean when present");
+  }
+  return { exceptionLabel: cfg.exceptionLabel, budgets, classes, docsOnlyExempt: cfg.docsOnlyExempt === true };
 }
 
 // Glob subset: `**` = any path prefix/suffix (including empty), `*` = within a
@@ -312,13 +317,19 @@ export function evaluate(rows, cfg, { exception = false, identity = null } = {})
   for (const k of BUDGET_KEYS) {
     if (metrics[k] > cfg.budgets[k]) findings.push({ budget: k, value: metrics[k], limit: cfg.budgets[k] });
   }
-  const breached = findings.length > 0;
-  const verdict = breached ? (exception ? "exception" : "exceeded") : "within-budget";
+  // A document-only PR (every file in the docs class, attachments included) is
+  // exempt from the budgets when config opts in. Decided by path in the trusted
+  // base config, never by anything the PR says about itself, and one non-docs
+  // file voids it. Binary attachments under docs paths ride along.
+  const docsOnly = cfg.docsOnlyExempt === true && files.length > 0 && files.every((f) => f.class === "docs");
+  const breached = findings.length > 0 && !docsOnly;
+  const verdict = breached ? (exception ? "exception" : "exceeded") : findings.length > 0 ? "docs-only-exempt" : "within-budget";
   return {
     ok: !breached || exception,
     verdict,
     breached,
     exception,
+    docsOnly,
     identity,
     metrics,
     byClass,
@@ -358,7 +369,7 @@ export function renderText(result, cfg) {
       );
     }
   } else {
-    out.push("  ok — within budget");
+    out.push(result.verdict === "docs-only-exempt" ? "  ok — over budget but document-only (docsOnlyExempt): every file is in the docs class" : "  ok — within budget");
   }
   return out.join("\n");
 }
@@ -397,7 +408,8 @@ function announceGitHub(result, cfg, text) {
   const m = result.metrics;
   const brief = `product ${m.productLines}/${cfg.budgets.productLines} lines, ${m.productFiles}/${cfg.budgets.productFiles} files; total ${m.totalLines}/${cfg.budgets.totalLines} lines`;
   let line;
-  if (!result.breached) line = `::notice title=pr-size::within budget (${brief})`;
+  if (result.verdict === "docs-only-exempt") line = `::notice title=pr-size::document-only PR exempt from budgets (${brief})`;
+  else if (!result.breached) line = `::notice title=pr-size::within budget (${brief})`;
   else if (result.exception) line = `::warning title=pr-size::OVER BUDGET — passing only under explicit local exception '${cfg.exceptionLabel}' (${brief})`;
   else line = `::error title=pr-size::over budget (${brief})`;
   console.error(line);
