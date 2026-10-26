@@ -62,10 +62,10 @@ the audit → dry-run → human-apply sequence for production write paths
    repeated failure on the same criterion ([docs/15](15-model-economics.md)).
 4. **One agent, one directory.** Worktree per lane, disjoint file scopes, so agents
    cannot corrupt each other's state ([docs/05](05-concurrency.md)).
-5. **Humans keep the irreversible calls.** What an owner must decide is defined in
-   `AGENTS.md` (human gates, taste calls, production write paths). Elsewhere, work proceeds
-   on independent review plus green gates, and Tier C changes need cross-vendor review
-   plus required checks rather than an owner sign-off.
+5. **Humans keep the irreversible calls.** What an owner must decide, and how each
+   risk tier is cleared, is defined in `AGENTS.md` (human gates, taste calls, production
+   write paths, Tier A/B/C). Elsewhere, work proceeds on independent review plus green
+   gates.
 
 ## Where it stands
 
