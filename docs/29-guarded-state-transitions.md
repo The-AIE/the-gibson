@@ -78,8 +78,8 @@ approval) is detectable rather than assumed away. **Superseded** entries are nev
 rewritten; a correction is a new entry that links back, matching the append-only
 convention `memory/DECISIONS.md` and `memory/LESSONS.md` already use.
 
-This is not a new gate — G10 ([doc 14](14-human-gates.md)) and the G12 review floor still decide *when* a
-human reviews something. This only says: once reviewed, record what exactly was
+This is not a new gate — G10 ([doc 14](14-human-gates.md)) still decides *when* a human decides something,
+and the G12 floor (E3 at the exact head plus required checks) still decides when Tier C is mergeable. This only says: once reviewed, record what exactly was
 reviewed, so "approved" can't silently drift to mean "approved, plus whatever changed
 after."
 
