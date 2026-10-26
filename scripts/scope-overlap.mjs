@@ -910,7 +910,7 @@ function readPrClaimsOnce() {
 /**
  * Expired PR-body claims (#557). Returns Map<"<pr>\t<claim id>", row> for every
  * claim `pr-claims.sh expiry` calls `stale`. FAILS CLOSED toward blocking: if
- * the read fails, or a row is not exactly the eight-field shape, or its state
+ * the read fails, or a row is not exactly the nine-field shape, or its state
  * is anything but the literal `stale`, that claim is NOT in the map, so it
  * keeps blocking. A claim this reader cannot judge is never displaced.
  */
@@ -929,7 +929,7 @@ function readStaleClaims() {
   for (const line of out.split("\n")) {
     if (!line.trim()) continue;
     const cols = line.split("\t");
-    if (cols.length !== 8) continue;
+    if (cols.length !== 9) continue;
     if ((cols[2] !== "stale" && cols[2] !== "displaced") || !/^\d+$/.test(cols[0])) continue;
     stale.set(`${cols[0]}\t${cols[1]}`, {
       number: Number(cols[0]),

@@ -140,12 +140,14 @@ claim.sh, release-claim.sh, claim-reaper.sh and scope-overlap.mjs all validate,
 and a ninth column would turn every one of them into a hard refusal. One row per
 open PR carrying an `- Active-work claim:` marker, tab-separated:
   number, claim id, state, claimed, claim-expires, effective-expires,
-  last-commit, reason
+  last-commit, reason, displacers (`;`-separated `id (PR #n)`, may be empty)
 
 state is `fresh`, `stale`, `displaced` or `unknown`. `displaced` means a newer
 claim took this one's scope (`- Displaced by: <claim id> (PR #n)` in the body):
 it is TERMINAL — non-blocking, and neither a push nor a renewal revives it; the
-owner re-claims from current main. A `Displaced by` line that does not match
+owner re-claims from current main. The record counts only while its displacer
+is itself a live claim (an open claim PR with that id); a displacer that closed
+or never existed is ignored and the claim keeps whatever its own expiry says. A `Displaced by` line that does not match
 that exact shape is `unknown` (the record is unreadable, so the claim blocks).
 `stale` means the claim is expired:
   effective-expires = max(Claim-expires, last-commit + 7 days) < now
@@ -358,26 +360,26 @@ list_claim_expiry() {
       | ($last | iso) as $lastEpoch
       | ($body | field("- Displaced by: ")) as $dispLines
       | (if ($dispLines | length) > 0 and ($dispLines | all(test("^- Displaced by: issue-[A-Za-z0-9-]+ \\(PR #[0-9]+\\)$"))) then
-           ($dispLines | map(sub("^- Displaced by: "; "")) | join(", "))
-         else "" end) as $displacer
+           ($dispLines | map(sub("^- Displaced by: "; "")) | join(";"))
+         else "" end) as $displacers
       | (if ($claim == "" or ($claimLines | length) != 1) then "unreadable claim marker"
-         elif ($dispLines | length) > 0 and $displacer == "" then "unreadable Displaced by record"
-         elif $displacer != "" then ""
+         elif ($dispLines | length) > 0 and $displacers == "" then "unreadable Displaced by record"
          elif ($expLines | length) == 0 then "no Claim-expires"
          elif ($expLines | length) > 1 then "duplicate Claim-expires"
          elif $expEpoch == null then "unparseable Claim-expires"
          elif $lastEpoch == null then "no head commit date"
          else "" end) as $reason
-      | (if $reason == "" and $displacer == "" then ([$expEpoch, $lastEpoch + 604800] | max) else null end) as $eff
+      | (if $reason == "" then ([$expEpoch, $lastEpoch + 604800] | max) else null end) as $eff
       | [
           (.number | tostring),
           $claim,
-          (if $reason != "" then "unknown" elif $displacer != "" then "displaced" elif $eff < now then "stale" else "fresh" end),
+          (if $reason != "" then "unknown" elif $eff < now then "stale" else "fresh" end),
           $claimed,
           $expires,
           (if $eff == null then "" else ($eff | todate) end),
           $last,
-          (if $displacer != "" then "displaced by " + $displacer else $reason end)
+          $reason,
+          $displacers
         ]
       | @tsv'
 }
@@ -700,7 +702,32 @@ case "$COMMAND" in
     [[ $# -eq 0 ]] || { usage >&2; exit 2; }
     # Buffered all-or-none for the same reason `list` is.
     rows=$(list_claim_expiry) || exit 1
-    [[ -z "$rows" ]] || printf '%s\n' "$rows"
+    # A `Displaced by` record is honoured only while its displacer is a LIVE
+    # claim: an open PR in this same inventory carrying that exact claim id. A
+    # displacer that closed, rolled back or never existed leaves the claim
+    # exactly what its own expiry says it is (a failed claim.sh must not
+    # strand the claim it was displacing). Live displacer => `displaced`,
+    # terminal: no push and no renewal changes it.
+    if [[ -n "$rows" ]]; then
+      printf '%s\n' "$rows" | awk -F'\t' -v OFS='\t' '
+        { n++; line[n] = $0; live[$1 SUBSEP $2] = 1 }
+        END {
+          for (i = 1; i <= n; i++) {
+            $0 = line[i]
+            if ($9 != "") {
+              m = split($9, d, ";"); found = ""
+              for (k = 1; k <= m; k++) {
+                did = d[k]; sub(/ \(PR #[0-9]+\)$/, "", did)
+                pn = d[k]; sub(/^.* \(PR #/, "", pn); sub(/\)$/, "", pn)
+                if (pn != $1 && ((pn SUBSEP did) in live))
+                  found = found (found == "" ? "" : ", ") did " (PR #" pn ")"
+              }
+              if (found != "") { $3 = "displaced"; $8 = "displaced by " found }
+            }
+            print
+          }
+        }'
+    fi
     ;;
   list-open-numbers)
     [[ $# -eq 0 ]] || { usage >&2; exit 2; }

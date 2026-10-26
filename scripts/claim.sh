@@ -217,6 +217,14 @@ if [[ "${1:-}" == "--renew" ]]; then
     exit 1
   }
   _rn_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  # Resolve the target repository from the CANONICAL checkout, exactly as the
+  # create path does, so `gh repo view`, the overlap sensor and every
+  # `gh pr edit` below act on one repository (GIBSON_CANONICAL names it).
+  _rn_canon="${GIBSON_CANONICAL:-$(pwd)}"
+  cd -- "$_rn_canon" 2>/dev/null || {
+    echo "claim.sh: ERROR: cannot enter the canonical checkout '$_rn_canon' to renew in" >&2
+    exit 1
+  }
   _rn_repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || {
     echo "claim.sh: ERROR: cannot resolve the repository to renew in" >&2
     exit 1
@@ -238,15 +246,28 @@ if [[ "${1:-}" == "--renew" ]]; then
     exit 1
   }
   # A displaced claim is terminal (#557): a newer claim already took its scope,
-  # so renewing would recreate two overlapping live claims. Refuse, naming the
-  # displacer. A Displaced-by line this cannot parse is refused too (fail closed).
-  _rn_disp=$(grep '^- Displaced by: ' <<<"$_rn_body" || true)
-  if [[ -n "$_rn_disp" ]]; then
-    if grep -qvE '^- Displaced by: issue-[A-Za-z0-9-]+ \(PR #[0-9]+\)$' <<<"$_rn_disp"; then
-      echo "claim.sh: ERROR: PR #$_rn_pr carries a Displaced-by record this cannot read — refusing to renew a claim that may already be displaced" >&2
-    else
-      echo "claim.sh: ERROR: $_rn_id (PR #$_rn_pr) was displaced and cannot be renewed: ${_rn_disp//- Displaced by: /} — re-claim issue #$_rn_issue from current main" >&2
-    fi
+  # so renewing would recreate two overlapping live claims. The verdict comes
+  # from `pr-claims.sh expiry`, which honours a Displaced-by record only while
+  # its displacer is itself a live claim (a displacer that closed or rolled
+  # back must not strand this claim). Unreadable record or unreadable expiry
+  # read => refuse (fail closed).
+  _rn_exp=$("$_rn_dir/pr-claims.sh" expiry "$_rn_repo") || {
+    echo "claim.sh: ERROR: cannot read claim expiry/displacement state for $_rn_repo — refusing to renew" >&2
+    exit 1
+  }
+  _rn_row=$(awk -F'\t' -v n="$_rn_pr" '$1 == n { print; exit }' <<<"$_rn_exp")
+  if [[ -z "$_rn_row" ]]; then
+    echo "claim.sh: ERROR: PR #$_rn_pr is missing from the expiry inventory — refusing to renew" >&2
+    exit 1
+  fi
+  _rn_state=$(awk -F'\t' '{ print $3 }' <<<"$_rn_row")
+  _rn_reason=$(awk -F'\t' '{ print $8 }' <<<"$_rn_row")
+  if [[ "$_rn_state" == "displaced" ]]; then
+    echo "claim.sh: ERROR: $_rn_id (PR #$_rn_pr) was displaced and cannot be renewed: ${_rn_reason} — re-claim issue #$_rn_issue from current main" >&2
+    exit 1
+  fi
+  if [[ "$_rn_reason" == "unreadable Displaced by record" ]]; then
+    echo "claim.sh: ERROR: PR #$_rn_pr carries a Displaced-by record this cannot read — refusing to renew a claim that may already be displaced" >&2
     exit 1
   fi
   # A renewal is an admission, not a bookkeeping edit: re-run the overlap check
@@ -255,7 +276,6 @@ if [[ "${1:-}" == "--renew" ]]; then
     echo "claim.sh: ERROR: node required to re-check overlap before renewing" >&2
     exit 1
   }
-  _rn_canon="${GIBSON_CANONICAL:-$(pwd)}"
   if git -C "$_rn_canon" ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
     _rn_base=main
   elif git -C "$_rn_canon" ls-remote --exit-code --heads origin master >/dev/null 2>&1; then
@@ -266,7 +286,12 @@ if [[ "${1:-}" == "--renew" ]]; then
   fi
   _rn_scope=$(awk -F'\t' -v n="$_rn_pr" '$1 == n { print $3 }' <<<"$_rn_rows")
   _rn_args=(--repo-path "$_rn_canon" --base "$_rn_base" --claim-id "$_rn_id" --repo "$_rn_repo" --issue "$_rn_issue")
-  for _rn_s in $_rn_scope; do
+  # `read -ra` splits on spaces WITHOUT pathname expansion: a literal `*`,
+  # `**` or `lib/**` must reach the sensor byte for byte, as on the create
+  # path, or the overlap gate would compare against whatever files happen to
+  # match in the cwd.
+  IFS=' ' read -ra _rn_tokens <<<"$_rn_scope"
+  for _rn_s in "${_rn_tokens[@]}"; do
     _rn_args+=(--scope "$_rn_s")
   done
   [[ -n "$_rn_scope" ]] || {
@@ -1445,11 +1470,37 @@ if [[ "$_adm_rc" -ne 0 ]]; then
 fi
 info "admission: PR #$PR_NUMBER holds $CLAIM_ID (verified against the live claim inventory)"
 
-# Expired claims this claim displaced (#557). The record on the DISPLACED PR is
-# what makes displacement irreversible (pr-claims.sh reads `Displaced by` as
-# terminal, so a later push or --renew cannot revive it), so it is written
-# first, read back, and a failure rolls this claim back rather than leaving two
-# claims able to be live at once. The note on this PR is informational.
+# Report-only classification of the reservation this lane just published.
+# Failure here uses the existing guarded rollback: a v2 claim that cannot
+# prove its own reservation must not remain live. The reader resolves live
+# GitHub/git evidence itself; nothing hands it a JSON payload.
+PROVENANCE_JSON=""
+PROVENANCE_RC=0
+PROVENANCE_JSON=$(run_sensor "$SCRIPT_DIR/claim-provenance.mjs" \
+  --repo "$REPO" \
+  --pr "$PR_NUMBER" \
+  --expected-head "$RESERVATION_SHA" \
+  --claim-id "$CLAIM_ID" \
+  --issue "$ISSUE" \
+  --branch "$BRANCH" \
+  --repo-path "$WT_DIR" \
+  --base "$BASE" \
+  --require-verified-reservation "$RESERVATION_SHA") || PROVENANCE_RC=$?
+if [[ "$PROVENANCE_RC" -ne 0 ]]; then
+  die "v2 reservation classification failed for $CLAIM_ID (PR #$PR_NUMBER, reservation $RESERVATION_SHA) — rolling the new claim back rather than continuing with unverified provenance (reader exit $PROVENANCE_RC)
+  ${PROVENANCE_JSON:-<no receipt>}"
+fi
+info "reservation: $RESERVATION_SHA"
+
+# Expired claims this claim displaced (#557). The `Displaced by` record on the
+# DISPLACED PR is what makes displacement terminal (pr-claims.sh reads it as
+# such, so a later push or --renew cannot revive that claim). It is therefore
+# the LAST step before success: every gate that can still roll this claim back
+# has already passed, so a rolled-back lane never strands a claim it was
+# displacing. A write that still fails here rolls this lane back, and
+# pr-claims.sh ignores a record whose displacer is no longer a live claim, so
+# even a partial stamp does not freeze anyone out. The note on this PR is
+# informational.
 record_displacement() { # pr-number line -> 0 only when the line is readable back
   local n="$1" line="$2" body tmp
   body=$(gh pr view "$n" --repo "$REPO" --json body -q .body 2>/dev/null) || return 1
@@ -1477,28 +1528,6 @@ while IFS= read -r _dl; do
 done <<EOF
 $_adm_out
 EOF
-
-# Report-only classification of the reservation this lane just published.
-# Failure here uses the existing guarded rollback: a v2 claim that cannot
-# prove its own reservation must not remain live. The reader resolves live
-# GitHub/git evidence itself; nothing hands it a JSON payload.
-PROVENANCE_JSON=""
-PROVENANCE_RC=0
-PROVENANCE_JSON=$(run_sensor "$SCRIPT_DIR/claim-provenance.mjs" \
-  --repo "$REPO" \
-  --pr "$PR_NUMBER" \
-  --expected-head "$RESERVATION_SHA" \
-  --claim-id "$CLAIM_ID" \
-  --issue "$ISSUE" \
-  --branch "$BRANCH" \
-  --repo-path "$WT_DIR" \
-  --base "$BASE" \
-  --require-verified-reservation "$RESERVATION_SHA") || PROVENANCE_RC=$?
-if [[ "$PROVENANCE_RC" -ne 0 ]]; then
-  die "v2 reservation classification failed for $CLAIM_ID (PR #$PR_NUMBER, reservation $RESERVATION_SHA) — rolling the new claim back rather than continuing with unverified provenance (reader exit $PROVENANCE_RC)
-  ${PROVENANCE_JSON:-<no receipt>}"
-fi
-info "reservation: $RESERVATION_SHA"
 
 LABEL_ADDED=0  # success — do not undo label
 CLAIM_COMPLETE=1
