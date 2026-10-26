@@ -10,7 +10,8 @@
 #
 # A SIGNAL, not a gate: `review-ready` is not a required check. The failure mode of every
 # path below is a MISSING signal (the controller's fallback sweep still finds the head),
-# never a false green.
+# never a false green. A skip is deliberate and leaves the run green; a failure to emit
+# fails the run so sensor-health notices.
 #
 # pull_request_target is safe here because nothing from the PR is checked out or
 # executed and the job only reads/writes via the API after re-validating the head.
@@ -58,8 +59,9 @@ jobs:
           (github.event_name == 'pull_request_target' &&
            github.event.pull_request.draft == false &&
            github.event.pull_request.head.repo.full_name == github.repository)
-        # Signal only: never let a failure to emit turn anything red.
-        continue-on-error: true
+        # No continue-on-error: a failure to emit makes THIS run red, which is how
+        # sensor-health (freshness over this workflow) sees a missing signal. The run is
+        # not a required check and nothing waits on it, so no pull request is blocked.
         env:
           EVENT_NAME: ${{ github.event_name }}
           REPO: ${{ github.repository }}

@@ -57,9 +57,12 @@ spent"; reviewers re-verify the head.
 ## A signal, not a gate
 
 `review-ready` is not a required check and no rule may name it as one. The merge gate is
-unchanged: required checks plus two independent vendor verdicts at the exact head. The emit
-step is `continue-on-error` and every failure path ends in a missing signal with the reason in
-the job summary, never a false green; the controller's fallback sweep still finds the head.
+unchanged: required checks plus two independent vendor verdicts at the exact head. A
+deliberate skip (draft, fork, stale head, gate not green, already emitted) leaves the run green.
+A failure to emit exits non-zero with the reason in the job summary, so the run goes red and
+sensor-health, which grades this workflow's freshness, notices; there is no `continue-on-error`
+to hide it. Nothing waits on this run, so no pull request is blocked. Every failure path is a
+missing signal, never a false green, and the controller's fallback sweep still finds the head.
 The workflow only runs from the default branch, so it cannot run on the pull request that
 changes it; the first live proof follows the merge.
 

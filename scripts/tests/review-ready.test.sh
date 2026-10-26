@@ -133,8 +133,8 @@ expect '.job_permissions' '{"actions":"read","contents":"write","pull-requests":
 expect '.jobs' '["review-ready"]' "one job"
 expect '.uses' '[]' "the emitter has no uses: at all (no checkout, no third-party action holding write scopes)"
 expect '.emit_steps' '1' "exactly one Emit review-ready step"
-expect '.emit_continue_on_error' 'true' "continue-on-error: true on the emit step"
-expect '.continue_on_error_steps' '["Emit review-ready"]' "continue-on-error appears on no other step"
+expect '.emit_continue_on_error' 'null' "no continue-on-error on the emit step (a failed emit must fail the run so sensor-health sees it)"
+expect '.continue_on_error_steps' '[]' "continue-on-error appears on no step"
 expect '.continue_on_error_jobs' '[]' "continue-on-error appears on no job"
 want_if="(github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository) || (github.event_name == 'pull_request_target' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)"
 got_if=$(jq -r '.step_if' "$FACTS")
@@ -332,7 +332,7 @@ reset_world
 
 echo "# a failure to emit is explained and never silent"
 run_step FAIL_STATUSES_READ=1
-if [[ $RC -ne 0 && -z "$STATUS_LOG" && -z "$DISPATCH_LOG" && "$SUMMARY" == *"could not read existing statuses"* ]]; then ok "cannot check idempotency: emits nothing, says why (the step is continue-on-error)"; else bad "read-fail rc=$RC sum=$SUMMARY"; fi
+if [[ $RC -ne 0 && -z "$STATUS_LOG" && -z "$DISPATCH_LOG" && "$SUMMARY" == *"could not read existing statuses"* ]]; then ok "cannot check idempotency: emits nothing, says why (the step exits non-zero, so the run goes red)"; else bad "read-fail rc=$RC sum=$SUMMARY"; fi
 run_step FAIL_STATUS_POST=1
 if [[ $RC -ne 0 && -z "$DISPATCH_LOG" && "$SUMMARY" == *"could not post the review-ready status"* ]]; then ok "status post fails: no dispatch, reason in the summary"; else bad "status-fail rc=$RC d=$DISPATCH_LOG sum=$SUMMARY"; fi
 run_step FAIL_DISPATCH=1
