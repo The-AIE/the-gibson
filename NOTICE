@@ -29,3 +29,46 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+Third-party skills: .agents/skills/{systematic-debugging,test-driven-development,receiving-code-review}
+are adapted from Superpowers (https://github.com/obra/superpowers, commit 2ce8aa15d05bd57213e6f746f953aafb7ded7a8b),
+used under the MIT License. Changes are listed in .agents/skills/UPSTREAM.md.
+
+MIT License
+
+Copyright (c) 2025 Jesse Vincent
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+Third-party skills: .agents/skills/{webapp-testing,mcp-builder} are adapted from Anthropic's
+skills repository (https://github.com/anthropics/skills, commit dbd4588f9e1033efb41dad4bef2f7947c8993d44),
+used under the Apache License, Version 2.0. Each skill directory keeps the LICENSE.txt it
+shipped with upstream. The scripts and example files are unmodified; SKILL.md carries a
+prominent change notice and the changes are listed in .agents/skills/UPSTREAM.md. The
+document skills in that repository (docx, pdf, pptx, xlsx) are not included.
+
+---
+Third-party skill: .agents/skills/vercel-react-best-practices is adapted from Vercel's agent-skills
+repository (https://github.com/vercel-labs/agent-skills, commit 063bee94c3f4df8453406c830b0a7df0f2860278,
+path skills/react-best-practices), used under the MIT License. The upstream README states
+"MIT" and the skill's own frontmatter declares `license: MIT`; the upstream repository ships
+no LICENSE file, so no copyright line is reproduced here. Attribution: Vercel
+(skill metadata author: vercel). Changes are listed in .agents/skills/UPSTREAM.md.
