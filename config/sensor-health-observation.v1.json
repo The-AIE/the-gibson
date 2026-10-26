@@ -15,6 +15,12 @@
       "windowDays": 2
     },
     {
+      "path": ".github/workflows/drain-ratchet.yml",
+      "mode": "freshness",
+      "events": ["schedule", "workflow_dispatch"],
+      "windowDays": 8
+    },
+    {
       "path": ".github/workflows/review-ready.yml",
       "mode": "freshness",
       "events": ["workflow_run", "pull_request_target"],

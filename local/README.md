@@ -16,7 +16,7 @@ merge cleanly. Full rules: `docs/18-fork-and-upstream.md`.
 # Local overrides — <org name>
 
 ## Fleet
-<runtimes available, pool shapes for doc 15 routing, MC endpoint>
+<runtimes available, pool shapes for doc 15 routing, AK endpoint>
 
 ## Overrides
 <threshold changes, extra laws, house style — one per line, each with a why>

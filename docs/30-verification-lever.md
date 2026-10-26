@@ -15,7 +15,7 @@ nav_order: 30
 **Status:** `scripts/gibson-verify.mjs` ships with this doc (#447). It is called from
 [`playbooks/builder.md`](../playbooks/builder.md) step 4b. It is not a required CI
 check, and a receipt never authorizes a merge: CI and `review-evidence` stay
-authoritative. Mission Control does not yet have a `verification` column; `report`
+authoritative. Agent Kontrol does not yet have a `verification` column; `report`
 uses the existing `milestone` event kind.
 
 ## The problem this names
@@ -31,7 +31,7 @@ moment of the claim.
 | Review evidence nobody can parse | #428, `second-opinion.sh` #290 | `verdict lint` classifies a verdict file the same way `parse_isolated_verdict` does |
 | Setup found broken mid-run | unreadable keys, missing `gh` auth, missing tools | `doctor` checks tools, `gh auth`, the gate script, the receipts ignore rule, and which env vars are set (never their values) |
 | Proof written as prose | PR bodies that say "tests pass" | `prove` writes `.gibson-receipts/<HEAD>.json`; the PR body quotes its summary |
-| A dashboard that can't tell done from said-done | Mission Control `/api/ingest` | `report` posts `kind: "milestone"` with `detail.status` = `verified` or `claim-only` |
+| A dashboard that can't tell done from said-done | Agent Kontrol `/api/ingest` | `report` posts `kind: "milestone"` with `detail.status` = `verified` or `claim-only` |
 
 ## How it works
 
@@ -51,7 +51,7 @@ doctor ──► check ──► prove ──► report
 - **The gate is the repo's gate.** The default is `scripts/gate.sh` (the target
   repo's `.agents/gate.json`). In the Gibson repo itself, pass
   `--gate scripts/tests/run-all.sh`.
-- **Dropped is not delivered.** Mission Control answers `{ok: true, demo: true}`
+- **Dropped is not delivered.** Agent Kontrol answers `{ok: true, demo: true}`
   when it has no database. `report` treats that as not delivered and exits 1.
 - **Verdict parity is tested, not asserted.** `scripts/tests/gibson-verify.test.sh`
   extracts the five verdict functions from `second-opinion.sh` and runs them on the
@@ -85,5 +85,5 @@ verify. The same PR fixes the pattern and pins both directions in
 Before/after on one agent (for example the coordinator): for two weeks before adoption,
 count PRs and status reports that claimed done with no machine-checkable proof at
 the reported head (claim-only rate). After adoption, the same count comes straight
-from `report` events in Mission Control. The target is a falling claim-only rate
+from `report` events in Agent Kontrol. The target is a falling claim-only rate
 with no rise in red CI on PRs reported as verified.

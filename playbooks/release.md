@@ -470,4 +470,4 @@ Never force-push main (G3).
 - [ ] Deploy verified READY for expected SHA
 - [ ] Smoke green
 - [ ] Claim / worktree / branch cleaned — `release-claim.sh` exited **0**, not 3
-- [ ] Status reported to MC / digest
+- [ ] Status reported to AK / digest

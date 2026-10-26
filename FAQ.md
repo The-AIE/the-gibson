@@ -93,11 +93,19 @@ Only if you verified false positive and documented an allowlist with a lesson â€
 do not globally disable hard-fail layers ([docs/08](docs/08-security.md),
 [troubleshooting](docs/troubleshooting/zap-false-positives.md)).
 
-## What's Mission Control vs The Gibson?
+## What's Agent Kontrol vs The Gibson?
 
-**Gibson** = how agents work (doctrine + gates). **Mission Control** = who works
-(queue, telemetry, dispatch). They compose; either can exist alone with reduced
-power.
+**Gibson** = how agents work (doctrine + gates). **Agent Kontrol** (formerly
+Mission Control) = who works (queue, telemetry, dispatch, the morning brief). They
+compose; either can exist alone with reduced power. Agent Kontrol routes and
+reports; it never decides whether a change may merge. See
+[docs/31](docs/31-agent-kontrol.md).
+
+## Why do my settings still say `MC_URL` and `MC_TOKEN`?
+
+Mission Control was renamed Agent Kontrol, but its environment variables
+(`MC_URL`, `MC_TOKEN`, â€¦), `~/.mission-control/` and the dispatcher's launchd label
+kept the old prefix. Leave them as they are; they are correct.
 
 ## What's Foreman / CodeWright?
 

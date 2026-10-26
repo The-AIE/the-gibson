@@ -53,7 +53,7 @@ substrate**, never a Gibson-core database.
 ### Follow-ups (not this spike)
 
 - Optional `gh` issue pull for `blocks` edges without a hand-written JSON file.
-- Wire a read-only Mission Control panel only if a target asks (still adapter).
+- Wire a read-only Agent Kontrol panel only if a target asks (still adapter).
 - Do **not** replace claim/scope sensors with graph queries — sensors stay the teeth.
 
 ## How to run the prototype

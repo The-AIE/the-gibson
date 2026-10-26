@@ -21,7 +21,7 @@ all of which are the agent's to resolve. Changing the AGENTS.md list is itself
 Tier C (the ratchet may tighten autonomously, it loosens only with Mark's
 sign-off).
 
-When a gate triggers: record state (PR comment / loop-state / MC message), queue the
+When a gate triggers: record state (PR comment / loop-state / AK message), queue the
 item for Mark with exactly what decision is needed, **move on to other work** if any
 exists, and surface the queue via the digest (Hermes). Stopping the whole fleet is
 itself a last resort reserved for the incidents marked ⛔.

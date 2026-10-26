@@ -23,7 +23,7 @@ lesson (doc 09) exactly like a build failure.
 
 | Tier | Who | Interface | Sees |
 |---|---|---|---|
-| **Engineer** | Mark, technical collaborators | GUIDE.md, gh/git, MC dashboard | everything |
+| **Engineer** | Mark, technical collaborators | GUIDE.md, gh/git, AK dashboard | everything |
 | **Operator** | non-technical owner of a product | **chat only** (Hermes: iMessage/Slack/etc.) + the digest | decision cards, plain-language status, the live site |
 
 Everything below defines the Operator tier. Nothing about the pipeline changes —

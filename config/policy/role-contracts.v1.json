@@ -284,7 +284,7 @@
         "hat-specific artifacts (PR, tests, verdict, eval, merge, lesson)",
         "updated gibson/loop-state.md (next hat / next action / round count)",
         "append to gibson/journal.md",
-        "MC heartbeat when configured"
+        "AK heartbeat when configured"
       ],
       "gates": [
         "kill switch checked by driver before this prompt runs (docs/11)",
