@@ -29,14 +29,14 @@ rented. The harness is yours, and it compounds.
 
 Pointed at a project, it runs plan → issues → build → test → review → UX check →
 security → merge → deploy → retro, and stops only at the 16 listed human gates
-([AGENTS.md](../AGENTS.md), rationale in [docs/14](14-human-gates.md)).
+([AGENTS.md](../AGENTS.md), rationale in [docs/14](14-human-gates.md)), plus owner-taste calls (product, UX, copy, brand, naming), which it ships technically but leaves as a decision item for the owner.
 
 ## Terms of art
 
 | Term | What it means |
 |---|---|
 | **Harness** | The scaffolding around an agent: instructions, tools and checks. Everything that is not the model. |
-| **Gate** | An automatic pass/fail check a change must clear (tests, typecheck, a security scan). Gates are law: deterministic, and not open to argument. Prose rules are advisory. |
+| **Gate** | An automatic pass/fail check a change must clear (tests, typecheck, a security scan). Gates are enforced by machines and cannot be talked around. Written rules (`AGENTS.md`) are just as mandatory; a gate is the same rule made unforgettable. |
 | **Guide and sensor** | A guide is a written rule that steers before action. A sensor is a check that detects after action that the rule was broken. Guides without sensors drift. |
 | **Ratchet** | A rule that only tightens. If the same failure happens twice, it is a harness bug: a lesson is filed and the harness gains a new guide or sensor. |
 | **PR (pull request)** | A proposed change, held for review before it joins the main code. |
@@ -60,14 +60,14 @@ security → merge → deploy → retro, and stops only at the 16 listed human g
 4. **One agent, one directory.** Worktree per lane, disjoint file scopes, so agents
    cannot corrupt each other's state ([docs/05](05-concurrency.md)).
 5. **Humans keep the irreversible calls.** The closed list of human gates covers what
-   an owner must decide; everything else proceeds on independent review plus green
-   gates.
+   an owner must decide, and subjective taste calls always go to the owner as a
+   decision item. Everything else proceeds on independent review plus green gates.
 
 ## Where it stands
 
 Adoption is a ladder ([D-006](../memory/DECISIONS.md)). Rung 1 is the agent contract
 plus the CI gate. Rung 2 is the unattended loop, which needs a clean adoption pass,
 a demonstrated ratchet elsewhere, and a hardened production write path. Check the
-current status in D-006 rather than this page. Work-queue management (who is doing
+current state of each repo in its own adoption record rather than this page; D-006 defines the ladder. Work-queue management (who is doing
 what, the morning brief) belongs to [Agent Kontrol](31-agent-kontrol.md), which never
 holds merge authority; only the Gibson's gates do.
