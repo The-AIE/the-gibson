@@ -37,7 +37,8 @@ make_repo() {
   cp "$REPO_ROOT/scripts/prepush.sh" "$d/scripts/"
   cp "$REPO_ROOT/scripts/lib/convention-probes.sh" "$REPO_ROOT/scripts/lib/wall-timeout.sh" \
      "$REPO_ROOT/scripts/lib/agent-vendor.sh" "$d/scripts/lib/"
-  cp "$REPO_ROOT/scripts/scope-recheck.mjs" "$REPO_ROOT/scripts/pr-claims.sh" "$d/scripts/"
+  cp "$REPO_ROOT/scripts/scope-recheck.mjs" "$REPO_ROOT/scripts/pr-claims.sh" "$REPO_ROOT/scripts/scope-overlap.mjs" "$d/scripts/"
+  cp "$REPO_ROOT/scripts/lib/args.mjs" "$d/scripts/lib/"
   reach_stub "$d" 0
   cat > "$d/scripts/ok.mjs" <<'EOF'
 const a = process.argv.slice(2);

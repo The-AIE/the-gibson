@@ -53,9 +53,10 @@ chmod +x "$ROOT/bin/gh"
 # make_repo NAME — repo with the scripts under test, a docs/ tree and a workflow registry; prints dir.
 make_repo() {
   local d="$ROOT/$1"
-  mkdir -p "$d/scripts" "$d/config" "$d/docs" "$d/.github/workflows" "$d/fix"
-  cp "$REPO_ROOT/scripts/scope-recheck.mjs" "$REPO_ROOT/scripts/pr-claims.sh" \
+  mkdir -p "$d/scripts/lib" "$d/config" "$d/docs" "$d/.github/workflows" "$d/fix"
+  cp "$REPO_ROOT/scripts/scope-recheck.mjs" "$REPO_ROOT/scripts/pr-claims.sh" "$REPO_ROOT/scripts/scope-overlap.mjs" \
      "$REPO_ROOT/scripts/sensor-health-lib.mjs" "$d/scripts/"
+  cp "$REPO_ROOT/scripts/lib/args.mjs" "$d/scripts/lib/"
   cp "$REPO_ROOT/config/sensor-health-observation.v1.json" "$d/config/"
   cp "$REPO_ROOT"/.github/workflows/*.yml "$d/.github/workflows/"
   printf '# one\n' > "$d/docs/30-one.md"
@@ -112,6 +113,21 @@ check "$d" scope <<<$'scripts/a.sh\nconfig/sensor-health-observation.v1.json'
 check "$d" scope <<<$'scripts/a.sh\nconfig/sensor-health-observation.v1.json'
 [[ "$RC" -eq 0 ]] && ok "overlap with a HIGHER-numbered claim does not stop us (it yields)" || bad "higher rc=$RC out=$OUT"
 
+# competing claims use the admission overlap kernel, not containment (Codex P1 at 534eea9)
+d=$(make_repo kernel)
+echo '{"number":570}' > "$d/fix/prview.json"; echo '[]' > "$d/fix/prlist.json"
+{ claim_row 565 559 drain 'scripts/*'; claim_row 570 568 mine 'scripts/lib/deep.sh'; } > "$d/fix/claims.tsv"
+check "$d" scope <<<$'scripts/lib/deep.sh'
+[[ "$RC" -eq 1 && "$(jget 'j.findings.length')" == 1 && "$(jget 'j.findings[0].kind')" == lower-numbered-claim && "$(jget 'j.findings[0].pr')" == 565 ]] \
+  && ok "lower claim 'scripts/*' vs scripts/lib/deep.sh: the overlap kernel says overlap, exit 1" || bad "kernel star rc=$RC out=$OUT"
+{ claim_row 565 559 drain 'scripts/**/deep.sh'; claim_row 570 568 mine 'scripts/lib/deep.sh'; } > "$d/fix/claims.tsv"
+check "$d" scope <<<$'scripts/lib/deep.sh'
+[[ "$RC" -eq 1 && "$(jget 'j.findings[0].kind')" == lower-numbered-claim ]] \
+  && ok "malformed lower-claim token fails closed (counts as overlap)" || bad "kernel malformed rc=$RC out=$OUT"
+{ claim_row 565 559 drain 'docs/**'; claim_row 570 568 mine 'scripts/lib/deep.sh'; } > "$d/fix/claims.tsv"
+check "$d" scope <<<$'scripts/lib/deep.sh'
+[[ "$RC" -eq 0 ]] && ok "disjoint lower claim: green" || bad "kernel disjoint rc=$RC out=$OUT"
+
 # --- 3. scope: containment, not overlap ----------------------------------------
 d=$(make_repo contain)
 echo '{"number":570}' > "$d/fix/prview.json"; echo '[]' > "$d/fix/prlist.json"
@@ -163,6 +179,17 @@ check "$d" docs-numbers --base HEAD <<<$'docs/31-a.md'
 [[ "$RC" -eq 0 ]] && ok "this branch's pushed file listed under its own PR is not a duplicate of itself" || bad "docs self rc=$RC out=$OUT"
 printf 'docs/31-a.md\n' | (cd "$d" && FIX="$d/fix" PATH="$ROOT/bin:$PATH" node scripts/scope-recheck.mjs docs-numbers --base HEAD --pr 565 >/dev/null 2>&1); [[ $? -eq 0 ]] \
   && ok "--pr excludes the current PR from the other-PR list" || bad "docs --pr"
+# a rename of an already-pushed doc is one document, not a collision with its own PR (Codex P2)
+echo '{"number":570}' > "$d/fix/prview.json"
+echo '[{"number":570,"files":[{"path":"docs/31-old.md"}]}]' > "$d/fix/prlist.json"
+check "$d" docs-numbers --base HEAD <<<$'docs/31-renamed.md'
+[[ "$RC" -eq 0 ]] && ok "renaming a pushed docs/31- file inside its own PR is green" || bad "docs rename rc=$RC out=$OUT"
+rm -f "$d/fix/prview.json"
+# two different new files on one number inside ONE branch/PR (Codex P2)
+echo '[]' > "$d/fix/prlist.json"
+check "$d" docs-numbers --base HEAD <<<$'docs/31-a.md\ndocs/31-b.md'
+[[ "$RC" -eq 1 && "$(jget 'JSON.stringify(j.findings[0].parties)')" == '{"this branch":["docs/31-a.md","docs/31-b.md"]}' ]] \
+  && ok "two distinct new files sharing docs/31- in one branch: exit 1" || bad "docs same-party rc=$RC out=$OUT"
 echo 'nope' > "$d/fix/prlist.json"
 check "$d" docs-numbers --base HEAD <<<$'x'
 [[ "$RC" -eq 2 ]] && ok "malformed gh output: exit 2" || bad "docs malformed rc=$RC"
@@ -233,6 +260,11 @@ echo '{"number":570}' > "$d/fix/prview.json"; echo '[]' > "$d/fix/prlist.json"
 { claim_row 565 559 drain 'stray.txt'; claim_row 570 568 mine 'stray.txt'; } > "$d/fix/claims.tsv"
 check "$d" scope <<<$'stray.txt'
 [[ "$RC" -eq 0 ]] && ok "mutation (lower-claim loop removed): planted overlap goes undetected" || bad "mutation nolower still red rc=$RC"
+d=$(mutate noKernel 's/if (inScope(file, token)) return true;/return inScope(file, token);/') || bad "mutation noKernel did not apply"
+echo '{"number":570}' > "$d/fix/prview.json"; echo '[]' > "$d/fix/prlist.json"
+{ claim_row 565 559 drain 'scripts/*'; claim_row 570 568 mine 'scripts/lib/deep.sh'; } > "$d/fix/claims.tsv"
+check "$d" scope <<<$'scripts/lib/deep.sh'
+[[ "$RC" -eq 0 ]] && ok "mutation (containment instead of the overlap kernel): the 'scripts/*' overlap goes undetected" || bad "mutation noKernel still red rc=$RC"
 d=$(mutate nodocs 's/parties.size > 1/parties.size > 99/') || bad "mutation nodocs did not apply"
 echo '[{"number":565,"files":[{"path":"docs/31-a.md"}]}]' > "$d/fix/prlist.json"
 check "$d" docs-numbers --base HEAD <<<$'docs/31-b.md'

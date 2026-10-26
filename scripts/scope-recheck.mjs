@@ -162,6 +162,19 @@ function report(o, findings, text, clearLine) {
   if (findings.length) process.exit(1);
 }
 
+/**
+ * True when `file` collides with claim scope `token` under the authoritative kernel in
+ * scope-overlap.mjs (--pair): prefix/stem overlap, fail-closed on tokens it cannot classify.
+ * Containment is the cheap, certain case and skips the spawn.
+ */
+function collides(file, token) {
+  if (inScope(file, token)) return true;
+  const r = run("node", [join(SCRIPT_DIR, "scope-overlap.mjs"), "--pair", file, token]);
+  if (r.rc === 1 && r.out.trim() === "overlap") return true;
+  if (r.rc === 0 && r.out.trim() === "disjoint") return false;
+  die(2, `scope-recheck: scope-overlap --pair failed for '${file}' vs '${token}': ${r.err.trim().split("\n").pop()}`);
+}
+
 function readStdinLines() {
   let raw = "";
   try { raw = readFileSync(0, "utf8"); } catch { raw = ""; }
@@ -202,7 +215,7 @@ function cmdScope(o) {
   }
   for (const other of claims) {
     if (other.number >= pr) continue;
-    const hit = files.filter((f) => other.tokens.some((t) => inScope(f, t)));
+    const hit = files.filter((f) => other.tokens.some((t) => collides(f, t)));
     if (!hit.length) continue;
     findings.push({ kind: "lower-numbered-claim", pr: other.number, claim: other.id, files: hit });
     texts.push(
@@ -233,7 +246,13 @@ function cmdDocsNumbers(o) {
     const m = DOCS_RE.exec(p);
     if (m) add(m[1], "main", p);
   }
-  const me = o.pr ? Number(o.pr) : null;
+  let me = o.pr ? Number(o.pr) : null;
+  if (me === null) {
+    // This branch's pushed files are judged from the local tree, never twice (a rename of a pushed doc).
+    const branch = run("git", ["branch", "--show-current"]).out.trim();
+    const v = branch ? run("gh", ["pr", "view", branch, "--repo", repo, "--json", "number"]) : { rc: 1, out: "" };
+    try { if (v.rc === 0 && Number.isInteger(JSON.parse(v.out).number)) me = JSON.parse(v.out).number; } catch { /* no PR yet */ }
+  }
   const lp = run("gh", ["pr", "list", "--repo", repo, "--state", "open", "--limit", "500", "--json", "number,files"]);
   if (lp.rc !== 0) die(2, `scope-recheck: cannot list open pull requests: ${lp.err.trim().split("\n").pop()}`);
   let prs;
@@ -259,7 +278,8 @@ function cmdDocsNumbers(o) {
   }
   // --mine (prepush): fail only on a number this branch adds a file under, so a lane is not
   // blocked by two OTHER pull requests colliding; those are printed as a note, not a failure.
-  const allDups = [...byNum].filter(([, parties]) => parties.size > 1).sort(([x], [y]) => x.localeCompare(y));
+  const reused = (parties) => parties.size > 1 || [...parties].some(([k, v]) => k !== "main" && v.size > 1);
+  const allDups = [...byNum].filter(([, parties]) => reused(parties)).sort(([x], [y]) => x.localeCompare(y));
   const dups = o.mine ? allDups.filter(([num]) => mineNums.has(num)) : allDups;
   if (o.mine && !o.json) {
     for (const [num, parties] of allDups.filter(([n]) => !mineNums.has(n)))
@@ -272,7 +292,7 @@ function cmdDocsNumbers(o) {
   }));
   const text = dups
     .map(([num, parties]) =>
-      [`docs/${num}- is claimed by ${parties.size} parties; take the next free number:`,
+      [`docs/${num}- is claimed by ${parties.size} part${parties.size === 1 ? "y with several files" : "ies"}; take the next free number:`,
         ...[...parties].map(([party, paths]) => `    ${party}: ${[...paths].sort().join(", ")}`)].join("\n"))
     .join("\n");
   report(o, findings, text, `no docs/NN- number is used twice across ${o.base} and ${prs.length} open pull request(s)`);
