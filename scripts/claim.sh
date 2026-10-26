@@ -1477,8 +1477,6 @@ while IFS= read -r _dl; do
 done <<EOF
 $_adm_out
 EOF
-$_adm_out
-EOF
 
 # Report-only classification of the reservation this lane just published.
 # Failure here uses the existing guarded rollback: a v2 claim that cannot
