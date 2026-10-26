@@ -51,7 +51,7 @@ drift sensors continuously.
 
 Anthropic's strongest finding: generators praise their own work regardless of quality;
 a *separate evaluator tuned to skepticism* is far more tractable than a self-critical
-generator. Mission Control operationalizes this as cross-vendor review by default
+generator. Agent Kontrol operationalizes this as cross-vendor review by default
 (`reviewer_platform` ≠ worker platform). The Gibson extends it: evaluation runs
 against **running software** — Playwright clicking a live deployment — never against
 the generator's summary of what it built.
@@ -66,7 +66,7 @@ becomes executable and its todo-count must go down.
 ## 5. Primitives, not features
 
 pi.dev's stance, validated negatively by ruflo (35 plugins → "lite" install path as an
-admission of overload) and positively by Mission Control (borrowed the queen/worker
+admission of overload) and positively by Agent Kontrol (borrowed the queen/worker
 concept, skipped the 210-tool install). The Gibson core is: Markdown + git + shell +
 GitHub Actions. Everything else — skills, hooks, dashboards, vector memory — is an
 adapter or extension that can be dropped without breaking doctrine.
@@ -78,7 +78,7 @@ later, if ever, when measured need appears.
 ## 6. The ratchet: failures become infrastructure
 
 Fowler: "Whenever an issue happens multiple times, the feedforward and feedback
-controls should be improved to make the issue less probable." Mission Control's weekly
+controls should be improved to make the issue less probable." Agent Kontrol's weekly
 ritual: tasks that failed twice are prompts needing better acceptance criteria, not
 better models.
 
@@ -106,7 +106,7 @@ working. If the list is wrong, PR the list.
 
 ## 9. Truthful telemetry, owned store
 
-Mission Control doctrine: agents push, nobody polls; deterministic reporting (hooks,
+Agent Kontrol doctrine: agents push, nobody polls; deterministic reporting (hooks,
 watchers) is ground truth for liveness, semantic reporting (MCP) is ground truth for
 meaning; everything lands in a store *we* own. And reporting is honest: failures
 verbatim, skips named, "done" only after verification.

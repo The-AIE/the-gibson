@@ -58,7 +58,7 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 │                verify deploy, smoke, cleanup. Human-gated →
 │                queue it for Mark, move on.
 │  11. RETRO     any lesson? file it; harness fix if small        [historian hat]
-│  12. JOURNAL   append loop-state.md: what/why/next; report to MC
+│  12. JOURNAL   append loop-state.md: what/why/next; report to AK
 └── 13. REPEAT   next issue. Stop only for: human gate on ALL remaining work,
                  empty queue, kill switch, or error budget exhausted.
 ```
@@ -248,7 +248,7 @@ compare against a stale baseline.
 - **Human-gate queue:** Tier C merges and other stops accumulate in a digest
   (Hermes pings Mark) instead of blocking the loop — the loop moves to the next
   issue and circles back after approval.
-- **Heartbeat:** every iteration reports to Mission Control; 15 minutes of silence
+- **Heartbeat:** every iteration reports to Agent Kontrol; 15 minutes of silence
   = presumed dead, per fleet telemetry rules.
 
 ## Drivers

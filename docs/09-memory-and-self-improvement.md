@@ -31,10 +31,10 @@ Two stores, two jobs (harness side):
 | Store | Job | Medium |
 |---|---|---|
 | **The Gibson `memory/`** | Durable doctrine-adjacent knowledge: lessons, decisions, incidents | Markdown in this repo |
-| **Mission Control `memory` table** | Runtime coordination: project status, handoffs, "who's doing what" | Supabase via MCP `remember`/`recall` |
+| **Agent Kontrol `memory` table** | Runtime coordination: project status, handoffs, "who's doing what" | Postgres via MCP `remember`/`recall` |
 
 Rule of thumb: if it should still matter in a month, it's a Gibson memory; if it
-matters until the task closes, it's an MC memory. The historian promotes the former
+matters until the task closes, it's an AK memory. The historian promotes the former
 out of the latter. Product-specific scar tissue lives in the **target** `MEMORY.md`,
 not only here.
 
@@ -152,13 +152,13 @@ call, which defeats the point.
 A scheduled workflow (weekly) + the historian role:
 
 1. Pull the exhaust: merged PRs, CI failure history, review verdicts,
-   REQUEST_CHANGES reasons, eval reports, MC task outcomes and `cost_usd`,
+   REQUEST_CHANGES reasons, eval reports, AK task outcomes and `cost_usd`,
    twice-failed tasks.
 2. Cluster recurring causes; check each against existing lessons.
 3. File lessons + `harness-improvement` issues; post a digest (via Hermes) to Mark:
    what the fleet learned this week, what it changed about itself, cost trend.
 
-This converts Mission Control's *manual weekly human ritual* into an automated sweep
+This converts Agent Kontrol's *manual weekly human ritual* into an automated sweep
 with a human-readable digest — the compounding is no longer optional.
 
 ## Self-modification bounds

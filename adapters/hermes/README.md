@@ -75,7 +75,7 @@ Confusion replies ("I don't understand") → explain + file lesson (docs/16 / do
 
 ### 5. Telemetry
 
-- Cron heartbeat + MC MCP
+- Cron heartbeat + AK MCP
 - Digests are themselves liveness signals to humans
 
 ### 6. Cost capture

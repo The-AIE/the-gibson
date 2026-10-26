@@ -41,7 +41,7 @@ and conditional dispatch-prompt load are measured separately (see
 3. Relevant entries in `memory/LESSONS.md` (tag-filter to role and area). Do not
    ingest the full ledger unless the task needs it. Attest the consult (Law 1
    sensor: `scripts/contract-read-check.mjs`).
-4. Recall fleet memory (Mission Control `recall`, or `memory/` grep) before
+4. Recall fleet memory (Agent Kontrol `recall`, or `memory/` grep) before
    starting — someone may have solved or claimed this already.
 
 Everything under `docs/`, helper templates, `paper/`, `HOW-IT-WORKS.md`,
@@ -104,7 +104,7 @@ units and leave the harness better.
    boundaries, schema, incident alerting, or production data gets adversarial
    review and the **G12** floor (D-015).
 8. **Report truthfully, loudly, and in the right place.** Status goes to the
-   queue (Mission Control) and the PR — failures verbatim, skipped steps named.
+   queue (Agent Kontrol) and the PR — failures verbatim, skipped steps named.
    A silent agent is a failed agent. Never mark done what you didn't verify.
    `scripts/truthful-status.mjs` is the green-claim sensor.
 9. **Feed the ratchet.** If you hit a failure the harness didn't catch, or hit

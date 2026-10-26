@@ -9,7 +9,7 @@ loop.sh — drive the solo SDLC loop (one hat, fresh context, file state)
 WHAT IT DOES
   For a target repo: check kill switch, read/update gibson/loop-state.md,
   render playbooks/loop-step.md with {{hat}} and {{loop_state}}, invoke the
-  chosen runner headless, enforce error budget, append journal, optional MC
+  chosen runner headless, enforce error budget, append journal, optional AK
   heartbeat.
 
 WHY
