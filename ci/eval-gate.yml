@@ -1,0 +1,76 @@
+# gibson-template-version: sha256:8812a269830f7aaf2752cff0e43bd266afed7b44d0393ab04f0b2a71aa084c4b
+# The Gibson — opt-in eval gate (docs/eval-layer.md, #583)
+# Install as .github/workflows/eval-gate.yml. Manual only: runs the eval dataset against a
+# runner command and gates on the pass rate. Never a required check. Fail-closed; no
+# continue-on-error / || true / set +e.
+# Langfuse shipping is optional: set repo secrets LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
+# (and LANGFUSE_HOST for non-cloud). Without them the run still gates, locally only.
+
+name: gibson-eval-gate
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Variant name (letters, digits, . _ -)"
+        required: true
+        default: "ci"
+      runner:
+        description: "Runner command (reads a case as JSON on stdin, prints the answer)"
+        required: true
+      grader:
+        description: "Optional grader command (JSON verdict on stdout). Empty = expect-only."
+        required: false
+        default: ""
+      ledger:
+        description: "Optional cost-ledger JSONL path in the repo to send as traces"
+        required: false
+        default: ""
+      min_pass_rate:
+        description: "Minimum pass rate, 0 to 1"
+        required: true
+        default: "0.8"
+# Deny all by default. Jobs grant least privilege only.
+permissions: {}
+
+# No PR trigger: a manual eval run must not cancel a sibling run.
+concurrency:
+  group: eval-gate
+  cancel-in-progress: false
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Lint the dataset
+        run: node scripts/eval-dataset-lint.mjs
+      - name: Run the dataset
+        env:
+          VARIANT: ${{ inputs.variant }}
+          RUNNER: ${{ inputs.runner }}
+          GRADER: ${{ inputs.grader }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+        run: |
+          set -euo pipefail
+          if [ -n "$GRADER" ]; then
+            node scripts/eval-run.mjs --variant "$VARIANT" --runner "$RUNNER" --grader "$GRADER"
+          else
+            node scripts/eval-run.mjs --variant "$VARIANT" --runner "$RUNNER"
+          fi
+      - name: Gate on pass rate
+        env:
+          VARIANT: ${{ inputs.variant }}
+          MIN: ${{ inputs.min_pass_rate }}
+        run: node scripts/eval-gate.mjs --variant "$VARIANT" --min-pass-rate "$MIN"
+      - name: Send the cost ledger as traces (only when a ledger path was given)
+        if: ${{ inputs.ledger != '' }}
+        env:
+          LEDGER: ${{ inputs.ledger }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+        run: node scripts/eval-trace.mjs --ledger "$LEDGER" --all
