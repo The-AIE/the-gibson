@@ -99,7 +99,8 @@ facts = {
     "top_permissions": wf.get("permissions"),
     "jobs": sorted(jobs),
     "job_permissions": job.get("permissions"),
-    "job_if": " ".join(str(job.get("if", "")).split()),
+    "job_has_if": "if" in job,
+    "step_if": " ".join(str(emit[0].get("if", "")).split()) if len(emit) == 1 else None,
     "emit_steps": len(emit),
     "emit_continue_on_error": emit[0].get("continue-on-error") if len(emit) == 1 else None,
     "continue_on_error_steps": sorted(s.get("name", "?") for s in steps_of(wf) if "continue-on-error" in s),
@@ -136,8 +137,9 @@ expect '.emit_continue_on_error' 'true' "continue-on-error: true on the emit ste
 expect '.continue_on_error_steps' '["Emit review-ready"]' "continue-on-error appears on no other step"
 expect '.continue_on_error_jobs' '[]' "continue-on-error appears on no job"
 want_if="(github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository) || (github.event_name == 'pull_request_target' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)"
-got_if=$(jq -r '.job_if' "$FACTS")
-if [[ "$got_if" == "$want_if" ]]; then ok "job-level if: pull_request runs only, success only, same-repo heads only, never a draft"; else bad "job if: is: $got_if"; fi
+got_if=$(jq -r '.step_if' "$FACTS")
+if [[ "$got_if" == "$want_if" ]]; then ok "step-level if: pull_request runs only, success only, same-repo heads only, never a draft"; else bad "step if: is: $got_if"; fi
+expect '.job_has_if' 'false' "the job has no if: (a skipped job concludes skipped, which sensor-health grades unhealthy; a skipped step leaves the run success)"
 expect '.self_writes' '[]' "gibson-self-gate.yml grants no write permission anywhere (a PR rewrites that file)"
 expect '(.self_jobs | index("review-ready"))' 'null' "gibson-self-gate.yml has no review-ready job"
 expect '(.self_job_names | index("emit review-ready"))' 'null' "gibson-self-gate.yml has no emit review-ready job"
@@ -210,7 +212,7 @@ SENSORS_AT=2026-10-25T16:00:00Z
 
 # Fixtures describing a good world; each test overrides one thing.
 write_run()   { jq -n --arg path "$1" --arg ev "$2" --arg c "$3" --arg h "$4" --arg r "$5" \
-  '{id:9001, path:$path, event:$ev, conclusion:$c, head_sha:$h, head_repository:{full_name:$r}}' > "$ROOT/fixture/run.json"; }
+  '{id:9001, path:$path, event:$ev, conclusion:$c, head_sha:$h, head_repository:{full_name:$r}, pull_requests:[{number:77}]}' > "$ROOT/fixture/run.json"; }
 write_pull()  { jq -n --arg st "$1" --argjson dr "$2" --arg h "$3" --arg r "$4" --arg base "$BASE" \
   '{state:$st, draft:$dr, head:{sha:$h, repo:{full_name:$r}}, base:{sha:$base}, created_at:"2026-10-25T15:20:00Z"}' > "$ROOT/fixture/pull.json"; }
 write_jobs()  { jq -n --arg s "$1" --arg c "$2" --arg t "$SENSORS_AT" \
@@ -220,7 +222,7 @@ reset_world() {
   write_pull open false "$HEAD" example/repo
   write_jobs success success
   echo '[]' > "$ROOT/fixture/statuses.json"
-  jq -n --arg p "$SG_PATH" '{workflow_runs:[{id:9001,path:$p,conclusion:"success",run_started_at:"2026-10-25T15:30:00Z"},{id:9000,path:$p,conclusion:"failure",run_started_at:"2026-10-25T15:40:00Z"},{id:8000,path:".github/workflows/other.yml",conclusion:"success",run_started_at:"2026-10-25T15:50:00Z"}]}' > "$ROOT/fixture/runs-list.json"
+  jq -n --arg p "$SG_PATH" '{workflow_runs:[{id:9001,path:$p,conclusion:"success",run_started_at:"2026-10-25T15:30:00Z",pull_requests:[{number:77}]},{id:9000,path:$p,conclusion:"failure",run_started_at:"2026-10-25T15:40:00Z",pull_requests:[{number:77}]},{id:8001,path:$p,conclusion:"success",run_started_at:"2026-10-25T15:55:00Z",pull_requests:[{number:12}]},{id:8000,path:".github/workflows/other.yml",conclusion:"success",run_started_at:"2026-10-25T15:50:00Z",pull_requests:[{number:77}]}]}' > "$ROOT/fixture/runs-list.json"
 }
 reset_world
 
@@ -282,6 +284,11 @@ run_step HEAD_SHA=;                     silent "no head SHA" "no head SHA in the
 echo "# workflow_run skips decided by the API, not the payload"
 write_run "$SG_PATH" push success "$HEAD" example/repo;               run_step; silent "event is push" "API says the run event is push (payload lied)"
 write_run "$SG_PATH" pull_request failure "$HEAD" example/repo;       run_step; silent "concluded failure" "API says the run failed (payload lied)"
+write_run "$SG_PATH" pull_request success "$HEAD" example/repo
+jq '.pull_requests = [{number:12}]' "$ROOT/fixture/run.json" > "$ROOT/r.tmp" && mv "$ROOT/r.tmp" "$ROOT/fixture/run.json"
+run_step; silent "does not belong to pull request 77" "the run belongs to a different PR that shares the commit: skips"
+jq '.pull_requests = []' "$ROOT/fixture/run.json" > "$ROOT/r.tmp" && mv "$ROOT/r.tmp" "$ROOT/fixture/run.json"
+run_step; silent "does not belong to pull request 77" "the run lists no pull request: skips"
 write_run "$SG_PATH" pull_request success "$MOVED" example/repo;      run_step; silent "not $HEAD" "API says the run is for another head"
 write_run "$SG_PATH" pull_request success "$HEAD" someone/fork;       run_step; silent "head is in someone/fork" "API says the run's head is a fork"
 write_run ".github/workflows/evil.yml@refs/pull/9/merge" pull_request success "$HEAD" example/repo
@@ -307,6 +314,8 @@ PRT=(EVENT_NAME=pull_request_target RUN_EVENT= RUN_CONCLUSION= RUN_HEAD_REPO= RU
 run_step "${PRT[@]}"
 if [[ $RC -eq 0 && "$STATUS_LOG" == "$want_status" && "$(printf '%s' "$DISPATCH_LOG" | jq -s length)" == 1 ]]; then ok "finds the latest successful self-gate run for the head and emits once"; else bad "pull_request_target good: rc=$RC out=$OUT summary=$SUMMARY"; fi
 if [[ "$SUMMARY" == *"trigger pull_request_target"* && "$SUMMARY" == *"self-gate run 9001"* ]]; then ok "summary names the trigger and the run it found"; else bad "summary: $SUMMARY"; fi
+run_step "${PRT[@]}" PRT_PR_NUMBER=12; silent "does not belong to pull request 12" "pull_request_target picks only a run that belongs to this PR (run 8001 is PR 12's and is newest, but run 9001 is PR 77's)"
+run_step "${PRT[@]}" PRT_PR_NUMBER=abc; silent "not numeric" "a non-numeric PR number is refused before it reaches a jq filter"
 run_step "${PRT[@]}" PRT_DRAFT=true;                 silent "draft" "pull_request_target on a draft: skips"
 run_step "${PRT[@]}" PRT_HEAD_REPO=someone/fork;     silent "fork" "pull_request_target on a fork: skips"
 echo '{"workflow_runs":[{"id":8000,"path":".github/workflows/other.yml","conclusion":"success","run_started_at":"2026-10-25T15:50:00Z"}]}' > "$ROOT/fixture/runs-list.json"

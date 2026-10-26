@@ -35,14 +35,6 @@ concurrency:
 jobs:
   review-ready:
     name: emit review-ready
-    if: >-
-      (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.event == 'pull_request' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_repository.full_name == github.repository) ||
-      (github.event_name == 'pull_request_target' &&
-       github.event.pull_request.draft == false &&
-       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Least privilege: actions (the completed run and its jobs), pull-requests (the PR's
@@ -55,6 +47,17 @@ jobs:
       statuses: write
     steps:
       - name: Emit review-ready
+        # The guard lives on the STEP, not the job: a skipped job concludes `skipped`, and
+        # sensor-health grades the latest `skipped` run of this workflow as unhealthy after any
+        # push to main. A skipped step leaves the job, and the run, `success`.
+        if: >-
+          (github.event_name == 'workflow_run' &&
+           github.event.workflow_run.event == 'pull_request' &&
+           github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.head_repository.full_name == github.repository) ||
+          (github.event_name == 'pull_request_target' &&
+           github.event.pull_request.draft == false &&
+           github.event.pull_request.head.repo.full_name == github.repository)
         # Signal only: never let a failure to emit turn anything red.
         continue-on-error: true
         env:
@@ -101,9 +104,10 @@ jobs:
               [ "${PRT_DRAFT}" = "false" ] || skip "draft pull request"
               [ "${PRT_HEAD_REPO}" = "${REPO}" ] || skip "head is in ${PRT_HEAD_REPO}; no signal for a fork"
               pr=${PRT_PR_NUMBER}
+              case "${pr}" in ''|*[!0-9]*) skip "pull request number is not numeric" ;; esac
               # The latest completed successful self-gate pull_request run for this exact head, if any.
               run_id=$(gh api "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&event=pull_request&status=completed&per_page=100" \
-                --jq "[.workflow_runs[] | select(.path == \"${SELF_GATE_PATH}\" and .conclusion == \"success\")] | sort_by(.run_started_at) | last | .id // empty") \
+                --jq "[.workflow_runs[] | select(.path == \"${SELF_GATE_PATH}\" and .conclusion == \"success\" and ([.pull_requests[]?.number] | index(${pr})) != null)] | sort_by(.run_started_at) | last | .id // empty") \
                 || fail "could not list self-gate runs at ${HEAD_SHA}"
               [ -n "${run_id}" ] || skip "no successful self-gate run at ${HEAD_SHA} yet; the workflow_run event will signal when it finishes"
               ;;
@@ -115,15 +119,17 @@ jobs:
 
           # 2. Confirm the run itself, from the API: right workflow file, right event, right head, success.
           run_line=$(gh api "repos/${REPO}/actions/runs/${run_id}" \
-            --jq '[.path, .event, .conclusion, .head_sha, .head_repository.full_name] | @tsv') \
+            --jq '[.path, .event, .conclusion, .head_sha, .head_repository.full_name, ([.pull_requests[]?.number] | map(tostring) | join(","))] | @tsv') \
             || fail "could not read run ${run_id}"
-          IFS=$'\t' read -r r_path r_event r_conclusion r_head r_repo <<< "${run_line}"
+          IFS=$'\t' read -r r_path r_event r_conclusion r_head r_repo r_prs <<< "${run_line}"
           r_path=${r_path%%@*}
           [ "${r_path}" = "${SELF_GATE_PATH}" ] || skip "run ${run_id} is ${r_path}, not ${SELF_GATE_PATH}"
           [ "${r_event}" = "pull_request" ] || skip "run ${run_id} event is ${r_event}"
           [ "${r_conclusion}" = "success" ] || skip "run ${run_id} concluded ${r_conclusion}"
           [ "${r_head}" = "${HEAD_SHA}" ] || skip "run ${run_id} is for ${r_head}, not ${HEAD_SHA}"
           [ "${r_repo}" = "${REPO}" ] || skip "run ${run_id} head is in ${r_repo}"
+          # A commit can sit in more than one PR; the run must belong to THIS one.
+          case ",${r_prs}," in *",${pr},"*) ;; *) skip "run ${run_id} does not belong to pull request ${pr}" ;; esac
 
           # 3. Both gates green for that head.
           jobs=$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs" --paginate \
