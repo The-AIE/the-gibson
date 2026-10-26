@@ -274,6 +274,7 @@ suite() {
   expect "no breach and nothing open: no action" "$ROOT/en4-actions.json" "r.length" "0"
   CONFIG="$CFG"
 
+  if [[ -z "${DRAIN_RATCHET_SKIP_LIVE:-}" ]]; then
   echo "# live path (stubbed gh): report-only never writes, enforce writes once"
   cat >"$ROOT/fake-gh" <<'EOF'
 #!/usr/bin/env bash
@@ -324,6 +325,8 @@ EOF
   node -e 'console.log(JSON.stringify([{ number: 900, title: "old", state: "open", draft: false, created_at: "2026-08-01T00:00:00Z", closed_at: null, merged_at: null, user: { login: "old" } }]))' >"$ROOT/open-pulls.json"
   DRAIN_RATCHET_GH="$ROOT/fake-gh" node "$S" --repo o/r --now "$NOW" --config "$CFG" --json-out "$ROOT/live-old.json" >/dev/null 2>&1
   expect "an open PR untouched for the whole lookback is counted" "$ROOT/live-old.json" "r.openPrAge.count - $before" "1"
+
+  fi
 
   echo "# workflow: write scope only where enforce can use it"
   if node -e '
@@ -390,8 +393,12 @@ REAL_FAIL=$FAIL
 # Each mutant breaks one rule in a copy of the sensor. The suite must fail on it.
 echo "# mutation teeth"
 MUTANTS=""
-mutate_kind() { # mutate_kind NAME KIND(sensor|config|workflow) OLD NEW
-  local dir="$ROOT/mut-$1" src
+MUTANT_COUNT=0
+MUTANT_BATCH=${DRAIN_RATCHET_MUTANT_BATCH:-9}
+mutate_kind() { # mutate_kind NAME KIND(sensor|config|workflow) OLD NEW [live]
+  local dir="$ROOT/mut-$1" src skip_live=1
+  # Only mutants of the live (stubbed gh) path need that slow section; the rest skip it.
+  if [[ "${5:-}" == live ]]; then skip_live=""; fi
   mkdir -p "$dir/scripts/lib" "$dir/config" "$dir/wf"
   cp "$REAL_SENSOR" "$dir/scripts/drain-ratchet.mjs"
   cp "$REPO_ROOT/scripts/lib/args.mjs" "$dir/scripts/lib/args.mjs"
@@ -414,10 +421,14 @@ mutate_kind() { # mutate_kind NAME KIND(sensor|config|workflow) OLD NEW
   DRAIN_RATCHET_SENSOR_UNDER_TEST="$dir/scripts/drain-ratchet.mjs" \
     DRAIN_RATCHET_CONFIG_UNDER_TEST="$dir/config/drain-ratchet.v1.json" \
     DRAIN_RATCHET_WORKFLOW_UNDER_TEST="$dir/wf/drain-ratchet.yml" \
-    bash "${BASH_SOURCE[0]}" >"$dir/out.txt" 2>&1 &
+    DRAIN_RATCHET_SKIP_LIVE="$skip_live" nice -n 15 bash "${BASH_SOURCE[0]}" >"$dir/out.txt" 2>&1 &
   MUTANTS="$MUTANTS $1"
+  # At most MUTANT_BATCH at a time and at low priority: other suites in the same run
+  # (wall-timeout) have timing assertions that a CPU stampede breaks.
+  MUTANT_COUNT=$((MUTANT_COUNT + 1))
+  if [[ $((MUTANT_COUNT % MUTANT_BATCH)) -eq 0 ]]; then wait; fi
 }
-mutate() { mutate_kind "$1" sensor "$2" "$3"; }
+mutate() { mutate_kind "$1" sensor "$2" "$3" "${4:-}"; }
 mutate one-window 'const breach = windows.every((w) => w.status === "below");' 'const breach = windows.some((w) => w.status === "below");'
 mutate no-floor 'else if (!floorOk) status = "suppressed-floor";' 'else if (false) status = "suppressed-floor";'
 mutate suspect-window 'Date.parse(c.date) >= Date.parse(dropStart)' 'Date.parse(c.date) >= 0'
@@ -428,11 +439,11 @@ mutate swallow-bad-date 'if (typeof v !== "string" || Number.isNaN(Date.parse(v)
 mutate rounded-comparison '&& cur.drained * baseline.opened * 100 < baseline.drained * cur.opened * (100 - cfg.marginPct);' '&& cur.rate < baseline.rate * (1 - cfg.marginPct / 100);'
 mutate no-author-check ' && cfg.ownerLogins.includes(x.author);' ';'
 mutate no-marker-check 'x.body.includes(MARKER) && cfg.ownerLogins' 'cfg.ownerLogins'
-mutate file-cap-truncates 'if (page > cap) fail(`PR' 'if (page > cap) break; if (false) fail(`PR'
+mutate file-cap-truncates 'if (page > cap) fail(`PR' 'if (page > cap) break; if (false) fail(`PR' live
 mutate first-file-page-only '      files.push(...rows.map((f) => f.filename));
       if (rows.length < PAGE) break;' '      files.push(...rows.map((f) => f.filename));
-      break;'
-mutate no-open-pr-fetch "for (const p of pagedUntil(\`repos/\${repo}/pulls?state=open\`, 0, null)) {" 'for (const p of []) {'
+      break;' live
+mutate no-open-pr-fetch "for (const p of pagedUntil(\`repos/\${repo}/pulls?state=open\`, 0, null)) {" 'for (const p of []) {' live
 mutate close-claims-recovery 'Breach condition no longer met as of ' 'Breach cleared (recovered) as of '
 mutate_kind config-not-logged config 'self-gate|drain-ratchet)' 'self-gate)'
 mutate_kind report-job-writes workflow '      issues: read' '      issues: write'
