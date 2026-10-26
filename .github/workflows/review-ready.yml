@@ -11,7 +11,9 @@
 # A SIGNAL, not a gate: `review-ready` is not a required check. The failure mode of every
 # path below is a MISSING signal (the controller's fallback sweep still finds the head),
 # never a false green. A skip is deliberate and leaves the run green; a failure to emit
-# fails the run so sensor-health notices.
+# fails that run (visible in Actions and in its summary). sensor-health grades only the
+# scheduled heartbeat run of this workflow, not individual emits: a failed emit followed
+# by an unrelated deliberate skip would otherwise hide it.
 #
 # pull_request_target is safe here because nothing from the PR is checked out or
 # executed and the job only reads/writes via the API after re-validating the head.
@@ -26,6 +28,11 @@ on:
   # this event lets the signal fire for the green run it already has.
   pull_request_target:
     types: [ready_for_review]
+  # Liveness only (see the Heartbeat step): the event-driven runs mostly skip on purpose
+  # (pushes to main, drafts, forks, an already-signalled head), so sensor-health cannot read
+  # a failed emit off the latest of them. It grades this daily run instead.
+  schedule:
+    - cron: "17 5 * * *"
 
 permissions: {}
 
@@ -47,6 +54,17 @@ jobs:
       pull-requests: read
       statuses: write
     steps:
+      - name: Heartbeat
+        if: github.event_name == 'schedule'
+        env:
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          # Proves the workflow is enabled and its token can read the API it needs.
+          gh api "repos/${REPO}/actions/runs?per_page=1" --jq '.total_count' > /dev/null \
+            || { echo "::error::review-ready heartbeat: cannot read workflow runs"; exit 1; }
+          echo "- review-ready heartbeat: workflow enabled, token can read runs" >> "$GITHUB_STEP_SUMMARY"
       - name: Emit review-ready
         # The guard lives on the STEP, not the job: a skipped job concludes `skipped`, and
         # sensor-health grades the latest `skipped` run of this workflow as unhealthy after any

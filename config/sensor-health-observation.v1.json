@@ -23,7 +23,7 @@
     {
       "path": ".github/workflows/review-ready.yml",
       "mode": "freshness",
-      "events": ["workflow_run", "pull_request_target"],
+      "events": ["schedule"],
       "windowDays": 2
     },
     {

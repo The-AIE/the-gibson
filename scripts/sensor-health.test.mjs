@@ -204,7 +204,7 @@ function greenCoreHandlers(has_pages, workflows = WFS, { emptyPages = false } = 
           workflow_runs: [
             run({
               id: 400 + id,
-              event: id === 2 || id === 5 || id === 7 ? "schedule" : id === 8 ? "workflow_run" : "dynamic",
+              event: id === 2 || id === 5 || id === 7 || id === 8 ? "schedule" : "dynamic",
               updated_at: "2026-08-30T10:00:00Z",
             }),
           ],
@@ -517,7 +517,7 @@ describe("matrix 10-13 audit integration", () => {
             workflow_runs: [
               run({
                 id: 400 + id,
-                event: id === 2 || id === 5 || id === 7 ? "schedule" : id === 8 ? "workflow_run" : "dynamic",
+                event: id === 2 || id === 5 || id === 7 || id === 8 ? "schedule" : "dynamic",
                 updated_at: "2026-08-30T10:00:00Z",
               }),
             ],
@@ -873,7 +873,7 @@ describe("coordinator gap controls", () => {
             workflow_runs: [
               run({
                 id: 800 + id,
-                event: id === 5 || id === 7 ? "schedule" : id === 8 ? "workflow_run" : "dynamic",
+                event: id === 5 || id === 7 || id === 8 ? "schedule" : "dynamic",
                 updated_at: "2026-08-30T10:00:00Z",
               }),
             ],

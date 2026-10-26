@@ -102,6 +102,9 @@ facts = {
     "job_has_if": "if" in job,
     "step_if": " ".join(str(emit[0].get("if", "")).split()) if len(emit) == 1 else None,
     "emit_steps": len(emit),
+    "schedule": (tr.get("schedule") or None),
+    "heartbeat": [{"if": h.get("if"), "run": h.get("run", "")} for h in job.get("steps") or [] if h.get("name") == "Heartbeat"],
+    "step_names": [s.get("name") for s in job.get("steps") or []],
     "emit_continue_on_error": emit[0].get("continue-on-error") if len(emit) == 1 else None,
     "continue_on_error_steps": sorted(s.get("name", "?") for s in steps_of(wf) if "continue-on-error" in s),
     "continue_on_error_jobs": sorted(n for n, j in jobs.items() if "continue-on-error" in j),
@@ -123,7 +126,19 @@ expect() { # expect JQ-EXPR WANT MESSAGE
 }
 
 echo "# structure: the emitter runs from the default branch, the self-gate holds no write scopes"
-expect '.triggers' '["pull_request_target","workflow_run"]' "triggers are exactly workflow_run and pull_request_target (never pull_request)"
+expect '.triggers' '["pull_request_target","schedule","workflow_run"]' "triggers are exactly workflow_run, pull_request_target and schedule (never pull_request)"
+expect '(.schedule | length)' '1' "one cron entry (the liveness heartbeat sensor-health grades)"
+expect '.step_names' '["Heartbeat","Emit review-ready"]' "steps are exactly Heartbeat then Emit review-ready"
+expect '.heartbeat[0].if' '"github.event_name == '"'"'schedule'"'"'"' "the heartbeat runs on schedule only"
+hb_run=$(jq -r '.heartbeat[0].run' "$FACTS")
+if [[ "$hb_run" == *"gh api"* && "$hb_run" != *"statuses"* && "$hb_run" != *"dispatches"* ]]; then ok "the heartbeat reads the API and writes no status or dispatch"; else bad "heartbeat script: $hb_run"; fi
+cfg=$(python3 - "$REPO_ROOT/config/sensor-health-observation.v1.json" <<'PYC'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(json.dumps([p for p in d["policies"] if p["path"].endswith("/review-ready.yml")]))
+PYC
+)
+if [[ "$cfg" == '[{"path": ".github/workflows/review-ready.yml", "mode": "freshness", "events": ["schedule"], "windowDays": 2}]' ]]; then ok "sensor-health grades review-ready.yml by its scheduled heartbeat only (freshness, events [schedule]), not by the event-driven runs that mostly skip"; else bad "sensor-health policy for review-ready.yml: $cfg"; fi
 expect '.wr_types' '["completed"]' "workflow_run fires on completed only"
 expect '.prt_types' '["ready_for_review"]' "pull_request_target fires on ready_for_review only"
 want_name=$(jq -r '.self_name' "$FACTS")
