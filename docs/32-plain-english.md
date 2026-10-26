@@ -28,8 +28,11 @@ rented. The harness is yours, and it compounds.
 ## The assembly line
 
 Pointed at a project, it runs plan → issues → build → test → review → UX check →
-security → merge → deploy → retro, and stops only at the closed list of human gates (G1–G16; G12 is retired as a stop)
-([AGENTS.md](../AGENTS.md), rationale in [docs/14](14-human-gates.md)), plus owner-taste calls (product, UX, copy, brand, naming), which it ships technically but leaves as a decision item for the owner.
+security → merge → deploy → retro. It pauses for a human only where the contract in
+[AGENTS.md](../AGENTS.md) says so: the human gates G1–G16 (G12 is retired as a stop; rationale
+in [docs/14](14-human-gates.md)), owner-taste calls (product, UX, copy, brand, naming), and
+the audit → dry-run → human-apply sequence for production write paths
+([docs/23](23-delivery-control.md)). `AGENTS.md` is authoritative if this page ever differs.
 
 ## Terms of art
 
@@ -49,8 +52,8 @@ security → merge → deploy → retro, and stops only at the closed list of hu
 
 ## The rules that matter most
 
-1. **Never grade your own homework.** The vendor that wrote a change cannot review it.
-   If one platform wrote it, a different one reviews it. A worker's "PASS" is a claim,
+1. **Never grade your own homework.** By default the vendor that wrote a change does not review it.
+   When available, a different platform reviews it. A worker's "PASS" is a claim,
    not proof; the gate re-run is the proof.
 2. **Failure twice is a harness bug.** The fix is a new guide or sensor, not "try
    harder." Lessons go in [`memory/LESSONS.md`](../memory/LESSONS.md).
@@ -59,9 +62,10 @@ security → merge → deploy → retro, and stops only at the closed list of hu
    repeated failure on the same criterion ([docs/15](15-model-economics.md)).
 4. **One agent, one directory.** Worktree per lane, disjoint file scopes, so agents
    cannot corrupt each other's state ([docs/05](05-concurrency.md)).
-5. **Humans keep the irreversible calls.** The closed list of human gates in AGENTS.md covers what
-   an owner must decide (Tier C changes need cross-vendor review plus required checks, not an owner sign-off), and subjective taste calls always go to the owner as a
-   decision item. Everything else proceeds on independent review plus green gates.
+5. **Humans keep the irreversible calls.** What an owner must decide is defined in
+   `AGENTS.md` (human gates, taste calls, production write paths). Elsewhere, work proceeds
+   on independent review plus green gates, and Tier C changes need cross-vendor review
+   plus required checks rather than an owner sign-off.
 
 ## Where it stands
 
