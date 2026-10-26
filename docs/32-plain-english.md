@@ -13,7 +13,7 @@ nav_order: 32
 > matter which crew did it.
 
 This page is the five-minute version for someone who has never seen the repo. The
-full guide is [HOW-IT-WORKS.md](../HOW-IT-WORKS.md); every term below is also in the
+full guide is [HOW-IT-WORKS.md](../HOW-IT-WORKS.md); most terms below are also in the
 [glossary](00-glossary.md).
 
 ## The big idea
@@ -28,7 +28,7 @@ rented. The harness is yours, and it compounds.
 ## The assembly line
 
 Pointed at a project, it runs plan → issues → build → test → review → UX check →
-security → merge → deploy → retro, and stops only at the 16 listed human gates
+security → merge → deploy → retro, and stops only at the closed list of human gates (G1–G16; G12 is retired as a stop)
 ([AGENTS.md](../AGENTS.md), rationale in [docs/14](14-human-gates.md)), plus owner-taste calls (product, UX, copy, brand, naming), which it ships technically but leaves as a decision item for the owner.
 
 ## Terms of art
@@ -59,8 +59,8 @@ security → merge → deploy → retro, and stops only at the 16 listed human g
    repeated failure on the same criterion ([docs/15](15-model-economics.md)).
 4. **One agent, one directory.** Worktree per lane, disjoint file scopes, so agents
    cannot corrupt each other's state ([docs/05](05-concurrency.md)).
-5. **Humans keep the irreversible calls.** The closed list of human gates covers what
-   an owner must decide, and subjective taste calls always go to the owner as a
+5. **Humans keep the irreversible calls.** The closed list of human gates in AGENTS.md covers what
+   an owner must decide (Tier C changes need cross-vendor review plus required checks, not an owner sign-off), and subjective taste calls always go to the owner as a
    decision item. Everything else proceeds on independent review plus green gates.
 
 ## Where it stands
