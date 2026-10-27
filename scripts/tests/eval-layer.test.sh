@@ -256,6 +256,8 @@ has "$smoke" 'jq -rj .input' && has "$smoke" '--min-pass-rate 1' && ok "smoke us
 has "$wf" "cron:" && ok "weekly schedule present (keeps sensor-health freshness truthful)" || bad "schedule cron"
 reg=$(<"$REPO/config/sensor-health-observation.v1.json")
 has "$reg" '.github/workflows/eval-gate.yml' && ok "sensor-health inventory lists the workflow" || bad "sensor inventory row"
+row=${reg#*eval-gate.yml}; row=${row%%\}*}
+has "$row" '"schedule"' && ! has "$row" 'workflow_dispatch' && ok "sensor row watches schedule only (a failed manual run must not turn the sensor red)" || bad "sensor row events"
 # Execute the smoke commands exactly as the workflow does (no network, no model).
 SM="$ROOT/smoke"
 node "$S/eval-dataset-lint.mjs" --file "$REPO/evals/smoke.v1.jsonl" --min 1 --max 10 >/dev/null 2>&1 && ok "smoke dataset lints" || bad "smoke lint"

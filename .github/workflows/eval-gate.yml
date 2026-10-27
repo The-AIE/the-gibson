@@ -8,7 +8,9 @@ name: gibson-eval-gate
 #   * weekly schedule, or workflow_dispatch with an empty `runner`: a deterministic SMOKE
 #     run of the eval layer itself. It echoes a fixed 3-case dataset (evals/smoke.v1.jsonl)
 #     through `jq`, so there are no model calls, no spend and no secrets. It exists so this
-#     standing workflow has a recent green run and stays truthful in sensor-health.
+#     standing workflow has a recent green scheduled run and stays truthful in sensor-health.
+#     sensor-health watches the `schedule` event only: a manual run that misses its
+#     threshold fails by design and must not turn the standing sensor red.
 #
 # Langfuse shipping is optional and only the real run gets the keys: set repo secrets
 # LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY (and LANGFUSE_HOST for non-cloud).

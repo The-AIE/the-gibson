@@ -69,7 +69,7 @@ The scripts post to Langfuse's REST ingestion endpoint with Basic auth. A remote
 
 ## CI
 
-`.github/workflows/eval-gate.yml` is the opt-in job: manual `workflow_dispatch` with your `runner` command runs the real dataset and gates on the pass rate; it is never a required check. A weekly scheduled run (and a dispatch with an empty `runner`) executes a deterministic smoke test of the eval layer itself (`evals/smoke.v1.jsonl` echoed through `jq`, no model calls, no secrets) so the standing workflow keeps a recent green run and stays truthful in sensor-health. Promote the real run to a deployment gate once a dataset has earned a threshold you believe. Per the Gibson rules, that promotion is its own change.
+`.github/workflows/eval-gate.yml` is the opt-in job: manual `workflow_dispatch` with your `runner` command runs the real dataset and gates on the pass rate; it is never a required check. A weekly scheduled run (and a dispatch with an empty `runner`) executes a deterministic smoke test of the eval layer itself (`evals/smoke.v1.jsonl` echoed through `jq`, no model calls, no secrets) so the standing workflow keeps a recent green scheduled run and stays truthful in sensor-health (which watches the `schedule` event only, so a manual run that misses its threshold fails by design without turning the sensor red). Promote the real run to a deployment gate once a dataset has earned a threshold you believe. Per the Gibson rules, that promotion is its own change.
 
 ## What is deliberately not here
 

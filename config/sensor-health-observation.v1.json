@@ -23,7 +23,7 @@
     {
       "path": ".github/workflows/eval-gate.yml",
       "mode": "freshness",
-      "events": ["schedule", "workflow_dispatch"],
+      "events": ["schedule"],
       "windowDays": 8
     },
     {
