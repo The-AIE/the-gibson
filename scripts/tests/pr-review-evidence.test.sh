@@ -246,21 +246,45 @@ grep -qE -- '--jq[[:space:]]+--arg' "$WF" && bad "gh api --jq given jq flags" ||
 extract() { awk -v s="$1" 'NR>=s && /run: \|/{f=1;next} f && /^      - (name:|uses:|if:)/{exit} f{sub(/^          /,""); print}' "$WF"; }
 extract "$pend" > "$ROOT/pending.sh"; extract "$pub" > "$ROOT/publish.sh"
 WD="$ROOT/wd"; mkdir -p "$WD"
-# gh stub: list open PRs from $GH_LIST (or fail if GH_LIST_FAIL), answer pulls/N with $GH_FP
-# (the publish-time freshness fingerprint), capture POSTs as "sha state" lines.
+# gh stub: list open PRs from $GH_LIST (or fail if GH_LIST_FAIL), answer pulls/N
+# fingerprint queries with $GH_FP, and answer the live state|merged_at query
+# (#482) from $GH_PR_STATES. GH_PR_STATE_FAIL=1 makes that read fail. Capture
+# POSTs as "sha state" lines.
 cat > "$ROOT/bin/gh" <<'GHSTUB'
 #!/bin/sh
 case "$*" in
   *"--method POST"*) sha=""; st=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; esac; done; echo "$sha $st" >> "$GH_LOG" ;;
   *"pulls?state=open"*) [ "${GH_LIST_FAIL:-}" = "1" ] && exit 22; printf '%s\n' "$GH_LIST" ;;
-  *"/pulls/"*) printf '%s' "${GH_FP:-unavailable}" ;;
+  *"/pulls/"*)
+    case "$*" in
+      *merged_at*)
+        # Live PR state for publish()'s closed/merged skip (#482). Map entries
+        # are "N=state|merged_at", space-separated. Unknown numbers are open.
+        [ "${GH_PR_STATE_FAIL:-}" = "1" ] && exit 22
+        pr=""
+        for a in "$@"; do
+          case "$a" in
+            repos/*/pulls/*) pr=${a##*/} ;;
+          esac
+        done
+        found=""
+        for ent in ${GH_PR_STATES:-1=open| 2=open|}; do
+          case "$ent" in
+            "$pr"=*) found=${ent#*=} ;;
+          esac
+        done
+        if [ -n "$found" ]; then printf '%s' "$found"; else printf '%s' 'open|'; fi
+        ;;
+      *) printf '%s' "${GH_FP:-unavailable}" ;;
+    esac
+    ;;
   *) echo "stub: unexpected gh $*" >&2; exit 9 ;;
 esac
 GHSTUB
 chmod +x "$ROOT/bin/gh"
 FP='2026-09-04T12:00:00Z|h|b|3|0|2'
 H2=cccccccccccccccccccccccccccccccccccccccc
-envrun() { ( cd "$WD" && RUNNER_TEMP="$WD" GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t PATH="$ROOT/bin:$PATH" "$@" ); }
+envrun() { ( cd "$WD" && RUNNER_TEMP="$WD" GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t GH_PR_STATES="${GH_PR_STATES:-1=open| 2=open|}" PATH="$ROOT/bin:$PATH" "$@" ); }
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 1 ] && grep -q "^$HEAD pending" "$ROOT/gh.log" && [ "$(wc -l < "$WD/heads.txt" | tr -d ' ')" -eq 2 ] && ok "pending step: stamps pending ONLY on the event head (2 heads listed, 1 stamped — churn cap)" || bad "pending step: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
@@ -325,7 +349,29 @@ cat > "$ROOT/bin/gh" <<'GHSTUB'
 case "$*" in
   *"--method POST"*) sha=""; st=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; esac; done; echo "$sha $st" >> "$GH_LOG" ;;
   *"pulls?state=open"*) printf '%s\n' "$GH_LIST" ;;
-  *"/pulls/"*) printf '%s' "${GH_FP:-unavailable}" ;;
+  *"/pulls/"*)
+    case "$*" in
+      *merged_at*)
+        # Live PR state for publish()'s closed/merged skip (#482). Map entries
+        # are "N=state|merged_at", space-separated. Unknown numbers are open.
+        [ "${GH_PR_STATE_FAIL:-}" = "1" ] && exit 22
+        pr=""
+        for a in "$@"; do
+          case "$a" in
+            repos/*/pulls/*) pr=${a##*/} ;;
+          esac
+        done
+        found=""
+        for ent in ${GH_PR_STATES:-1=open| 2=open|}; do
+          case "$ent" in
+            "$pr"=*) found=${ent#*=} ;;
+          esac
+        done
+        if [ -n "$found" ]; then printf '%s' "$found"; else printf '%s' 'open|'; fi
+        ;;
+      *) printf '%s' "${GH_FP:-unavailable}" ;;
+    esac
+    ;;
   *) echo "stub: unexpected gh $*" >&2; exit 9 ;;
 esac
 GHSTUB
@@ -351,7 +397,29 @@ case "$*" in
   *"--method POST"*) [ "${GH_POST_FAIL:-}" = "1" ] && { echo "HTTP 422: too many statuses" >&2; exit 22; }; sha=""; st=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; esac; done; echo "$sha $st" >> "$GH_LOG" ;;
   *"pulls?state=open"*) [ "${GH_LIST_FAIL:-}" = "1" ] && exit 22; printf '%s\n' "$GH_LIST" ;;
   *"/commits/"*"/status"*) [ "${GH_GET_FAIL:-}" = "1" ] && { echo "HTTP 502: bad gateway" >&2; exit 22; }; printf '%s\n' "${GH_CUR:-}" ;;
-  *"/pulls/"*) printf '%s' "${GH_FP:-unavailable}" ;;
+  *"/pulls/"*)
+    case "$*" in
+      *merged_at*)
+        # Live PR state for publish()'s closed/merged skip (#482). Map entries
+        # are "N=state|merged_at", space-separated. Unknown numbers are open.
+        [ "${GH_PR_STATE_FAIL:-}" = "1" ] && exit 22
+        pr=""
+        for a in "$@"; do
+          case "$a" in
+            repos/*/pulls/*) pr=${a##*/} ;;
+          esac
+        done
+        found=""
+        for ent in ${GH_PR_STATES:-1=open| 2=open|}; do
+          case "$ent" in
+            "$pr"=*) found=${ent#*=} ;;
+          esac
+        done
+        if [ -n "$found" ]; then printf '%s' "$found"; else printf '%s' 'open|'; fi
+        ;;
+      *) printf '%s' "${GH_FP:-unavailable}" ;;
+    esac
+    ;;
   *) echo "stub: unexpected gh $*" >&2; exit 9 ;;
 esac
 GHSTUB
@@ -975,6 +1043,95 @@ if awk '
   ok "#482: EVENT_ACTION is set on the job env and not repeated on the publish step"
 else
   bad "#482: EVENT_ACTION job-env placement"
+fi
+
+echo "# #482 round 2 — a non-closed sweep does not publish after the PR merges"
+# Codex: a schedule or comment sweep can POST pending or failure after a PR
+# merges, while the concurrent closed-event run exits without repairing the
+# head. publish() re-reads that row's own PR and skips the write.
+MERGED_AT="1=closed|2026-10-27T12:00:00Z"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
+: > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION='' \
+  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && grep -q "PR #1 is merged/closed; review-evidence writes no status on it (#482)" "$ROOT/summary"; then
+  ok "#482: schedule, no verdict, live PR merged → no write on the head"
+else
+  bad "#482: schedule merged no-verdict: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
+printf '{"number":1,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n' "$HEAD" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION=created \
+  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && grep -q "PR #1 is merged/closed; review-evidence writes no status on it (#482)" "$ROOT/summary" \
+  && ! grep -q "failed closed" "$ROOT/pub.out"; then
+  ok "#482: comment sweep, failure verdict, live PR merged → no write and not event_fail"
+else
+  bad "#482: comment merged failure: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") out=$(tr '\n' ' ' < "$ROOT/pub.out")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
+: > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION='' \
+  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "^$HEAD failure$" "$ROOT/gh.log" \
+  && ! grep -q "PR #1 is merged/closed" "$ROOT/summary"; then
+  ok "#482: schedule, no verdict, live PR open → failure written (fail closed)"
+else
+  bad "#482: schedule open no-verdict: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
+: > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATE_FAIL=1 GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION='' \
+  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "^$HEAD failure$" "$ROOT/gh.log" \
+  && ! grep -q "PR #1 is merged/closed" "$ROOT/summary"; then
+  ok "#482: schedule, no verdict, live state read fails → failure written (unknown stays fail closed)"
+else
+  bad "#482: schedule state-read fail: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n2 %s\n' "$HEAD" "$HEAD" > "$WD/heads.txt"
+printf '{"number":1,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n{"number":2,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$HEAD" "$FP" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="$MERGED_AT 2=open|" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION='' \
+  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ "$(grep -c "^$HEAD " "$ROOT/gh.log")" -eq 1 ] \
+  && grep -q "^$HEAD success$" "$ROOT/gh.log" \
+  && grep -q "PR #1 is merged/closed; review-evidence writes no status on it (#482)" "$ROOT/summary" \
+  && grep -q "^- PR 2 @ ${HEAD:0:7}: \`success\`" "$ROOT/summary" \
+  && ! grep -q "PR #2 is merged/closed" "$ROOT/summary"; then
+  ok "#482: shared head — merged PR 1 skipped, open PR 2's verdict written"
+else
+  bad "#482: shared head: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
 fi
 
 echo
