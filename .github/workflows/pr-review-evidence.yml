@@ -42,16 +42,18 @@ on:
 
 permissions: {}
 
-# gibson:stateful-ci — runs are SERIALIZED repo-wide and never cancelled.
-# The published result is keyed by commit SHA, but comment events carry no
-# SHA, so runs cannot be grouped by head, and per-PR groups let two PRs
-# sharing a head race (Codex round 3). One queue plus a full sweep means the
-# last publish is always computed from the latest state. No cancel-in-progress:
-# a cancelled run publishes nothing, and a skipped run would still cancel a
-# live one (Codex round 1). GitHub may still REPLACE a queued run with a newer
-# one (Codex round 4); the sweep makes that harmless.
+# gibson:stateful-ci — non-closed runs are SERIALIZED repo-wide and never
+# cancelled. The published result is keyed by commit SHA, but comment events
+# carry no SHA, so runs cannot be grouped by head, and per-PR groups let two
+# PRs sharing a head race (Codex round 3). One queue plus a full sweep means
+# the last publish is always computed from the latest state. No
+# cancel-in-progress: a cancelled run publishes nothing, and a skipped run
+# would still cancel a live one (Codex round 1). GitHub may still REPLACE a
+# queued run with a newer one (Codex round 4); the sweep makes that harmless.
+# #482: a closed run writes nothing, so it is excluded from the serialized
+# group to avoid displacing a queued evaluation run.
 concurrency:
-  group: pr-review-evidence-serialized
+  group: ${{ github.event.action == 'closed' && format('pr-review-evidence-closed-{0}', github.run_id) || 'pr-review-evidence-serialized' }}
   cancel-in-progress: false
 
 jobs:
@@ -80,6 +82,13 @@ jobs:
       # red when THIS event's PR fails, so the check is visible on that PR.
       EVENT_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
       EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # #482 / #567. A merge fires pull_request_target closed. The sweep lists
+      # only open PRs, so publishing a status on that head overwrote the
+      # success that had cleared the merge. Closed events write nothing on
+      # any head. A reopened pull request is evaluated by its own reopened
+      # event. Other open PRs are refreshed by their next event or the hourly
+      # sweep.
+      EVENT_ACTION: ${{ github.event.action }}
     steps:
       - name: Stamp pending on every open PR head (FIRST, before any checkout)
         id: heads
@@ -92,6 +101,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
+          if [ "${EVENT_ACTION:-}" = "closed" ]; then
+            : > "$RUNNER_TEMP/heads.txt"
+            echo "::notice::closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event"
+            echo "- closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           listed=0
           if gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
               --jq '.[] | "\(.number) \(.head.sha)"' > "$RUNNER_TEMP/heads.txt"; then
@@ -166,13 +181,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANCELLED: ${{ job.status == 'cancelled' }}
-          EVENT_ACTION: ${{ github.event.action }}
           # continue-on-error turns the pending step's failure green; read its
           # real outcome here so a failed pending stamp makes the job red
           # (Codex round 8, finding 2).
           HEADS_OUTCOME: ${{ steps.heads.outcome }}
         run: |
           set -uo pipefail
+          if [ "${EVENT_ACTION:-}" = "closed" ]; then
+            echo "::notice::closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event"
+            echo "- closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           post_fail=0
           if [ "${HEADS_OUTCOME:-}" = "failure" ]; then
             post_fail=1
@@ -330,6 +349,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
+          if [ "${EVENT_ACTION:-}" = "closed" ]; then
+            echo "::notice::closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event"
+            echo "- closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if ! [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "no event head to correct (scheduled or comment event)"
             exit 0

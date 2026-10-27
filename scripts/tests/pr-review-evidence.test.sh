@@ -229,7 +229,7 @@ echo "# AC1 — workflow: sweep design (static + executed steps with gh stubbed)
 [ -f "$WF" ] && ok "workflow file present" || bad "workflow missing"
 grep -q '^permissions: {}' "$WF" && ok "workflow-level permissions: {}" || bad "no workflow-level permissions: {}"
 grep -q 'gibson:approved-pr-target 308' "$WF" && ok "pull_request_target waiver present" || bad "pull_request_target waiver missing"
-grep -q 'gibson:stateful-ci' "$WF" && grep -q 'group: pr-review-evidence-serialized' "$WF" && grep -q 'cancel-in-progress: false' "$WF" && ok "runs serialized repo-wide, never cancelled (stateful-ci)" || bad "concurrency is not a single non-cancelling queue"
+grep -q 'gibson:stateful-ci' "$WF" && grep -qF "format('pr-review-evidence-closed-{0}', github.run_id)" "$WF" && grep -qF "|| 'pr-review-evidence-serialized'" "$WF" && grep -q 'cancel-in-progress: false' "$WF" && ok "non-closed events use pr-review-evidence-serialized; closed runs use a run-id group; cancel-in-progress is false (stateful-ci)" || bad "concurrency is not a non-cancelling queue for non-closed events"
 grep -q 'cancel-in-progress: true' "$WF" && bad "cancel-in-progress: true present" || ok "no cancel-in-progress: true"
 grep -qE 'types: \[.*closed.*\]' "$WF" && ok "closed is a trigger (sibling recovers via the next sweep)" || bad "closed missing from pull_request_target types"
 grep -q -- '--sweep' "$WF" && ok "workflow runs the sweep" || bad "workflow does not run --sweep"
@@ -281,23 +281,23 @@ GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false ba
 rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: sweep never ran → failure on EVERY stamped head, never a stale success" || bad "publish no-results: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-# an empty sweep that completed (rc 0) with nothing stamped is "no open PRs": the expected
-# state after a merge, on the hourly schedule, or on a comment with an empty queue
+# #482: a closed event returns before publish. An empty completed sweep with
+# nothing stamped is still "no open PRs" for the schedule / comment case below.
 rm -f "$WD/results.jsonl"; : > "$WD/results.jsonl"; : > "$WD/heads.txt"; printf '0' > "$WD/sweep.rc"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=closed bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && grep -q "nothing to sweep" "$ROOT/summary" && ok "publish: completed empty sweep with no heads exits 0 (closed event)" || bad "publish empty-sweep closed: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+[ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && grep -q "writes no status on closed/merged PRs" "$ROOT/summary" && ok "publish: closed event writes nothing and exits 0 (empty sweep; #482 notice, not a publish)" || bad "publish empty-sweep closed: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER= EVENT_HEAD_SHA= CANCELLED=false EVENT_ACTION= bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && ok "publish: completed empty sweep with no heads exits 0 (schedule / comment with an empty queue)" || bad "publish empty-sweep schedule: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 printf '1' > "$WD/sweep.rc"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=closed bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && ok "publish: an empty result from a sweep that exited non-zero still fails closed" || bad "publish empty-sweep crashed: rc=$rc"
 rm -f "$WD/sweep.rc" "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && ok "publish: a sweep that never ran (no rc file) with no heads still fails closed" || bad "publish no-rc-file: rc=$rc"
 printf '1 %s\n2 %s\n' "$HEAD" "$H2" > "$WD/heads.txt"   # restore the two stamped heads for the cases below
 rm -f "$WD/results.jsonl"; : > "$WD/results.jsonl"; printf '0' > "$WD/sweep.rc"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=closed bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 rm -f "$WD/sweep.rc"
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: an empty completed sweep WITH stamped heads still fails closed on every head (Codex review of #462)" || bad "publish closed-with-heads: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 printf '{"number":null,"headSha":"","state":"failure","reason":"api-error","detail":"listing"}\n' > "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
@@ -796,6 +796,186 @@ for spec in 'i.roles=["author","reviewer"]' 'i.appId=null' 'i.appSlug=null' 'c.a
 done
 d=$(fx_new og13); fx_commits "$d" "$GROK"; fx_files "$d" docs/guide.md; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-10-05T11:00:00Z|$(printf '<!-- owner-attested-review:v1\\nhead-sha: %s\\nreviewer-vendor: independent\\nresult: pass\\n-->' "$HEAD")"
 expect "(og13) the owner cannot countersign as the independent vendor" "$d" no-receipt-at-head pending 0
+
+echo "# #482 — a closed event writes no status on any head; reopened evaluates the live head"
+# The step cannot see merged vs unmerged (no such input) and must not try.
+# Both cases feed the same closed event: two listed heads, verdicts for both.
+closed_event_writes_nothing() {
+  label=$1
+  : > "$ROOT/gh.log"; : > "$ROOT/summary"
+  GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" \
+    envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD \
+    bash "$ROOT/pending.sh" >/dev/null 2>&1
+  prc=$?
+  printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n{"number":2,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n' "$HEAD" "$FP" "$H2" > "$WD/results.jsonl"
+  printf '0' > "$WD/sweep.rc"
+  envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false \
+    bash "$ROOT/publish.sh" >/dev/null 2>&1
+  pubrc=$?
+  if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+    && [ -f "$WD/heads.txt" ] && [ ! -s "$WD/heads.txt" ] \
+    && grep -q "writes no status on closed/merged PRs" "$ROOT/summary"; then
+    ok "$label"
+  else
+    bad "$label: pending_rc=$prc publish_rc=$pubrc heads=$(wc -c < "$WD/heads.txt" | tr -d ' ') log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+  fi
+}
+closed_event_writes_nothing "#482: closed+merged writes no status on any head (pending and publish rc 0)"
+closed_event_writes_nothing "#482: closed+unmerged writes no status on any head (step cannot tell merged from unmerged)"
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_CUR="pending|IN PROGRESS: re-evaluating review evidence for PR 1" \
+  envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD \
+  bash "$ROOT/recover.sh" >/dev/null 2>&1
+rec_rc=$?
+if [ "$rec_rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && grep -q "writes no status on closed/merged PRs" "$ROOT/summary"; then
+  ok "#482: closed event crash-error step does not POST over a pending status"
+else
+  bad "#482: crash-error closed: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST="$(printf '1 %s\n' "$HEAD")" \
+  envrun env EVENT_ACTION=reopened EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD IS_SCHEDULE=false \
+  bash "$ROOT/pending.sh" >/dev/null 2>&1
+prc=$?
+if [ "$prc" -eq 0 ] && grep -q "^$HEAD pending$" "$ROOT/gh.log" && grep -q "^1 $HEAD$" "$WD/heads.txt"; then
+  ok "#482: reopened event stamps pending on the live head"
+else
+  bad "#482: reopened pending: rc=$prc log=$(tr '\n' ' ' < "$ROOT/gh.log") heads=$(tr '\n' ' ' < "$WD/heads.txt")"
+fi
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_FP="$FP" envrun env EVENT_ACTION=reopened EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false \
+  bash "$ROOT/publish.sh" >/dev/null 2>&1
+pubrc=$?
+if [ "$pubrc" -eq 0 ] && grep -q "^$HEAD success$" "$ROOT/gh.log" \
+  && grep -q "^- PR 1 @ ${HEAD:0:7}: \`success\`" "$ROOT/summary"; then
+  ok "#482: reopened event publishes the verdict on the live head"
+else
+  bad "#482: reopened publish: rc=$pubrc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+fi
+
+echo "# #482 — closed runs stay out of the serialized queue"
+# GitHub's \${{ }} evaluator does not run locally. The group line is parsed
+# and the same && / || rule is applied: action == 'closed' yields
+# format('pr-review-evidence-closed-{0}', run_id), which is unique per run
+# and is not the serialized group; every other action yields
+# 'pr-review-evidence-serialized'. cancel-in-progress stays false, so a
+# closed run can neither sit in that queue nor replace a run that is queued
+# there. A closed run still writes no status (the early exits above).
+conc_group=$(awk '
+  $0 == "concurrency:" { c = 1; next }
+  c && /^[^ ]/ { exit }
+  c && /^  group: / { sub(/^  group: /, ""); print; exit }
+' "$WF")
+conc_cancel=$(awk '
+  $0 == "concurrency:" { c = 1; next }
+  c && /^[^ ]/ { exit }
+  c && /^  cancel-in-progress: / { sub(/^  cancel-in-progress: /, ""); print; exit }
+' "$WF")
+conc_inner=$(printf '%s\n' "$conc_group" | sed -n 's/^\${{ \(.*\) }}$/\1/p')
+conc_parse=$(printf '%s\n' "$conc_inner" | sed -n "s/^github\\.event\\.action == '\\([^']*\\)' && format('\\([^']*\\)', github\\.run_id) || '\\([^']*\\)'$/\\1 \\2 \\3/p")
+read -r conc_closed conc_fmt conc_other <<EOF
+${conc_parse:-}
+EOF
+conc_closed=${conc_closed:-}
+conc_fmt=${conc_fmt:-}
+conc_other=${conc_other:-}
+apply_conc() {
+  if [ "$1" = "$conc_closed" ]; then
+    printf '%s\n' "${conc_fmt//\{0\}/$2}"
+  else
+    printf '%s\n' "$conc_other"
+  fi
+}
+g_closed=$(apply_conc closed 9001)
+g_closed_b=$(apply_conc closed 9002)
+g_reopened=$(apply_conc reopened 9001)
+g_edited=$(apply_conc edited 9001)
+g_sync=$(apply_conc synchronize 9001)
+if [ "$conc_cancel" = "false" ] \
+  && [ "$conc_closed" = "closed" ] \
+  && [ "$conc_fmt" = "pr-review-evidence-closed-{0}" ] \
+  && [ "$conc_other" = "pr-review-evidence-serialized" ] \
+  && [ "$g_closed" = "pr-review-evidence-closed-9001" ] \
+  && [ "$g_closed" != "$g_closed_b" ] \
+  && [ "$g_closed" != "$conc_other" ] \
+  && [ "$g_reopened" = "pr-review-evidence-serialized" ] \
+  && [ "$g_edited" = "pr-review-evidence-serialized" ] \
+  && [ "$g_sync" = "pr-review-evidence-serialized" ]; then
+  ok "#482: a closed run cannot displace a queued reopened/edited/synchronize run (separate concurrency group)"
+else
+  bad "#482: concurrency group: cancel=${conc_cancel:-?} closed=${conc_closed:-?} fmt=${conc_fmt:-?} other=${conc_other:-?} expr=${conc_group:-?} → closed=$g_closed reopened=$g_reopened edited=$g_edited sync=$g_sync"
+fi
+
+# Same workdir: a reopened run writes the verdict, then a closed run for the
+# same PR writes nothing after it. The last status on $HEAD stays that verdict.
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST=$(printf '1 %s' "$HEAD") \
+  envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL \
+    EVENT_ACTION=reopened EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false \
+    bash "$ROOT/pending.sh" >/dev/null 2>&1
+prc=$?
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+GH_FP="$FP" GH_CUR="" \
+  envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL \
+    EVENT_ACTION=reopened EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false CANCELLED=false \
+    bash "$ROOT/publish.sh" >/dev/null 2>&1
+pubrc=$?
+cp "$ROOT/gh.log" "$ROOT/gh.log.reopened"
+last_write=$(awk -v h="$HEAD" '$1 == h { last = $0 } END { print last }' "$ROOT/gh.log")
+envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL \
+  EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false \
+  bash "$ROOT/pending.sh" >/dev/null 2>&1
+crc=$?
+envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL \
+  EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false CANCELLED=false \
+  bash "$ROOT/publish.sh" >/dev/null 2>&1
+cpub=$?
+if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] && [ "$crc" -eq 0 ] && [ "$cpub" -eq 0 ] \
+  && [ "$last_write" = "$HEAD success" ] \
+  && cmp -s "$ROOT/gh.log" "$ROOT/gh.log.reopened"; then
+  ok "#482: a closed run after a reopened run leaves the reopened verdict as the last write on the head"
+else
+  bad "#482: closed-after-reopened: pending_rc=$prc publish_rc=$pubrc closed_pending_rc=$crc closed_publish_rc=$cpub last=${last_write:-?} log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+fi
+
+# Static: the guard is the first statement after set -uo pipefail in all three
+# status-writing steps, and it exits before any gh call.
+closed_guard_first() {
+  awk '
+    $0 == "set -uo pipefail" { setline = NR; next }
+    setline && NR == setline + 1 && $0 == "if [ \"${EVENT_ACTION:-}\" = \"closed\" ]; then" { found = 1 }
+    found && !exited && index($0, "::notice::closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event") { notice = 1 }
+    found && !exited && index($0, ">> \"$GITHUB_STEP_SUMMARY\"") { summary = 1 }
+    found && !exited && $0 ~ /^[[:space:]]*exit 0$/ { exited = 1; next }
+    found && !exited && $0 ~ /(^|[[:space:]])gh[[:space:]]/ { gh_in_guard = 1 }
+    END { exit (found && notice && summary && exited && !gh_in_guard) ? 0 : 1 }
+  ' "$1"
+}
+for pair in "pending|$ROOT/pending.sh" "publish|$ROOT/publish.sh" "crash-error|$ROOT/recover.sh"; do
+  name=${pair%%|*}
+  body=${pair#*|}
+  if closed_guard_first "$body"; then
+    ok "#482: closed early-exit is first in the $name step body"
+  else
+    bad "#482: closed early-exit missing or not first in $name ($body)"
+  fi
+done
+if awk '
+  /^    env:$/ { injob = 1; next }
+  injob && /^    steps:$/ { injob = 0 }
+  injob && /^      EVENT_ACTION:/ { found = 1 }
+  /^          EVENT_ACTION:/ { step = 1 }
+  END { exit (found && !step) ? 0 : 1 }
+' "$WF"; then
+  ok "#482: EVENT_ACTION is set on the job env and not repeated on the publish step"
+else
+  bad "#482: EVENT_ACTION job-env placement"
+fi
 
 echo
 echo "pr-review-evidence.test.sh: $PASS passed, $FAIL failed"
