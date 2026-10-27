@@ -121,10 +121,24 @@ jobs:
             echo "::notice::could not list open pull requests; publish will fail closed on the event head"
             echo "- open-PR listing failed; falling back to the event head" >> "$GITHUB_STEP_SUMMARY"
           fi
-          # #482: a stale open listing right after a merge can still name the closed PR.
+          # #482: a stale open listing can still name the just-closed PR.
+          # Re-read that PR before dropping the row. A close, then a reopen
+          # before this listing, leaves it open; dropping the row would omit
+          # the reopened head, and EVENT_HEAD_SHA is already cleared so this
+          # run will not stamp it pending. The live re-read decides. Drop by
+          # number (not SHA) only when the read succeeds and the PR is not
+          # open (closed, or merged_at set). A failed GET keeps the row.
           if [[ "${CLOSED_PR:-}" =~ ^[1-9][0-9]*$ ]]; then
-            grep -v "^${CLOSED_PR} " "$RUNNER_TEMP/heads.txt" > "$RUNNER_TEMP/heads.keep" || true
-            mv "$RUNNER_TEMP/heads.keep" "$RUNNER_TEMP/heads.txt"
+            if live=$(gh api "repos/$GH_REPO/pulls/$CLOSED_PR" --jq '"\(.state)|\(.merged_at // "")"'); then
+              live_state=${live%%|*}
+              live_merged=${live#*|}
+              if [ "$live_state" != "open" ] || [ -n "$live_merged" ]; then
+                grep -v "^${CLOSED_PR} " "$RUNNER_TEMP/heads.txt" > "$RUNNER_TEMP/heads.keep" || true
+                mv "$RUNNER_TEMP/heads.keep" "$RUNNER_TEMP/heads.txt"
+              fi
+            else
+              echo "::notice::could not re-read PR #${CLOSED_PR}; keeping its head (fail closed, #482)"
+            fi
           fi
           # The event's own head joins the set (Codex round 5, finding 3): a
           # PR (re)opened between this listing and the sweep, or omitted by a

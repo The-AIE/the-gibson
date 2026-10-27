@@ -246,14 +246,19 @@ grep -qE -- '--jq[[:space:]]+--arg' "$WF" && bad "gh api --jq given jq flags" ||
 extract() { awk -v s="$1" 'NR>=s && /run: \|/{f=1;next} f && /^      - (name:|uses:|if:)/{exit} f{sub(/^          /,""); print}' "$WF"; }
 extract "$pend" > "$ROOT/pending.sh"; extract "$pub" > "$ROOT/publish.sh"
 WD="$ROOT/wd"; mkdir -p "$WD"
-# gh stub: list open PRs from $GH_LIST (or fail if GH_LIST_FAIL), answer pulls/N with $GH_FP
-# (the publish-time freshness fingerprint), capture POSTs as "sha state" lines.
+# gh stub: list open PRs from $GH_LIST (or fail if GH_LIST_FAIL). pulls/N
+# echoes $GH_PR_STATE for the pending-step live re-read (state|merged_at),
+# exits nonzero when GH_PR_STATE_FAIL=1, and otherwise answers with $GH_FP
+# (the publish-time freshness fingerprint). POSTs are "sha state" lines.
 cat > "$ROOT/bin/gh" <<'GHSTUB'
 #!/bin/sh
 case "$*" in
   *"--method POST"*) sha=""; st=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; esac; done; echo "$sha $st" >> "$GH_LOG" ;;
   *"pulls?state=open"*) [ "${GH_LIST_FAIL:-}" = "1" ] && exit 22; printf '%s\n' "$GH_LIST" ;;
-  *"/pulls/"*) printf '%s' "${GH_FP:-unavailable}" ;;
+  *"/pulls/"*)
+    [ "${GH_PR_STATE_FAIL:-}" = "1" ] && { echo "HTTP 502: could not read pull request" >&2; exit 22; }
+    if [ -n "${GH_PR_STATE+x}" ]; then printf '%s' "$GH_PR_STATE"; else printf '%s' "${GH_FP:-unavailable}"; fi
+    ;;
   *) echo "stub: unexpected gh $*" >&2; exit 9 ;;
 esac
 GHSTUB
@@ -328,7 +333,10 @@ cat > "$ROOT/bin/gh" <<'GHSTUB'
 case "$*" in
   *"--method POST"*) sha=""; st=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; esac; done; echo "$sha $st" >> "$GH_LOG" ;;
   *"pulls?state=open"*) printf '%s\n' "$GH_LIST" ;;
-  *"/pulls/"*) printf '%s' "${GH_FP:-unavailable}" ;;
+  *"/pulls/"*)
+    [ "${GH_PR_STATE_FAIL:-}" = "1" ] && { echo "HTTP 502: could not read pull request" >&2; exit 22; }
+    if [ -n "${GH_PR_STATE+x}" ]; then printf '%s' "$GH_PR_STATE"; else printf '%s' "${GH_FP:-unavailable}"; fi
+    ;;
   *) echo "stub: unexpected gh $*" >&2; exit 9 ;;
 esac
 GHSTUB
@@ -354,7 +362,10 @@ case "$*" in
   *"--method POST"*) [ "${GH_POST_FAIL:-}" = "1" ] && { echo "HTTP 422: too many statuses" >&2; exit 22; }; sha=""; st=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; esac; done; echo "$sha $st" >> "$GH_LOG" ;;
   *"pulls?state=open"*) [ "${GH_LIST_FAIL:-}" = "1" ] && exit 22; printf '%s\n' "$GH_LIST" ;;
   *"/commits/"*"/status"*) [ "${GH_GET_FAIL:-}" = "1" ] && { echo "HTTP 502: bad gateway" >&2; exit 22; }; printf '%s\n' "${GH_CUR:-}" ;;
-  *"/pulls/"*) printf '%s' "${GH_FP:-unavailable}" ;;
+  *"/pulls/"*)
+    [ "${GH_PR_STATE_FAIL:-}" = "1" ] && { echo "HTTP 502: could not read pull request" >&2; exit 22; }
+    if [ -n "${GH_PR_STATE+x}" ]; then printf '%s' "$GH_PR_STATE"; else printf '%s' "${GH_FP:-unavailable}"; fi
+    ;;
   *) echo "stub: unexpected gh $*" >&2; exit 9 ;;
 esac
 GHSTUB
@@ -590,10 +601,11 @@ pub_rc=$?
   && ok "#482: closed event pending-then-publish writes nothing on the merged head" \
   || bad "#482 e2e: pend=$pend_rc pub=$pub_rc heads=$(tr '\n' ' ' < "$WD/heads.txt") log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 
-# The open listing can still return the just-merged PR. Drop that row by
-# number so publish cannot write "no verdict for this head" on its SHA.
+# The open listing can still return the just-merged PR. The live re-read
+# says closed, so drop that row by number. Publish then writes nothing
+# on its SHA.
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" GH_LIST_FAIL='' GH_POST_FAIL='' \
+GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" GH_PR_STATE='closed|2026-10-25T00:00:00Z' GH_PR_STATE_FAIL='' GH_LIST_FAIL='' GH_POST_FAIL='' \
   envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" bash "$ROOT/pending.sh" >/dev/null 2>&1
 pend_rc=$?
 pend_log=$(cat "$ROOT/gh.log")
@@ -604,20 +616,49 @@ GH_FP="$FP" GH_CUR='' GH_POST_FAIL='' \
   envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1
 pub_rc=$?
 [ "$pend_rc" -eq 0 ] && [ -z "$pend_log" ] \
-  && ! printf '%s\n' "$heads_now" | grep -q '^1 ' && printf '%s\n' "$heads_now" | grep -q "^2 $H2$" \
+  && ! grep -q '^1 ' <<<"$heads_now" && grep -q "^2 $H2$" <<<"$heads_now" \
   && [ "$pub_rc" -eq 0 ] && ! grep -q "$HEAD" "$ROOT/gh.log" && grep -q "^$H2 failure" "$ROOT/gh.log" \
   && ok "#482: stale open listing of the merged PR is dropped by number; publish writes nothing on that head" \
   || bad "#482 stale listing: pend=$pend_rc pub=$pub_rc heads=$(printf '%s' "$heads_now" | tr '\n' ' ') log=$(tr '\n' ' ' < "$ROOT/gh.log") pend_log=$(printf '%s' "$pend_log" | tr '\n' ' ')"
 
-# Drop by PR number, not SHA: an open sibling that shares the merged head stays.
+# Drop by PR number, not SHA. Live re-read says closed, so PR 1 is removed
+# and an open sibling that shares the merged head stays.
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_LIST="$(printf '1 %s\n3 %s\n' "$HEAD" "$HEAD")" GH_LIST_FAIL='' GH_POST_FAIL='' \
+GH_LIST="$(printf '1 %s\n3 %s\n' "$HEAD" "$HEAD")" GH_PR_STATE='closed|2026-10-25T00:00:00Z' GH_PR_STATE_FAIL='' GH_LIST_FAIL='' GH_POST_FAIL='' \
   envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" bash "$ROOT/pending.sh" >/dev/null 2>&1
 rc=$?
 [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
   && ! grep -q '^1 ' "$WD/heads.txt" && grep -q "^3 $HEAD$" "$WD/heads.txt" \
   && ok "#482: open sibling sharing the merged head is kept; the closed PR is dropped by number" \
   || bad "#482 sibling head: rc=$rc heads=$(tr '\n' ' ' < "$WD/heads.txt") log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+
+# Reopen race: the closed run is already queued, then PR 1 is reopened
+# before the listing. The listing has the PR and the live re-read says
+# open, so the row stays. EVENT_HEAD_SHA was cleared on entry, so this
+# run does not POST pending on that head.
+: > "$ROOT/gh.log"; : > "$ROOT/summary"; : > "$ROOT/step.err"
+notice=$(GH_LIST="$(printf '1 %s\n' "$HEAD")" GH_PR_STATE='open|' GH_PR_STATE_FAIL='' GH_LIST_FAIL='' GH_POST_FAIL='' \
+  envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" bash "$ROOT/pending.sh" 2>"$ROOT/step.err")
+rc=$?
+printf '%s\n' "$notice" > "$ROOT/notice.txt"
+[ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && grep -q "^1 $HEAD$" "$WD/heads.txt" \
+  && grep -qF "no event head to invalidate" "$ROOT/notice.txt" \
+  && ! grep -qF "could not re-read PR #1" "$ROOT/notice.txt" \
+  && ok "#482: reopen race keeps the listed open PR; this closed run does not POST pending (EVENT_HEAD_SHA already cleared)" \
+  || bad "#482 reopen race: rc=$rc heads=$(tr '\n' ' ' < "$WD/heads.txt") log=$(tr '\n' ' ' < "$ROOT/gh.log") notice=$(printf '%s' "$notice" | tr '\n' ' ') err=$(tr '\n' ' ' < "$ROOT/step.err")"
+
+# A failed live re-read must not drop the row (fail closed on unknown).
+: > "$ROOT/gh.log"; : > "$ROOT/summary"; : > "$ROOT/step.err"
+notice=$(GH_LIST="$(printf '1 %s\n' "$HEAD")" GH_PR_STATE_FAIL=1 GH_LIST_FAIL='' GH_POST_FAIL='' \
+  envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" bash "$ROOT/pending.sh" 2>"$ROOT/step.err")
+rc=$?
+printf '%s\n' "$notice" > "$ROOT/notice.txt"
+[ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && grep -q "^1 $HEAD$" "$WD/heads.txt" \
+  && grep -qF "could not re-read PR #1; keeping its head (fail closed, #482)" "$ROOT/notice.txt" \
+  && ok "#482: live re-read failure keeps the listed row (fail closed, never drop on unknown)" \
+  || bad "#482 re-read fail: rc=$rc heads=$(tr '\n' ' ' < "$WD/heads.txt") log=$(tr '\n' ' ' < "$ROOT/gh.log") notice=$(printf '%s' "$notice" | tr '\n' ' ') err=$(tr '\n' ' ' < "$ROOT/step.err")"
 
 : > "$ROOT/gh.log"; : > "$ROOT/summary"; : > "$ROOT/step.err"
 notice=$(GH_CUR="pending|IN PROGRESS: re-evaluating review evidence for PR 1" GH_GET_FAIL='' GH_POST_FAIL='' \
