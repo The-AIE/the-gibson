@@ -80,25 +80,12 @@ jobs:
       # red when THIS event's PR fails, so the check is visible on that PR.
       EVENT_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
       EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      # CLOSED EVENTS (#482, #567). pull_request_target: closed fires after a
-      # merge and after a close without merge. The sweep lists only open PRs,
-      # so recording that head — a pending stamp, or publish's "no verdict"
-      # failure — overwrites the success that cleared the merge.
-      # One decision, made first in the pending step and shared with publish
-      # and the crash-error step via $RUNNER_TEMP/closed-event-reopened
-      # (RUNNER_TEMP survives checkout, #324). The marker is one line
-      # "<PR> <liveSHA>":
-      #   Live re-read says open, merged_at is empty, and head.sha is 40 hex
-      #   → the PR was reopened. Bind EVENT_HEAD_SHA to that live SHA. The
-      #   closed payload can still name an obsolete head if a push landed
-      #   first (stale-SHA finding, Codex pre-push on #602). Stamp the live
-      #   head like a normal event (P1-a: a stale success must not stay
-      #   merge-valid).
-      #   Closed/merged, a non-hex head, or the re-read failed → clear both,
-      #   and drop that PR's row from $RUNNER_TEMP/heads.txt by number
-      #   (P1-b: keeping the row on a failed GET let publish write "no
-      #   verdict" over the merged head).
-      # `closed` stays a trigger so a sibling that shares the head is swept.
+      # #482 / #567. A merge fires pull_request_target closed. The sweep lists
+      # only open PRs, so publishing a status on that head overwrote the
+      # success that had cleared the merge. Closed events write nothing on
+      # any head. A reopened pull request is evaluated by its own reopened
+      # event. Other open PRs are refreshed by their next event or the hourly
+      # sweep.
       EVENT_ACTION: ${{ github.event.action }}
     steps:
       - name: Stamp pending on every open PR head (FIRST, before any checkout)
@@ -112,79 +99,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          # #482 / #567. First thing on a closed event: one live re-read
-          # (state, merged_at, head.sha), then one decision shared with
-          # publish and the crash-error step via
-          # $RUNNER_TEMP/closed-event-reopened (survives checkout, #324).
-          # The marker is one line "<PR> <liveSHA>".
-          #   open + empty merged_at + 40-hex head → REOPENED. Bind
-          #   EVENT_HEAD_SHA to the live SHA (the closed payload can be a
-          #   stale H1 if a push moved the PR to H2 first) and stamp pending
-          #   on it (P1-a: a stale success must not stay merge-valid).
-          #   closed/merged, a bad head, or the re-read failed → CLOSED.
-          #   Clear the identifiers and, after the listing, drop that PR's
-          #   row by number (P1-b: a failed GET must not leave the row, or
-          #   publish writes "no verdict" over the merged head). Do not
-          #   re-read again.
-          CLOSED_PR=
           if [ "${EVENT_ACTION:-}" = "closed" ]; then
-            reopened=0
-            reread_failed=0
-            if [[ "${EVENT_PR_NUMBER:-}" =~ ^[1-9][0-9]*$ ]]; then
-              if live=$(gh api "repos/$GH_REPO/pulls/$EVENT_PR_NUMBER" --jq '"\(.state)|\(.merged_at // "")|\(.head.sha)"'); then
-                live_state=
-                live_merged=
-                live_sha=
-                # read + here-string, not a pipe (L-077). Empty merged_at
-                # stays an empty field between the pipes.
-                IFS='|' read -r live_state live_merged live_sha <<< "$live"
-                if [ "$live_state" = "open" ] && [ -z "$live_merged" ] && [[ "$live_sha" =~ ^[0-9a-f]{40}$ ]]; then
-                  reopened=1
-                  EVENT_HEAD_SHA="$live_sha"
-                fi
-              else
-                reread_failed=1
-                echo "::notice::closed event: re-read of PR #${EVENT_PR_NUMBER} failed; treating as closed so its head is not stamped (#482)"
-              fi
-            fi
-            if [ "$reopened" -eq 1 ]; then
-              printf '%s %s\n' "$EVENT_PR_NUMBER" "$EVENT_HEAD_SHA" > "$RUNNER_TEMP/closed-event-reopened"
-              echo "::notice::closed event: PR #${EVENT_PR_NUMBER} is open again; stamping pending on its head like a normal event (#482)"
-            else
-              rm -f "$RUNNER_TEMP/closed-event-reopened"
-              if [ "$reread_failed" -eq 0 ]; then
-                echo "::notice::closed event: PR #${EVENT_PR_NUMBER:-?} head is not stamped (merged/closed PRs get no new status, #482)"
-              fi
-              if [[ "${EVENT_PR_NUMBER:-}" =~ ^[1-9][0-9]*$ ]]; then
-                CLOSED_PR="$EVENT_PR_NUMBER"
-              fi
-              EVENT_HEAD_SHA=
-              EVENT_PR_NUMBER=
-            fi
+            : > "$RUNNER_TEMP/heads.txt"
+            echo "::notice::closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event"
+            echo "- closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           listed=0
           if gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
-              --jq '.[] | select(.state == "open" and .merged_at == null) | "\(.number) \(.head.sha)"' > "$RUNNER_TEMP/heads.txt"; then
+              --jq '.[] | "\(.number) \(.head.sha)"' > "$RUNNER_TEMP/heads.txt"; then
             listed=1
           else
             : > "$RUNNER_TEMP/heads.txt"
             echo "::notice::could not list open pull requests; publish will fail closed on the event head"
             echo "- open-PR listing failed; falling back to the event head" >> "$GITHUB_STEP_SUMMARY"
           fi
-          # #482: CLOSED only — the re-read already ran above. A stale
-          # state=open page can still name the just-closed PR. Drop that row
-          # by number (not SHA) so an open sibling sharing the head stays.
-          # A reopened PR is not CLOSED_PR; its row is kept and stamped below.
-          if [[ "${CLOSED_PR:-}" =~ ^[1-9][0-9]*$ ]]; then
-            grep -v "^${CLOSED_PR} " "$RUNNER_TEMP/heads.txt" > "$RUNNER_TEMP/heads.keep" || true
-            mv "$RUNNER_TEMP/heads.keep" "$RUNNER_TEMP/heads.txt"
-          fi
-          # The event's own head joins the set (Codex round 5, finding 3): a
-          # PR (re)opened between this listing and the sweep, or omitted by a
-          # stale listing, must still be stamped pending now. A closed (not
-          # reopened) event cleared EVENT_HEAD_SHA above, so a merged or
-          # closed head does not join (#482). A reopened PR joins at the live
-          # SHA from the re-read, not the closed payload (stale-SHA, #602).
+          # The event's own head ALWAYS joins the set (Codex round 5, finding
+          # 3): a PR (re)opened between this listing and the sweep, or omitted
+          # by a stale listing, must still be stamped pending now.
           if [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]] && ! grep -q " $EVENT_HEAD_SHA\$" "$RUNNER_TEMP/heads.txt"; then
             printf '%s %s\n' "${EVENT_PR_NUMBER:-0}" "$EVENT_HEAD_SHA" >> "$RUNNER_TEMP/heads.txt"
           fi
@@ -247,34 +179,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANCELLED: ${{ job.status == 'cancelled' }}
-          # EVENT_ACTION is job-level (closed-event guard, #482).
           # continue-on-error turns the pending step's failure green; read its
           # real outcome here so a failed pending stamp makes the job red
           # (Codex round 8, finding 2).
           HEADS_OUTCOME: ${{ steps.heads.outcome }}
         run: |
           set -uo pipefail
-          # #482 / #567: same decision as the pending step. On a closed
-          # event the marker is "<PR> <liveSHA>". When its PR equals
-          # EVENT_PR_NUMBER, bind EVENT_HEAD_SHA to that SHA and keep the PR
-          # number — the closed payload can still name an obsolete head
-          # (stale-SHA finding, Codex pre-push on #602). Otherwise clear both,
-          # so a kept row is not published "no verdict" over a merged head
-          # (P1-b). The marker survives checkout (#324).
           if [ "${EVENT_ACTION:-}" = "closed" ]; then
-            marker_pr=
-            marker_sha=
-            if [ -f "$RUNNER_TEMP/closed-event-reopened" ]; then
-              IFS=' ' read -r marker_pr marker_sha < "$RUNNER_TEMP/closed-event-reopened"
-            fi
-            if [ -n "$marker_pr" ] && [ "$marker_pr" = "${EVENT_PR_NUMBER:-}" ]; then
-              EVENT_HEAD_SHA="$marker_sha"
-              echo "::notice::closed event: PR #${EVENT_PR_NUMBER} is open again; publishing its head as this event's head (#482)"
-            else
-              echo "closed event: PR #${EVENT_PR_NUMBER:-?} head is not stamped (merged/closed PRs get no new status, #482)"
-              EVENT_HEAD_SHA=
-              EVENT_PR_NUMBER=
-            fi
+            echo "::notice::closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event"
+            echo "- closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           post_fail=0
           if [ "${HEADS_OUTCOME:-}" = "failure" ]; then
@@ -291,9 +205,8 @@ jobs:
           }
           publish() { # sha state description  -> writes; skips an unchanged non-event head (churn cap)
             local sha="$1" state="$2" desc="${3:0:140}"
-            # The event head was stamped pending and MUST be written (forced),
-            # including a closed event whose PR re-read as open (#482 P1-a).
-            # Every other head is written only when the verdict changes
+            # The event head was stamped pending and MUST be written; every
+            # other head is written only when the verdict actually changes
             # (Codex round 8, finding 1: bounded writes per head per day).
             if [ "$sha" != "${EVENT_HEAD_SHA:-}" ]; then
               cur=$(current_status "$sha")
@@ -434,26 +347,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          # #482 / #567: same marker as pending and publish ("<PR> <liveSHA>").
-          # On a closed event, when the marker's PR equals EVENT_PR_NUMBER,
-          # bind EVENT_HEAD_SHA to the marker SHA and keep the PR number.
-          # The closed payload can name an obsolete head (stale-SHA finding,
-          # Codex pre-push on #602). Otherwise clear both so this step cannot
-          # POST over a merged SHA.
           if [ "${EVENT_ACTION:-}" = "closed" ]; then
-            marker_pr=
-            marker_sha=
-            if [ -f "$RUNNER_TEMP/closed-event-reopened" ]; then
-              IFS=' ' read -r marker_pr marker_sha < "$RUNNER_TEMP/closed-event-reopened"
-            fi
-            if [ -n "$marker_pr" ] && [ "$marker_pr" = "${EVENT_PR_NUMBER:-}" ]; then
-              EVENT_HEAD_SHA="$marker_sha"
-              echo "::notice::closed event: PR #${EVENT_PR_NUMBER} is open again; crash-error may stamp this event's head (#482)"
-            else
-              echo "closed event: PR #${EVENT_PR_NUMBER:-?} head is not stamped (merged/closed PRs get no new status, #482)"
-              EVENT_HEAD_SHA=
-              EVENT_PR_NUMBER=
-            fi
+            echo "::notice::closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event"
+            echo "- closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           if ! [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "no event head to correct (scheduled or comment event)"
