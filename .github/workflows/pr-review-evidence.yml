@@ -42,16 +42,18 @@ on:
 
 permissions: {}
 
-# gibson:stateful-ci — runs are SERIALIZED repo-wide and never cancelled.
-# The published result is keyed by commit SHA, but comment events carry no
-# SHA, so runs cannot be grouped by head, and per-PR groups let two PRs
-# sharing a head race (Codex round 3). One queue plus a full sweep means the
-# last publish is always computed from the latest state. No cancel-in-progress:
-# a cancelled run publishes nothing, and a skipped run would still cancel a
-# live one (Codex round 1). GitHub may still REPLACE a queued run with a newer
-# one (Codex round 4); the sweep makes that harmless.
+# gibson:stateful-ci — non-closed runs are SERIALIZED repo-wide and never
+# cancelled. The published result is keyed by commit SHA, but comment events
+# carry no SHA, so runs cannot be grouped by head, and per-PR groups let two
+# PRs sharing a head race (Codex round 3). One queue plus a full sweep means
+# the last publish is always computed from the latest state. No
+# cancel-in-progress: a cancelled run publishes nothing, and a skipped run
+# would still cancel a live one (Codex round 1). GitHub may still REPLACE a
+# queued run with a newer one (Codex round 4); the sweep makes that harmless.
+# #482: a closed run writes nothing, so it is excluded from the serialized
+# group to avoid displacing a queued evaluation run.
 concurrency:
-  group: pr-review-evidence-serialized
+  group: ${{ github.event.action == 'closed' && format('pr-review-evidence-closed-{0}', github.run_id) || 'pr-review-evidence-serialized' }}
   cancel-in-progress: false
 
 jobs:
@@ -107,7 +109,7 @@ jobs:
           fi
           listed=0
           if gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
-              --jq '.[] | "\(.number) \(.head.sha)"' > "$RUNNER_TEMP/heads.txt"; then
+              --jq '.[] | select(.state == "open" and .merged_at == null) | "\(.number) \(.head.sha)"' > "$RUNNER_TEMP/heads.txt"; then
             listed=1
           else
             : > "$RUNNER_TEMP/heads.txt"
