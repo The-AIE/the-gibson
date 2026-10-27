@@ -1134,6 +1134,120 @@ else
   bad "#482: shared head: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
 fi
 
+echo "# #482 round 3 — a queued non-closed event does not stamp pending after its PR merges"
+# The pending step re-reads the event PR before the stamp. Closed/merged:
+# no pending POST, and the event's own row is not added to heads.txt. Publish
+# then must not treat that head as a sweep gap or an event failure. An open
+# sibling that shares the SHA keeps its listing row and its verdict.
+# Between the two steps the test stands in for the sweep (the node program is
+# not these shell steps): an empty open list yields sweep.rc 0 and no lines.
+no_gap_phrases() {
+  ! grep -q "no usable verdict" "$1" && ! grep -q "failed closed" "$1" && ! grep -q "NOT PUBLISHED" "$1"
+}
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST='' \
+  envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+    GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
+    IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+    bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+prc=$?
+: > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+pubrc=$?
+if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && ! grep -q "^1 $HEAD$" "$WD/heads.txt" \
+  && grep -q "PR #1 is merged/closed; no pending stamp (#482)" "$ROOT/summary" \
+  && no_gap_phrases "$ROOT/pub.out"; then
+  ok "#482: synchronize, live PR 1 merged, empty listing → no POST, both rc 0"
+else
+  bad "#482: merged empty listing: pending_rc=$prc publish_rc=$pubrc heads=$(tr '\n' ' ' < "$WD/heads.txt") log=$(tr '\n' ' ' < "$ROOT/gh.log") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST="$(printf '2 %s\n' "$HEAD")" \
+  envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+    GH_PR_STATES="$MERGED_AT 2=open|" GH_FP="$FP" GH_CUR="" \
+    IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+    bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+prc=$?
+printf '{"number":2,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="$MERGED_AT 2=open|" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+pubrc=$?
+if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] \
+  && [ "$(grep -c "^$HEAD " "$ROOT/gh.log")" -eq 1 ] \
+  && grep -q "^$HEAD success$" "$ROOT/gh.log" \
+  && ! grep -q ' pending$' "$ROOT/gh.log" \
+  && grep -q "^2 $HEAD$" "$WD/heads.txt" \
+  && ! grep -q "^1 $HEAD$" "$WD/heads.txt" \
+  && grep -q "PR #1 is merged/closed; no pending stamp (#482)" "$ROOT/summary" \
+  && grep -q "^- PR 2 @ ${HEAD:0:7}: \`success\`" "$ROOT/summary" \
+  && ! grep -q "PR #1 is merged/closed; review-evidence writes no status" "$ROOT/summary" \
+  && no_gap_phrases "$ROOT/pub.out"; then
+  ok "#482: synchronize, live PR 1 merged, open sibling 2 on the same SHA → no pending; one success write for PR 2"
+else
+  bad "#482: sibling stamp: pending_rc=$prc publish_rc=$pubrc heads=$(tr '\n' ' ' < "$WD/heads.txt") log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST="$(printf '1 %s\n' "$HEAD")" \
+  envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+    GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="" \
+    IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+    bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+prc=$?
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+pubrc=$?
+if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] \
+  && [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 1 ] \
+  && grep -q "^$HEAD pending$" "$ROOT/gh.log" \
+  && grep -q "^$HEAD success$" "$ROOT/gh.log" \
+  && grep -q "^1 $HEAD$" "$WD/heads.txt" \
+  && ! grep -q "no pending stamp" "$ROOT/summary" \
+  && grep -q "^- PR 1 @ ${HEAD:0:7}: \`success\`" "$ROOT/summary"; then
+  ok "#482: synchronize, live PR 1 open → pending stamped and the verdict written"
+else
+  bad "#482: open still stamps: pending_rc=$prc publish_rc=$pubrc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST="$(printf '1 %s\n' "$HEAD")" \
+  envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+    GH_PR_STATE_FAIL=1 GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
+    IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+    bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+prc=$?
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATE_FAIL=1 GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+pubrc=$?
+if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] \
+  && [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 1 ] \
+  && grep -q "^$HEAD pending$" "$ROOT/gh.log" \
+  && grep -q "^$HEAD success$" "$ROOT/gh.log" \
+  && ! grep -q "no pending stamp" "$ROOT/summary" \
+  && grep -q "^- PR 1 @ ${HEAD:0:7}: \`success\`" "$ROOT/summary"; then
+  ok "#482: synchronize, live state read fails → pending stamped (fail closed) and the verdict written"
+else
+  bad "#482: read-fail still stamps: pending_rc=$prc publish_rc=$pubrc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
+fi
+
 echo
 echo "pr-review-evidence.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -116,9 +116,50 @@ jobs:
             echo "::notice::could not list open pull requests; publish will fail closed on the event head"
             echo "- open-PR listing failed; falling back to the event head" >> "$GITHUB_STEP_SUMMARY"
           fi
-          # The event's own head ALWAYS joins the set (Codex round 5, finding
-          # 3): a PR (re)opened between this listing and the sweep, or omitted
-          # by a stale listing, must still be stamped pending now.
+          # #482: a queued non-closed event can run after its PR merged.
+          # Stamping pending, then letting publish skip the terminal write,
+          # leaves a false pending on the SHA that blocks an open sibling
+          # sharing it. Re-read this event's own PR before the stamp.
+          # 0 = closed or merged (do not stamp, do not add this event's row).
+          # 1 = open, 2 = the read failed (stamp as today; fail closed).
+          pr_live_closed() { # pr -> 0 if the live PR is closed or merged; 1 if open; 2 if the read failed
+            local raw st merged
+            if ! raw=$(gh api "repos/$GH_REPO/pulls/$1" --jq '"\(.state)|\(.merged_at // "")"' 2>/dev/null); then
+              return 2
+            fi
+            raw=${raw%%$'\n'*}
+            case "$raw" in
+              *\|*) ;;
+              *) return 2 ;;
+            esac
+            st=${raw%%|*}
+            merged=${raw#*|}
+            if [ "$st" = "closed" ] || [ -n "$merged" ]; then
+              return 0
+            fi
+            if [ "$st" = "open" ]; then
+              return 1
+            fi
+            return 2
+          }
+          if [ "${IS_SCHEDULE:-false}" != "true" ] && [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]] \
+              && [[ "${EVENT_PR_NUMBER:-}" =~ ^[1-9][0-9]*$ ]]; then
+            pr_live_closed "$EVENT_PR_NUMBER"
+            live_rc=$?
+            if [ "$live_rc" -eq 0 ]; then
+              echo "::notice::PR #${EVENT_PR_NUMBER} is merged/closed; no pending stamp (#482)"
+              echo "- PR #${EVENT_PR_NUMBER} is merged/closed; no pending stamp (#482)" >> "$GITHUB_STEP_SUMMARY"
+              # The rest of this step must not treat the closed PR as the
+              # event head: no own row in $RUNNER_TEMP/heads.txt, no pending POST. An open
+              # sibling already in the listing keeps its own row.
+              EVENT_HEAD_SHA=
+              EVENT_PR_NUMBER=
+            fi
+          fi
+          # The event's own head joins the set when we will stamp it (Codex
+          # round 5, finding 3): a PR (re)opened between this listing and the
+          # sweep, or omitted by a stale listing, must still be stamped pending
+          # now. A closed event PR was cleared above, so its row is not added.
           if [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]] && ! grep -q " $EVENT_HEAD_SHA\$" "$RUNNER_TEMP/heads.txt"; then
             printf '%s %s\n' "${EVENT_PR_NUMBER:-0}" "$EVENT_HEAD_SHA" >> "$RUNNER_TEMP/heads.txt"
           fi
@@ -361,6 +402,10 @@ jobs:
           # Every head we stamped pending must have received a verdict; a head
           # the sweep did not cover (listing skew, a PR closed mid-run) must not
           # be left pending-or-stale — fail it closed (Codex round 5, finding 3).
+          # A closed event PR the pending step refused to record is not in this
+          # file. publish() already skips a merged row, and that skip sets
+          # neither sweep_gap nor event_fail. An open sibling on the same SHA
+          # is its own row and was written above.
           while read -r n sha; do
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
             if ! grep -q "^$sha\$" "$RUNNER_TEMP/published.txt"; then
