@@ -239,6 +239,34 @@ LANGFUSE_SECRET_KEY=sk-lf-aaaaaaaa LANGFUSE_PUBLIC_KEY=pk-lf-bbbbbbbb LANGFUSE_H
   node "$S/eval-run.mjs" --variant envcheck --runner "$ROOT/envrunner.sh" --dataset "$ROOT/env.jsonl" --out-dir "$ROOT/r" >/dev/null 2>&1
 grep -q '"passed": 1' "$ROOT/r/runs/envcheck.json" && ok "runner child does not receive LANGFUSE_* variables" || bad "LANGFUSE_* leaked to runner"
 
+echo "AC5 workflow wiring (live opt-in job + smoke run)"
+WF="$REPO/.github/workflows/eval-gate.yml"
+[[ -f "$WF" ]] && ok "live workflow installed at .github/workflows/eval-gate.yml" || bad "workflow missing"
+wf=$(<"$WF")
+has "$wf" 'workflow_dispatch:' && has "$wf" 'schedule:' && ok "triggers: manual dispatch + schedule" || bad "workflow triggers"
+{ has "$wf" 'pull_request' || has "$wf" $'\n  push:'; } && bad "workflow must not trigger on PR/push (opt-in, never required)" || ok "no pull_request / push trigger"
+has "$wf" $'\npermissions: {}\n' && ok "top-level permissions: {} (deny by default)" || bad "permissions"
+has "$wf" 'continue-on-error:' && bad "continue-on-error is forbidden" || ok "no continue-on-error"
+for sc in eval-dataset-lint eval-run eval-gate eval-trace; do
+  has "$wf" "scripts/$sc.mjs" && ok "workflow calls $sc.mjs" || bad "workflow does not call $sc.mjs"
+done
+smoke=${wf#*Smoke run}; smoke=${smoke%%Lint the dataset*}
+has "$smoke" 'secrets.' && bad "smoke step must not see secrets" || ok "smoke step gets no secrets"
+has "$smoke" 'jq -rj .input' && has "$smoke" '--min-pass-rate 1' && ok "smoke uses the deterministic stub runner at a 100% threshold" || bad "smoke wiring"
+has "$wf" "cron:" && ok "weekly schedule present (keeps sensor-health freshness truthful)" || bad "schedule cron"
+reg=$(<"$REPO/config/sensor-health-observation.v1.json")
+has "$reg" '.github/workflows/eval-gate.yml' && ok "sensor-health inventory lists the workflow" || bad "sensor inventory row"
+# Execute the smoke commands exactly as the workflow does (no network, no model).
+SM="$ROOT/smoke"
+node "$S/eval-dataset-lint.mjs" --file "$REPO/evals/smoke.v1.jsonl" --min 1 --max 10 >/dev/null 2>&1 && ok "smoke dataset lints" || bad "smoke lint"
+node "$S/eval-run.mjs" --variant smoke --runner "jq -rj .input" --dataset "$REPO/evals/smoke.v1.jsonl" --out-dir "$SM" >/dev/null 2>&1 \
+  && node "$S/eval-gate.mjs" --variant smoke --min-pass-rate 1 --dataset "$REPO/evals/smoke.v1.jsonl" --out-dir "$SM" >/dev/null 2>&1 \
+  && ok "smoke run passes the gate end to end" || bad "smoke run/gate"
+# Control: a broken stub must FAIL the same gate, so the smoke run proves something.
+node "$S/eval-run.mjs" --variant smoke-broken --runner "echo wrong" --dataset "$REPO/evals/smoke.v1.jsonl" --out-dir "$SM" >/dev/null 2>&1
+node "$S/eval-gate.mjs" --variant smoke-broken --min-pass-rate 1 --dataset "$REPO/evals/smoke.v1.jsonl" --out-dir "$SM" >/dev/null 2>&1; [[ $? -eq 1 ]] \
+  && ok "control: a broken runner fails the smoke gate" || bad "smoke control passed a broken runner"
+
 echo ""
 echo "eval-layer: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

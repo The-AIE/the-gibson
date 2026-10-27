@@ -1,13 +1,20 @@
-# gibson-template-version: sha256:8812a269830f7aaf2752cff0e43bd266afed7b44d0393ab04f0b2a71aa084c4b
-# The Gibson — opt-in eval gate (docs/eval-layer.md, #583)
-# Install as .github/workflows/eval-gate.yml. Manual only: runs the eval dataset against a
-# runner command and gates on the pass rate. Never a required check. Fail-closed; no
-# continue-on-error / || true / set +e.
-# Langfuse shipping is optional: set repo secrets LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
-# (and LANGFUSE_HOST for non-cloud). Without them the run still gates, locally only.
-
 name: gibson-eval-gate
+# Opt-in eval gate (docs/eval-layer.md, #583). Never a required check. Fail-closed; no
+# continue-on-error / || true / set +e.
+#
+# Two ways it runs:
+#   * workflow_dispatch with a `runner`: runs the real dataset (evals/dataset.v1.jsonl)
+#     against your runner command and gates on the pass rate. This is the opt-in use.
+#   * weekly schedule, or workflow_dispatch with an empty `runner`: a deterministic SMOKE
+#     run of the eval layer itself. It echoes a fixed 3-case dataset (evals/smoke.v1.jsonl)
+#     through `jq`, so there are no model calls, no spend and no secrets. It exists so this
+#     standing workflow has a recent green run and stays truthful in sensor-health.
+#
+# Langfuse shipping is optional and only the real run gets the keys: set repo secrets
+# LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY (and LANGFUSE_HOST for non-cloud).
 on:
+  schedule:
+    - cron: "23 13 * * 2"
   workflow_dispatch:
     inputs:
       variant:
@@ -15,8 +22,9 @@ on:
         required: true
         default: "ci"
       runner:
-        description: "Runner command (reads a case as JSON on stdin, prints the answer)"
-        required: true
+        description: "Runner command (reads a case as JSON on stdin, prints the answer). Empty = smoke run."
+        required: false
+        default: ""
       grader:
         description: "Optional grader command (JSON verdict on stdout). Empty = expect-only."
         required: false
@@ -32,7 +40,7 @@ on:
 # Deny all by default. Jobs grant least privilege only.
 permissions: {}
 
-# No PR trigger: a manual eval run must not cancel a sibling run.
+# A manual eval run must not cancel a sibling run.
 concurrency:
   group: eval-gate
   cancel-in-progress: false
@@ -44,9 +52,18 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Smoke run (deterministic, no model calls, no secrets)
+        if: ${{ github.event_name == 'schedule' || inputs.runner == '' }}
+        run: |
+          set -euo pipefail
+          node scripts/eval-dataset-lint.mjs --file evals/smoke.v1.jsonl --min 1 --max 10
+          node scripts/eval-run.mjs --variant smoke --runner "jq -rj .input" --dataset evals/smoke.v1.jsonl
+          node scripts/eval-gate.mjs --variant smoke --min-pass-rate 1 --dataset evals/smoke.v1.jsonl
       - name: Lint the dataset
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.runner != '' }}
         run: node scripts/eval-dataset-lint.mjs
       - name: Run the dataset
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.runner != '' }}
         env:
           VARIANT: ${{ inputs.variant }}
           RUNNER: ${{ inputs.runner }}
@@ -62,12 +79,13 @@ jobs:
             node scripts/eval-run.mjs --variant "$VARIANT" --runner "$RUNNER"
           fi
       - name: Gate on pass rate
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.runner != '' }}
         env:
           VARIANT: ${{ inputs.variant }}
           MIN: ${{ inputs.min_pass_rate }}
         run: node scripts/eval-gate.mjs --variant "$VARIANT" --min-pass-rate "$MIN"
       - name: Send the cost ledger as traces (only when a ledger path was given)
-        if: ${{ inputs.ledger != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.runner != '' && inputs.ledger != '' }}
         env:
           LEDGER: ${{ inputs.ledger }}
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
