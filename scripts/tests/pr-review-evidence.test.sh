@@ -4,7 +4,8 @@
 # boolean cannot prove the diagnostic). Fixtures load through the SAME code
 # path as production (--fixture swaps only the transport), and the shipped
 # config/review-evidence.v1.json is used unless a case is about config faults.
-# The workflow's shell steps are extracted and EXECUTED with gh stubbed.
+# The workflow's shell steps are extracted and EXECUTED with gh stubbed,
+# under `bash -e` — the same shell Actions uses for a `run:` step (`bash -e {0}`).
 set -uo pipefail
 # #467: claim.sh refuses an unvendored reservation; tests claim as claude.
 export GIBSON_AGENT_VENDOR="${GIBSON_AGENT_VENDOR:-claude}"
@@ -229,9 +230,9 @@ echo "# AC1 — workflow: sweep design (static + executed steps with gh stubbed)
 [ -f "$WF" ] && ok "workflow file present" || bad "workflow missing"
 grep -q '^permissions: {}' "$WF" && ok "workflow-level permissions: {}" || bad "no workflow-level permissions: {}"
 grep -q 'gibson:approved-pr-target 308' "$WF" && ok "pull_request_target waiver present" || bad "pull_request_target waiver missing"
-grep -q 'gibson:stateful-ci' "$WF" && grep -qF "format('pr-review-evidence-closed-{0}', github.run_id)" "$WF" && grep -qF "|| 'pr-review-evidence-serialized'" "$WF" && grep -q 'cancel-in-progress: false' "$WF" && ok "non-closed events use pr-review-evidence-serialized; closed runs use a run-id group; cancel-in-progress is false (stateful-ci)" || bad "concurrency is not a non-cancelling queue for non-closed events"
+grep -q 'gibson:stateful-ci' "$WF" && grep -q 'group: pr-review-evidence-serialized' "$WF" && grep -q 'cancel-in-progress: false' "$WF" && ok "runs serialized repo-wide, never cancelled (stateful-ci)" || bad "concurrency is not a single non-cancelling queue"
 grep -q 'cancel-in-progress: true' "$WF" && bad "cancel-in-progress: true present" || ok "no cancel-in-progress: true"
-grep -qE 'types: \[.*closed.*\]' "$WF" && ok "closed is a trigger (sibling recovers via the next sweep)" || bad "closed missing from pull_request_target types"
+grep -qE 'types: \[.*closed.*\]' "$WF" && ok "closed is a trigger (the closed run is a full sweep of open PRs)" || bad "closed missing from pull_request_target types"
 grep -q -- '--sweep' "$WF" && ok "workflow runs the sweep" || bad "workflow does not run --sweep"
 pend=$(grep -n 'name: Stamp pending on every open PR head' "$WF" | cut -d: -f1); swp=$(grep -n 'name: Evaluate every open PR' "$WF" | cut -d: -f1); pub=$(grep -n 'name: Publish every head' "$WF" | cut -d: -f1)
 [ -n "$pend" ] && [ -n "$swp" ] && [ "$pend" -lt "$swp" ] && ok "pending is stamped BEFORE the sweep" || bad "pending step not before sweep"
@@ -284,59 +285,58 @@ GHSTUB
 chmod +x "$ROOT/bin/gh"
 FP='2026-09-04T12:00:00Z|h|b|3|0|2'
 H2=cccccccccccccccccccccccccccccccccccccccc
+# Callers pass `bash -e` so errexit matches Actions. `set -uo pipefail` inside
+# the extracted step does not turn errexit off.
 envrun() { ( cd "$WD" && RUNNER_TEMP="$WD" GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t GH_PR_STATES="${GH_PR_STATES:-1=open| 2=open|}" PATH="$ROOT/bin:$PATH" "$@" ); }
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
+GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash -e "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 1 ] && grep -q "^$HEAD pending" "$ROOT/gh.log" && [ "$(wc -l < "$WD/heads.txt" | tr -d ' ')" -eq 2 ] && ok "pending step: stamps pending ONLY on the event head (2 heads listed, 1 stamped — churn cap)" || bad "pending step: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_LIST_FAIL=1 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
+GH_LIST_FAIL=1 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash -e "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q "^1 $HEAD" "$WD/heads.txt" && grep -q 'listing failed' "$ROOT/summary" && ok "pending step: listing fails → nonzero, event head recorded for fail-closed publish" || bad "pending step listing failure: rc=$rc heads=$(cat "$WD/heads.txt")"
 # publish: results present
 printf '1 %s\n2 %s\n' "$HEAD" "$H2" > "$WD/heads.txt"
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n{"number":2,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n' "$HEAD" "$FP" "$H2" > "$WD/results.jsonl"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && grep -q "^$H2 failure" "$ROOT/gh.log" && ok "publish: every sweep line published; job green when the EVENT's PR is not failing" || bad "publish normal: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=2 EVENT_HEAD_SHA=$H2 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=2 EVENT_HEAD_SHA=$H2 CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$H2 failure" "$ROOT/gh.log" && grep -q "^- PR 2 @ ${H2:0:7}: \`failure\`" "$ROOT/summary" && ok "publish: job stays GREEN when the EVENT's PR failed closed — the verdict is published, not a crash (L-087/L-092)" || bad "publish event-fail: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=true bash "$ROOT/publish.sh" >/dev/null 2>&1
+: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=true bash -e "$ROOT/publish.sh" >/dev/null 2>&1
 [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: cancelled → every head pending (supersession is not a verdict)" || bad "publish cancelled: $(tr '\n' ' ' < "$ROOT/gh.log")"
 # publish: sweep produced nothing
 rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: sweep never ran → failure on EVERY stamped head, never a stale success" || bad "publish no-results: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-# #482: a closed event returns before publish. An empty completed sweep with
-# nothing stamped is still "no open PRs" for the schedule / comment case below.
+# An empty completed sweep with nothing stamped is "no open PRs" for the
+# schedule / comment case below. A closed event is not a separate exit.
 rm -f "$WD/results.jsonl"; : > "$WD/results.jsonl"; : > "$WD/heads.txt"; printf '0' > "$WD/sweep.rc"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=closed bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && grep -q "writes no status on closed/merged PRs" "$ROOT/summary" && ok "publish: closed event writes nothing and exits 0 (empty sweep; #482 notice, not a publish)" || bad "publish empty-sweep closed: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
-: > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER= EVENT_HEAD_SHA= CANCELLED=false EVENT_ACTION= bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER= EVENT_HEAD_SHA= CANCELLED=false EVENT_ACTION= bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && ok "publish: completed empty sweep with no heads exits 0 (schedule / comment with an empty queue)" || bad "publish empty-sweep schedule: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 printf '1' > "$WD/sweep.rc"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && ok "publish: an empty result from a sweep that exited non-zero still fails closed" || bad "publish empty-sweep crashed: rc=$rc"
 rm -f "$WD/sweep.rc" "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && ok "publish: a sweep that never ran (no rc file) with no heads still fails closed" || bad "publish no-rc-file: rc=$rc"
 printf '1 %s\n2 %s\n' "$HEAD" "$H2" > "$WD/heads.txt"   # restore the two stamped heads for the cases below
 rm -f "$WD/results.jsonl"; : > "$WD/results.jsonl"; printf '0' > "$WD/sweep.rc"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false EVENT_ACTION=synchronize bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 rm -f "$WD/sweep.rc"
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: an empty completed sweep WITH stamped heads still fails closed on every head (Codex review of #462)" || bad "publish closed-with-heads: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 printf '{"number":null,"headSha":"","state":"failure","reason":"api-error","detail":"listing"}\n' > "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: sweep listing fault → failure on every stamped head" || bad "publish listing-fault: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 : > "$WD/heads.txt"; rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'NOT PUBLISHED' "$ROOT/summary" && ok "publish: nothing known at all → nonzero + loud summary line" || bad "publish nothing-known was silent (rc=$rc)"
 # Codex round 5: event head always joins the stamped set; unstamped-but-unverdicted heads fail closed; job has no if:.
 H3=dddddddddddddddddddddddddddddddddddddddd
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_LIST="$(printf '1 %s\n' "$HEAD")" envrun env EVENT_PR_NUMBER=3 EVENT_HEAD_SHA=$H3 bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
+GH_LIST="$(printf '1 %s\n' "$HEAD")" envrun env EVENT_PR_NUMBER=3 EVENT_HEAD_SHA=$H3 bash -e "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^3 $H3" "$WD/heads.txt" && grep -q "^$H3 pending" "$ROOT/gh.log" && ok "pending step: event head not in the listing is still stamped and recorded" || bad "event head not added: rc=$rc heads=$(tr '\n' ' ' < "$WD/heads.txt")"
 printf '1 %s\n3 %s\n' "$HEAD" "$H3" > "$WD/heads.txt"; printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_FP="$FP" envrun env EVENT_PR_NUMBER=3 EVENT_HEAD_SHA=$H3 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+GH_FP="$FP" envrun env EVENT_PR_NUMBER=3 EVENT_HEAD_SHA=$H3 CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q "^$H3 failure" "$ROOT/gh.log" && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "publish: a stamped head with no sweep verdict is published failure (never left pending/stale)" || bad "unverdicted head: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 awk '/^jobs:/{f=1} f && /^    if:/{print}' "$WF" | grep . >/dev/null && bad "job-level if: present (a skipped run still replaces the queued one)" || ok "no job-level if: — every event runs the sweep"
 # Codex round 6: trigger trust boundary, pending before any checkout, publish freshness re-check.
@@ -378,13 +378,13 @@ GHSTUB
 chmod +x "$ROOT/bin/gh"
 FP='2026-09-04T12:00:00Z|h|b|3|0|2'
 printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
-: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "publish: fingerprint unchanged → success written" || bad "publish fresh: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; GH_FP='2026-09-04T12:05:00Z|h|b|4|0|2' envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP='2026-09-04T12:05:00Z|h|b|4|0|2' envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 grep -q "^$HEAD pending" "$ROOT/gh.log" && ! grep -q "^$HEAD success" "$ROOT/gh.log" && ok "publish: state moved since evaluation → pending, never the stale success" || bad "publish stale: log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; GH_FP='unavailable' envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1
+: > "$ROOT/gh.log"; GH_FP='unavailable' envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1
 grep -q "^$HEAD pending" "$ROOT/gh.log" && ok "publish: fingerprint re-read fails → pending (fail closed)" || bad "publish fp-unavailable: log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass","fingerprint":""}\n' "$HEAD" > "$WD/results.jsonl"; : > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass","fingerprint":""}\n' "$HEAD" > "$WD/results.jsonl"; : > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1
 grep -q "^$HEAD pending" "$ROOT/gh.log" && ok "publish: success line without a fingerprint → pending" || bad "publish no-fp: log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 # Codex round 7: status-churn cap. No workflow_dispatch; hourly schedule; scheduled runs stamp no pending
 # and write only on change; every status POST is checked and a failure makes the job red.
@@ -394,7 +394,7 @@ awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep -E 'cron: "[0-9]+ \* \* \*
 cat > "$ROOT/bin/gh" <<'GHSTUB'
 #!/bin/sh
 case "$*" in
-  *"--method POST"*) [ "${GH_POST_FAIL:-}" = "1" ] && { echo "HTTP 422: too many statuses" >&2; exit 22; }; sha=""; st=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; esac; done; echo "$sha $st" >> "$GH_LOG" ;;
+  *"--method POST"*) [ "${GH_POST_FAIL:-}" = "1" ] && { echo "HTTP 422: too many statuses" >&2; exit 22; }; sha=""; st=""; desc=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; description=*) desc=${a#description=};; esac; done; echo "$sha $st" >> "$GH_LOG"; if [ -n "${GH_DESC_LOG:-}" ]; then printf '%s\n' "$desc" >> "$GH_DESC_LOG"; fi ;;
   *"pulls?state=open"*) [ "${GH_LIST_FAIL:-}" = "1" ] && exit 22; printf '%s\n' "$GH_LIST" ;;
   *"/commits/"*"/status"*) [ "${GH_GET_FAIL:-}" = "1" ] && { echo "HTTP 502: bad gateway" >&2; exit 22; }; printf '%s\n' "${GH_CUR:-}" ;;
   *"/pulls/"*)
@@ -425,38 +425,38 @@ esac
 GHSTUB
 chmod +x "$ROOT/bin/gh"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" envrun env IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
+GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" envrun env IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' bash -e "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && [ "$(wc -l < "$WD/heads.txt" | tr -d ' ')" -eq 2 ] && ok "schedule: pending step lists heads but stamps NOTHING" || bad "schedule pending: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
-: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=true EVENT_PR_NUMBER='' CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=true EVENT_PR_NUMBER='' CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && ok "schedule: unchanged verdict → NO status write (churn cap)" || bad "schedule unchanged wrote: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="pending|UNREVIEWED: no receipt at head" envrun env IS_SCHEDULE=true EVENT_PR_NUMBER='' CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="pending|UNREVIEWED: no receipt at head" envrun env IS_SCHEDULE=true EVENT_PR_NUMBER='' CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "schedule: changed verdict → written" || bad "schedule changed not written: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "event run: always writes (pending was stamped first)" || bad "event run skipped a write: rc=$rc"
-: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_FP="$FP" GH_POST_FAIL=1 envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_FP="$FP" GH_POST_FAIL=1 envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'status write FAILED' "$ROOT/summary" && ok "publish: a failed status POST is an error and the job is red (never 'published')" || bad "failed POST ignored: rc=$rc summary=$(tr '\n' ' ' < "$ROOT/summary")"
-: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_LIST="$(printf '1 %s\n' "$HEAD")" GH_POST_FAIL=1 envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_LIST="$(printf '1 %s\n' "$HEAD")" GH_POST_FAIL=1 envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash -e "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'pending stamp FAILED' "$ROOT/summary" && ok "pending step: a failed stamp is an error, not a silent skip" || bad "failed pending stamp ignored: rc=$rc"
 # Codex round 8: event runs write non-event heads only on change; a failed pending step makes the job red.
 printf '1 %s\n2 %s\n' "$HEAD" "$H2" > "$WD/heads.txt"
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n{"number":2,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" "$H2" "$FP" > "$WD/results.jsonl"
-: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && ! grep -q "^$H2 " "$ROOT/gh.log" && ok "event run: the event head is written; an unchanged NON-event head is not (no amplification)" || bad "event-run amplification: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_FP="$FP" GH_CUR="" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD HEADS_OUTCOME=failure CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_FP="$FP" GH_CUR="" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD HEADS_OUTCOME=failure CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'pending stamp step FAILED' "$ROOT/summary" && ok "publish: a failed pending step (continue-on-error) still makes the job red" || bad "HEADS_OUTCOME failure ignored: rc=$rc"
 printf 'garbage not json\n' > "$WD/results.jsonl"; printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; : > "$ROOT/gh.log"
-envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -ge 1 ] && ok "publish: unparseable sweep output → failure, never success" || bad "publish garbage: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 
 # #324: cross-step files must survive the workspace clean that actions/checkout performs between
 # the pending step and the publish step. Simulate: pending step writes into RUNNER_TEMP, the
 # workspace directory is wiped, the publish step still finds the heads file.
 WS="$ROOT/ws"; rm -rf "$WS"; mkdir -p "$WS"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-( cd "$WS" && GH_LIST="$(printf '1 %s\n' "$HEAD")" RUNNER_TEMP="$WD" GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t PATH="$ROOT/bin:$PATH" EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD IS_SCHEDULE=false bash "$ROOT/pending.sh" >/dev/null 2>&1 )
+( cd "$WS" && GH_LIST="$(printf '1 %s\n' "$HEAD")" RUNNER_TEMP="$WD" GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t PATH="$ROOT/bin:$PATH" EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD IS_SCHEDULE=false bash -e "$ROOT/pending.sh" >/dev/null 2>&1 )
 rm -rf "$WS"; mkdir -p "$WS"   # the checkout wipes the workspace
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
-: > "$ROOT/gh.log"; ( cd "$WS" && RUNNER_TEMP="$WD" GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t GH_FP="$FP" PATH="$ROOT/bin:$PATH" EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD IS_SCHEDULE=false CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1 ); rc=$?
+: > "$ROOT/gh.log"; ( cd "$WS" && RUNNER_TEMP="$WD" GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t GH_FP="$FP" PATH="$ROOT/bin:$PATH" EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD IS_SCHEDULE=false CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1 ); rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && [ -s "$WD/heads.txt" ] && ok "#324: heads file written before the workspace wipe is read by the publish step (RUNNER_TEMP)" || bad "#324: publish after workspace wipe rc=$rc heads=$(cat "$WD/heads.txt" 2>/dev/null)"
 grep -qE '(^|[^$/])heads\.txt' "$WF" && bad "#324: a bare heads.txt reference remains in the workflow" || ok "#324: every cross-step file is addressed under RUNNER_TEMP"
 
@@ -535,12 +535,12 @@ rm -f "$WD/heads.txt" "$WD/results.jsonl"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 printf '%s pending\n' "$HEAD" > "$ROOT/gh.log"
 GH_CUR="pending|IN PROGRESS: re-evaluating review evidence for PR 1" \
-  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; pub_rc=$?
+  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; pub_rc=$?
 [ "$pub_rc" -ne 0 ] && ! grep -qE "^(${HEAD}|${H2}) (failure|success|error)$" "$ROOT/gh.log" \
   && ok "#329: publish crash (missing heads.txt) exits nonzero and does not overwrite pending" \
   || bad "#329: publish crash did not leave pending (rc=$pub_rc log=$(tr '\n' ' ' < "$ROOT/gh.log"))"
 GH_CUR="pending|IN PROGRESS: re-evaluating review evidence for PR 1" \
-  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
+  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash -e "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
 [ "$rec_rc" -eq 0 ] && grep -q "^$HEAD error" "$ROOT/gh.log" && ! grep -q "^$HEAD failure" "$ROOT/gh.log" \
   && ok "#329: after publish crash, recovery flips the event head pending → error (not failure, not left pending)" \
   || bad "#329: recovery after crash: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
@@ -551,7 +551,7 @@ GH_CUR="pending|IN PROGRESS: re-evaluating review evidence for PR 1" \
 printf '1 %s\n2 %s\n' "$HEAD" "$H2" > "$WD/heads.txt"
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n{"number":2,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n' "$HEAD" "$FP" "$H2" > "$WD/results.jsonl"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_FP="$FP" GH_CUR="" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; pub_rc=$?
+GH_FP="$FP" GH_CUR="" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; pub_rc=$?
 [ "$pub_rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && grep -q "^$H2 failure" "$ROOT/gh.log" && ! grep -q ' error$' "$ROOT/gh.log" \
   && ok "#329: normal failure verdict: publish succeeds (rc=0), so if: failure() does not fire; no error stamp" \
   || bad "#329: normal failure path: rc=$pub_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
@@ -561,10 +561,10 @@ GH_FP="$FP" GH_CUR="" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLE
 printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
 printf '{"number":1,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n' "$HEAD" > "$WD/results.jsonl"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_FP="$FP" GH_CUR="" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; pub_rc=$?
+GH_FP="$FP" GH_CUR="" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash -e "$ROOT/publish.sh" >/dev/null 2>&1; pub_rc=$?
 [ "$pub_rc" -eq 0 ] && grep -q "^$HEAD failure" "$ROOT/gh.log" || bad "#329: event-PR failure publish did not write failure or exited nonzero (rc=$pub_rc log=$(tr '\n' ' ' < "$ROOT/gh.log"))"
 GH_CUR="failure|same-vendor-reviewer: grok" \
-  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
+  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash -e "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
 [ "$rec_rc" -eq 0 ] && grep -q "^$HEAD failure" "$ROOT/gh.log" && ! grep -q "^$HEAD error" "$ROOT/gh.log" \
   && ok "#329: recovery no-ops when publish already wrote a terminal failure (does not clobber with error)" \
   || bad "#329: recovery clobbered a published failure: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
@@ -572,7 +572,7 @@ GH_CUR="failure|same-vendor-reviewer: grok" \
 # Same guard, success branch (a POST can succeed and the step still exit 1).
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_CUR="success|pass: devin" \
-  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
+  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash -e "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
 [ "$rec_rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
   && ok "#329: recovery no-ops when publish already wrote success (does not clobber with error)" \
   || bad "#329: recovery clobbered a published success: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
@@ -580,7 +580,7 @@ GH_CUR="success|pass: devin" \
 # Same guard, error branch (do not POST another error over an existing one).
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_CUR="error|error: review-evidence sensor crashed evaluating this head — see the run for detail" \
-  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
+  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash -e "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
 [ "$rec_rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
   && ok "#329: recovery no-ops when the head already has error" \
   || bad "#329: recovery re-posted error over existing error: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
@@ -590,14 +590,14 @@ GH_CUR="error|error: review-evidence sensor crashed evaluating this head — see
 # fails, recovery must exit nonzero WITHOUT POSTing error.
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_GET_FAIL=1 GH_CUR="failure|same-vendor-reviewer: grok" \
-  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
+  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash -e "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
 [ "$rec_rc" -ne 0 ] && [ ! -s "$ROOT/gh.log" ] && grep -q 'status read FAILED' "$ROOT/summary" \
   && ok "#329: failed status GET exits nonzero and does not POST error (does not clobber)" \
   || bad "#329: failed GET posted or looked green: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
 
 # Scheduled/comment event: no 40-hex event head → recovery writes nothing.
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
+envrun env EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' bash -e "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
 [ "$rec_rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
   && ok "#329: recovery with no event head is a no-op (scheduled/comment run)" \
   || bad "#329: recovery without SHA: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
@@ -605,7 +605,7 @@ envrun env EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' bash "$ROOT/recover.sh" >/dev/nu
 # Recovery's own status write failing must not look like success.
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_POST_FAIL=1 GH_CUR="pending|IN PROGRESS: re-evaluating" \
-  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
+  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash -e "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
 [ "$rec_rc" -ne 0 ] && grep -q 'error stamp FAILED' "$ROOT/summary" \
   && ok "#329: recovery POST failure exits nonzero (never looks like success)" \
   || bad "#329: recovery POST failure was silent/green: rc=$rec_rc summary=$(tr '\n' ' ' < "$ROOT/summary")"
@@ -865,48 +865,98 @@ done
 d=$(fx_new og13); fx_commits "$d" "$GROK"; fx_files "$d" docs/guide.md; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-10-05T11:00:00Z|$(printf '<!-- owner-attested-review:v1\\nhead-sha: %s\\nreviewer-vendor: independent\\nresult: pass\\n-->' "$HEAD")"
 expect "(og13) the owner cannot countersign as the independent vendor" "$d" no-receipt-at-head pending 0
 
-echo "# #482 — a closed event writes no status on any head; reopened evaluates the live head"
-# The step cannot see merged vs unmerged (no such input) and must not try.
-# Both cases feed the same closed event: two listed heads, verdicts for both.
-closed_event_writes_nothing() {
-  label=$1
+echo "# #482 round 6 — a closed event is a full sweep; each write re-checks its own PR"
+# Pending re-reads the event PR and skips the stamp when that PR is merged or
+# closed. The open-PR listing still runs. publish() skips a row whose own PR
+# is merged or closed, including a stale listing row, and still writes an open
+# PR's own row. Crash-error re-reads the event PR and does not POST when it is merged.
+CLOSED_MERGED="1=closed|2026-10-27T12:00:00Z"
+
+for listing in empty stale; do
   : > "$ROOT/gh.log"; : > "$ROOT/summary"
-  GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" \
-    envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD \
-    bash "$ROOT/pending.sh" >/dev/null 2>&1
-  prc=$?
-  printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n{"number":2,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n' "$HEAD" "$FP" "$H2" > "$WD/results.jsonl"
-  printf '0' > "$WD/sweep.rc"
-  envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false \
-    bash "$ROOT/publish.sh" >/dev/null 2>&1
-  pubrc=$?
-  if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
-    && [ -f "$WD/heads.txt" ] && [ ! -s "$WD/heads.txt" ] \
-    && grep -q "writes no status on closed/merged PRs" "$ROOT/summary"; then
-    ok "$label"
+  if [ "$listing" = "empty" ]; then
+    list=''
   else
-    bad "$label: pending_rc=$prc publish_rc=$pubrc heads=$(wc -c < "$WD/heads.txt" | tr -d ' ') log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+    list=$(printf '1 %s\n' "$HEAD")
   fi
-}
-closed_event_writes_nothing "#482: closed+merged writes no status on any head (pending and publish rc 0)"
-closed_event_writes_nothing "#482: closed+unmerged writes no status on any head (step cannot tell merged from unmerged)"
+  GH_LIST="$list" \
+    envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+      GH_PR_STATES="$CLOSED_MERGED" \
+      IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+      bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+  prc=$?
+  : > "$WD/results.jsonl"
+  printf '0' > "$WD/sweep.rc"
+  envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+    GH_PR_STATES="$CLOSED_MERGED" GH_FP="$FP" GH_CUR="" \
+    IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+    bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  pubrc=$?
+  shape_ok=0
+  if [ "$listing" = "empty" ] && ! grep -q "^1 $HEAD$" "$WD/heads.txt"; then
+    shape_ok=1
+  fi
+  if [ "$listing" = "stale" ] \
+    && grep -q "^1 $HEAD$" "$WD/heads.txt" \
+    && grep -q "PR #1 is merged/closed; review-evidence writes no status on it (#482)" "$ROOT/summary" \
+    && grep -q "listed heads are merged/closed" "$ROOT/summary"; then
+    shape_ok=1
+  fi
+  if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] && [ "$shape_ok" -eq 1 ] && [ ! -s "$ROOT/gh.log" ] \
+    && grep -q "PR #1 is merged/closed; no pending stamp (#482)" "$ROOT/summary" \
+    && ! grep -q "no usable verdict" "$ROOT/pub.out" \
+    && ! grep -q "failed closed" "$ROOT/pub.out" \
+    && ! grep -q "NOT PUBLISHED" "$ROOT/pub.out"; then
+    ok "#482: closed+merged, listing $listing, no sweep line for PR 1 → zero writes on the head, both rc 0"
+  else
+    bad "#482: closed+merged $listing: pending_rc=$prc publish_rc=$pubrc shape=$shape_ok log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out") heads=$(tr '\n' ' ' < "$WD/heads.txt")"
+  fi
+done
 
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_CUR="pending|IN PROGRESS: re-evaluating review evidence for PR 1" \
-  envrun env EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD \
-  bash "$ROOT/recover.sh" >/dev/null 2>&1
+GH_LIST=$(printf '3 %s\n' "$H3") \
+  envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+    GH_PR_STATES="$CLOSED_MERGED 3=open|" \
+    IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+    bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+prc=$?
+printf '{"number":3,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$H3" "$FP" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="$CLOSED_MERGED 3=open|" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+pubrc=$?
+if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] \
+  && grep -q "^$H3 success$" "$ROOT/gh.log" \
+  && ! grep -q "^$HEAD " "$ROOT/gh.log" \
+  && ! grep -q ' pending$' "$ROOT/gh.log" \
+  && grep -q "^3 $H3$" "$WD/heads.txt" \
+  && grep -q "^- PR 3 @ ${H3:0:7}: \`success\`" "$ROOT/summary" \
+  && grep -q "PR #1 is merged/closed; no pending stamp (#482)" "$ROOT/summary"; then
+  ok "#482: closed run publishes open PR 3 at a different head (full sweep, including a reopened PR)"
+else
+  bad "#482: closed publishes PR 3: pending_rc=$prc publish_rc=$pubrc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out") heads=$(tr '\n' ' ' < "$WD/heads.txt")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="$CLOSED_MERGED" \
+  GH_CUR="pending|IN PROGRESS: re-evaluating review evidence for PR 1" \
+  EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+  bash -e "$ROOT/recover.sh" >"$ROOT/rec.out" 2>&1
 rec_rc=$?
 if [ "$rec_rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
-  && grep -q "writes no status on closed/merged PRs" "$ROOT/summary"; then
-  ok "#482: closed event crash-error step does not POST over a pending status"
+  && grep -q "PR #1 is merged/closed; no crash-error stamp (#482)" "$ROOT/summary"; then
+  ok "#482: closed event, live PR merged → crash-error does not POST"
 else
-  bad "#482: crash-error closed: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+  bad "#482: crash-error closed merged: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") out=$(tr '\n' ' ' < "$ROOT/rec.out")"
 fi
 
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_LIST="$(printf '1 %s\n' "$HEAD")" \
   envrun env EVENT_ACTION=reopened EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD IS_SCHEDULE=false \
-  bash "$ROOT/pending.sh" >/dev/null 2>&1
+  bash -e "$ROOT/pending.sh" >/dev/null 2>&1
 prc=$?
 if [ "$prc" -eq 0 ] && grep -q "^$HEAD pending$" "$ROOT/gh.log" && grep -q "^1 $HEAD$" "$WD/heads.txt"; then
   ok "#482: reopened event stamps pending on the live head"
@@ -916,7 +966,7 @@ fi
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_FP="$FP" envrun env EVENT_ACTION=reopened EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false \
-  bash "$ROOT/publish.sh" >/dev/null 2>&1
+  bash -e "$ROOT/publish.sh" >/dev/null 2>&1
 pubrc=$?
 if [ "$pubrc" -eq 0 ] && grep -q "^$HEAD success$" "$ROOT/gh.log" \
   && grep -q "^- PR 1 @ ${HEAD:0:7}: \`success\`" "$ROOT/summary"; then
@@ -925,14 +975,9 @@ else
   bad "#482: reopened publish: rc=$pubrc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 fi
 
-echo "# #482 — closed runs stay out of the serialized queue"
-# GitHub's \${{ }} evaluator does not run locally. The group line is parsed
-# and the same && / || rule is applied: action == 'closed' yields
-# format('pr-review-evidence-closed-{0}', run_id), which is unique per run
-# and is not the serialized group; every other action yields
-# 'pr-review-evidence-serialized'. cancel-in-progress stays false, so a
-# closed run can neither sit in that queue nor replace a run that is queued
-# there. A closed run still writes no status (the early exits above).
+echo "# #482 — every event uses one non-cancelling concurrency group"
+# A closed run is a normal full sweep in this group. If GitHub replaces a
+# queued run with it, the sweep still evaluates every open PR.
 conc_group=$(awk '
   $0 == "concurrency:" { c = 1; next }
   c && /^[^ ]/ { exit }
@@ -943,66 +988,51 @@ conc_cancel=$(awk '
   c && /^[^ ]/ { exit }
   c && /^  cancel-in-progress: / { sub(/^  cancel-in-progress: /, ""); print; exit }
 ' "$WF")
-conc_inner=$(printf '%s\n' "$conc_group" | sed -n 's/^\${{ \(.*\) }}$/\1/p')
-conc_parse=$(printf '%s\n' "$conc_inner" | sed -n "s/^github\\.event\\.action == '\\([^']*\\)' && format('\\([^']*\\)', github\\.run_id) || '\\([^']*\\)'$/\\1 \\2 \\3/p")
-read -r conc_closed conc_fmt conc_other <<EOF
-${conc_parse:-}
-EOF
-conc_closed=${conc_closed:-}
-conc_fmt=${conc_fmt:-}
-conc_other=${conc_other:-}
-apply_conc() {
-  if [ "$1" = "$conc_closed" ]; then
-    printf '%s\n' "${conc_fmt//\{0\}/$2}"
-  else
-    printf '%s\n' "$conc_other"
-  fi
-}
-g_closed=$(apply_conc closed 9001)
-g_closed_b=$(apply_conc closed 9002)
-g_reopened=$(apply_conc reopened 9001)
-g_edited=$(apply_conc edited 9001)
-g_sync=$(apply_conc synchronize 9001)
-if [ "$conc_cancel" = "false" ] \
-  && [ "$conc_closed" = "closed" ] \
-  && [ "$conc_fmt" = "pr-review-evidence-closed-{0}" ] \
-  && [ "$conc_other" = "pr-review-evidence-serialized" ] \
-  && [ "$g_closed" = "pr-review-evidence-closed-9001" ] \
-  && [ "$g_closed" != "$g_closed_b" ] \
-  && [ "$g_closed" != "$conc_other" ] \
-  && [ "$g_reopened" = "pr-review-evidence-serialized" ] \
-  && [ "$g_edited" = "pr-review-evidence-serialized" ] \
-  && [ "$g_sync" = "pr-review-evidence-serialized" ]; then
-  ok "#482: a closed run cannot displace a queued reopened/edited/synchronize run (separate concurrency group)"
+if [ "$conc_group" = "pr-review-evidence-serialized" ] && [ "$conc_cancel" = "false" ] \
+  && ! grep -q 'pr-review-evidence-closed' "$WF"; then
+  ok "#482: every event uses pr-review-evidence-serialized; cancel-in-progress is false"
 else
-  bad "#482: concurrency group: cancel=${conc_cancel:-?} closed=${conc_closed:-?} fmt=${conc_fmt:-?} other=${conc_other:-?} expr=${conc_group:-?} → closed=$g_closed reopened=$g_reopened edited=$g_edited sync=$g_sync"
+  bad "#482: concurrency group: group=${conc_group:-?} cancel=${conc_cancel:-?}"
+fi
+if grep -F -q "Every status write re-checks that its own PR is live open; a merged/closed PR's head is never written via that PR." "$WF" \
+  && ! grep -q 'EVENT_ACTION' "$WF" \
+  && ! grep -q 'EVENT_ACTION' "$ROOT/pending.sh" "$ROOT/publish.sh" "$ROOT/recover.sh"; then
+  ok "#482: live-open invariant is the rule; EVENT_ACTION is unused"
+else
+  bad "#482: invariant comment missing or EVENT_ACTION still present"
 fi
 
-# Same workdir: a reopened run writes the verdict, then a closed run for the
-# same PR writes nothing after it. The last status on $HEAD stays that verdict.
+# A reopened run publishes success. The PR then merges. The closed run's live
+# read sees merged, the open listing is empty, and the sweep has no line for
+# that PR, so nothing is written after the success (#567). An open sibling is
+# a different case: its own row is written above.
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_LIST=$(printf '1 %s' "$HEAD") \
-  envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL \
-    EVENT_ACTION=reopened EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false \
-    bash "$ROOT/pending.sh" >/dev/null 2>&1
+GH_LIST=$(printf '1 %s\n' "$HEAD") \
+  envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_PR_STATE_FAIL \
+    GH_PR_STATES="1=open|" EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false \
+    bash -e "$ROOT/pending.sh" >/dev/null 2>&1
 prc=$?
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
 printf '0' > "$WD/sweep.rc"
-GH_FP="$FP" GH_CUR="" \
-  envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL \
-    EVENT_ACTION=reopened EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false CANCELLED=false \
-    bash "$ROOT/publish.sh" >/dev/null 2>&1
+envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_PR_STATE_FAIL \
+  GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="" \
+  EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >/dev/null 2>&1
 pubrc=$?
 cp "$ROOT/gh.log" "$ROOT/gh.log.reopened"
-last_write=$(awk -v h="$HEAD" '$1 == h { last = $0 } END { print last }' "$ROOT/gh.log")
-envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL \
-  EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false \
-  bash "$ROOT/pending.sh" >/dev/null 2>&1
+: > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+GH_LIST='' \
+  envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_PR_STATE_FAIL \
+    GH_PR_STATES="$CLOSED_MERGED" EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false \
+    bash -e "$ROOT/pending.sh" >/dev/null 2>&1
 crc=$?
-envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL \
-  EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false CANCELLED=false \
-  bash "$ROOT/publish.sh" >/dev/null 2>&1
+envrun env -u GH_LIST_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_PR_STATE_FAIL \
+  GH_PR_STATES="$CLOSED_MERGED" GH_FP="$FP" GH_CUR="" \
+  EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" IS_SCHEDULE=false CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >/dev/null 2>&1
 cpub=$?
+last_write=$(awk -v h="$HEAD" '$1 == h { last = $0 } END { print last }' "$ROOT/gh.log")
 if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] && [ "$crc" -eq 0 ] && [ "$cpub" -eq 0 ] \
   && [ "$last_write" = "$HEAD success" ] \
   && cmp -s "$ROOT/gh.log" "$ROOT/gh.log.reopened"; then
@@ -1011,44 +1041,9 @@ else
   bad "#482: closed-after-reopened: pending_rc=$prc publish_rc=$pubrc closed_pending_rc=$crc closed_publish_rc=$cpub last=${last_write:-?} log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 fi
 
-# Static: the guard is the first statement after set -uo pipefail in all three
-# status-writing steps, and it exits before any gh call.
-closed_guard_first() {
-  awk '
-    $0 == "set -uo pipefail" { setline = NR; next }
-    setline && NR == setline + 1 && $0 == "if [ \"${EVENT_ACTION:-}\" = \"closed\" ]; then" { found = 1 }
-    found && !exited && index($0, "::notice::closed event: review-evidence writes no status on closed/merged PRs (#482); a reopened PR is evaluated by its own reopened event") { notice = 1 }
-    found && !exited && index($0, ">> \"$GITHUB_STEP_SUMMARY\"") { summary = 1 }
-    found && !exited && $0 ~ /^[[:space:]]*exit 0$/ { exited = 1; next }
-    found && !exited && $0 ~ /(^|[[:space:]])gh[[:space:]]/ { gh_in_guard = 1 }
-    END { exit (found && notice && summary && exited && !gh_in_guard) ? 0 : 1 }
-  ' "$1"
-}
-for pair in "pending|$ROOT/pending.sh" "publish|$ROOT/publish.sh" "crash-error|$ROOT/recover.sh"; do
-  name=${pair%%|*}
-  body=${pair#*|}
-  if closed_guard_first "$body"; then
-    ok "#482: closed early-exit is first in the $name step body"
-  else
-    bad "#482: closed early-exit missing or not first in $name ($body)"
-  fi
-done
-if awk '
-  /^    env:$/ { injob = 1; next }
-  injob && /^    steps:$/ { injob = 0 }
-  injob && /^      EVENT_ACTION:/ { found = 1 }
-  /^          EVENT_ACTION:/ { step = 1 }
-  END { exit (found && !step) ? 0 : 1 }
-' "$WF"; then
-  ok "#482: EVENT_ACTION is set on the job env and not repeated on the publish step"
-else
-  bad "#482: EVENT_ACTION job-env placement"
-fi
-
 echo "# #482 round 2 — a non-closed sweep does not publish after the PR merges"
-# Codex: a schedule or comment sweep can POST pending or failure after a PR
-# merges, while the concurrent closed-event run exits without repairing the
-# head. publish() re-reads that row's own PR and skips the write.
+# A schedule or comment sweep can POST after a PR merges. publish() re-reads
+# that row's own PR and skips the write. A closed event uses the same check.
 MERGED_AT="1=closed|2026-10-27T12:00:00Z"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
@@ -1057,7 +1052,7 @@ printf '0' > "$WD/sweep.rc"
 envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
   GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
   IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION='' \
-  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
 rc=$?
 if [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
   && grep -q "PR #1 is merged/closed; review-evidence writes no status on it (#482)" "$ROOT/summary"; then
@@ -1073,7 +1068,7 @@ printf '0' > "$WD/sweep.rc"
 envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
   GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
   IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION=created \
-  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
 rc=$?
 if [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
   && grep -q "PR #1 is merged/closed; review-evidence writes no status on it (#482)" "$ROOT/summary" \
@@ -1090,7 +1085,7 @@ printf '0' > "$WD/sweep.rc"
 envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
   GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="" \
   IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION='' \
-  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
 rc=$?
 if [ "$rc" -ne 0 ] && grep -q "^$HEAD failure$" "$ROOT/gh.log" \
   && ! grep -q "PR #1 is merged/closed" "$ROOT/summary"; then
@@ -1106,7 +1101,7 @@ printf '0' > "$WD/sweep.rc"
 envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
   GH_PR_STATE_FAIL=1 GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
   IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION='' \
-  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
 rc=$?
 if [ "$rc" -ne 0 ] && grep -q "^$HEAD failure$" "$ROOT/gh.log" \
   && ! grep -q "PR #1 is merged/closed" "$ROOT/summary"; then
@@ -1122,7 +1117,7 @@ printf '0' > "$WD/sweep.rc"
 envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
   GH_PR_STATES="$MERGED_AT 2=open|" GH_FP="$FP" GH_CUR="" \
   IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION='' \
-  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
 rc=$?
 if [ "$rc" -eq 0 ] && [ "$(grep -c "^$HEAD " "$ROOT/gh.log")" -eq 1 ] \
   && grep -q "^$HEAD success$" "$ROOT/gh.log" \
@@ -1134,11 +1129,10 @@ else
   bad "#482: shared head: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
 fi
 
-echo "# #482 round 3 — a queued non-closed event does not stamp pending after its PR merges"
+echo "# #482 round 3 — a queued non-closed event does not stamp its own row after its PR merges"
 # The pending step re-reads the event PR before the stamp. Closed/merged:
-# no pending POST, and the event's own row is not added to heads.txt. Publish
-# then must not treat that head as a sweep gap or an event failure. An open
-# sibling that shares the SHA keeps its listing row and its verdict.
+# no row for that PR and no pending POST. Publish must not treat the closed
+# head as a sweep gap or an event failure.
 # Between the two steps the test stands in for the sweep (the node program is
 # not these shell steps): an empty open list yields sweep.rc 0 and no lines.
 no_gap_phrases() {
@@ -1150,14 +1144,14 @@ GH_LIST='' \
   envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
     GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
     IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
-    bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+    bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
 prc=$?
 : > "$WD/results.jsonl"
 printf '0' > "$WD/sweep.rc"
 envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
   GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
   IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
-  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
 pubrc=$?
 if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
   && ! grep -q "^1 $HEAD$" "$WD/heads.txt" \
@@ -1169,47 +1163,18 @@ else
 fi
 
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_LIST="$(printf '2 %s\n' "$HEAD")" \
-  envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
-    GH_PR_STATES="$MERGED_AT 2=open|" GH_FP="$FP" GH_CUR="" \
-    IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
-    bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
-prc=$?
-printf '{"number":2,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
-printf '0' > "$WD/sweep.rc"
-envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
-  GH_PR_STATES="$MERGED_AT 2=open|" GH_FP="$FP" GH_CUR="" \
-  IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
-  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
-pubrc=$?
-if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] \
-  && [ "$(grep -c "^$HEAD " "$ROOT/gh.log")" -eq 1 ] \
-  && grep -q "^$HEAD success$" "$ROOT/gh.log" \
-  && ! grep -q ' pending$' "$ROOT/gh.log" \
-  && grep -q "^2 $HEAD$" "$WD/heads.txt" \
-  && ! grep -q "^1 $HEAD$" "$WD/heads.txt" \
-  && grep -q "PR #1 is merged/closed; no pending stamp (#482)" "$ROOT/summary" \
-  && grep -q "^- PR 2 @ ${HEAD:0:7}: \`success\`" "$ROOT/summary" \
-  && ! grep -q "PR #1 is merged/closed; review-evidence writes no status" "$ROOT/summary" \
-  && no_gap_phrases "$ROOT/pub.out"; then
-  ok "#482: synchronize, live PR 1 merged, open sibling 2 on the same SHA → no pending; one success write for PR 2"
-else
-  bad "#482: sibling stamp: pending_rc=$prc publish_rc=$pubrc heads=$(tr '\n' ' ' < "$WD/heads.txt") log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
-fi
-
-: > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_LIST="$(printf '1 %s\n' "$HEAD")" \
   envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
     GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="" \
     IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
-    bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+    bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
 prc=$?
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
 printf '0' > "$WD/sweep.rc"
 envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
   GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="" \
   IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
-  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
 pubrc=$?
 if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] \
   && [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 1 ] \
@@ -1228,22 +1193,21 @@ GH_LIST="$(printf '1 %s\n' "$HEAD")" \
   envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
     GH_PR_STATE_FAIL=1 GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
     IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
-    bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+    bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
 prc=$?
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
 printf '0' > "$WD/sweep.rc"
 envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
   GH_PR_STATE_FAIL=1 GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
   IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
-  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
 pubrc=$?
 if [ "$prc" -eq 0 ] && [ "$pubrc" -eq 0 ] \
-  && [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 1 ] \
-  && grep -q "^$HEAD pending$" "$ROOT/gh.log" \
-  && grep -q "^$HEAD success$" "$ROOT/gh.log" \
+  && [ "$(grep -c "^$HEAD pending$" "$ROOT/gh.log" || true)" -eq 2 ] \
+  && ! grep -q "^$HEAD success$" "$ROOT/gh.log" \
   && ! grep -q "no pending stamp" "$ROOT/summary" \
-  && grep -q "^- PR 1 @ ${HEAD:0:7}: \`success\`" "$ROOT/summary"; then
-  ok "#482: synchronize, live state read fails → pending stamped (fail closed) and the verdict written"
+  && grep -q "^- PR 1 @ ${HEAD:0:7}: \`pending\` — UNVERIFIED: could not confirm PR #1 is open; re-evaluating on the next sweep (#482)" "$ROOT/summary"; then
+  ok "#482: synchronize, live state read fails, success verdict → pending stamped and UNVERIFIED pending written (not success)"
 else
   bad "#482: read-fail still stamps: pending_rc=$prc publish_rc=$pubrc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
 fi
@@ -1264,7 +1228,7 @@ for rows in both no-pr1; do
     envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
       GH_PR_STATES="1=open| 2=open|" GH_FP="$FP" GH_CUR="" \
       IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
-      bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+      bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
   prc=$?
   stamped=0
   if [ "$prc" -eq 0 ] && [ "$(sha_status_lines "$HEAD")" -eq 1 ] && [ "$(last_sha_status "$HEAD")" = "$HEAD pending" ]; then
@@ -1279,7 +1243,7 @@ for rows in both no-pr1; do
   envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
     GH_PR_STATES="$MERGED_AT 2=open|" GH_FP="$FP" GH_CUR="" \
     IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
-    bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+    bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
   pubrc=$?
   last=$(last_sha_status "$HEAD")
   if [ "$stamped" -eq 1 ] && [ "$pubrc" -eq 0 ] && [ "$last" = "$HEAD success" ] \
@@ -1296,7 +1260,7 @@ for rows in both no-pr1; do
     envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
       GH_PR_STATES="1=open| 2=open|" GH_FP="$FP" GH_CUR="" \
       IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
-      bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+      bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
   prc=$?
   stamped=0
   if [ "$prc" -eq 0 ] && [ "$(sha_status_lines "$HEAD")" -eq 1 ] && [ "$(last_sha_status "$HEAD")" = "$HEAD pending" ]; then
@@ -1311,7 +1275,7 @@ for rows in both no-pr1; do
   envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
     GH_PR_STATES="$MERGED_AT 2=open|" GH_FP="$FP" GH_CUR="" \
     IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
-    bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+    bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
   pubrc=$?
   n=$(sha_status_lines "$HEAD")
   last=$(last_sha_status "$HEAD")
@@ -1330,14 +1294,14 @@ GH_LIST="$(printf '1 %s\n' "$HEAD")" \
   envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
     GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="" \
     IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
-    bash "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+    bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
 prc=$?
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
 printf '0' > "$WD/sweep.rc"
 envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
   GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="" \
   IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
-  bash "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
 pubrc=$?
 n=$(sha_status_lines "$HEAD")
 last=$(last_sha_status "$HEAD")
@@ -1348,6 +1312,330 @@ else
   bad "#482: no sibling: pending_rc=$prc publish_rc=$pubrc n=$n last=${last:-?} log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
 fi
 
+echo "# #482 round 5 — unchanged status must not bypass the closed-PR check"
+# Empty completed sweep, one listed head, live PR merged. The head is not the
+# event head, so the churn-cap return is reachable. A current status that
+# already equals the no-verdict failure must still be a closed-skip (rc 0,
+# no POST), same as a status that does not match. Counting the match as a
+# publish exits 1.
+EMPTY_FAIL="failure|api-error: sweep produced no verdicts"
+for cur in "$EMPTY_FAIL" "success|pass: devin"; do
+  : > "$ROOT/gh.log"; : > "$ROOT/summary"
+  printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
+  : > "$WD/results.jsonl"
+  printf '0' > "$WD/sweep.rc"
+  envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+    GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="$cur" \
+    IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' CANCELLED=false EVENT_ACTION='' \
+    bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+    && grep -q "PR #1 is merged/closed; review-evidence writes no status on it (#482)" "$ROOT/summary" \
+    && grep -q "listed heads are merged/closed" "$ROOT/summary" \
+    && grep -q "every listed head is merged/closed" "$ROOT/pub.out" \
+    && ! grep -q "NOT PUBLISHED" "$ROOT/summary" \
+    && ! grep -q "no verdicts and no known heads" "$ROOT/pub.out" \
+    && ! grep -q "unchanged:" "$ROOT/pub.out"; then
+    ok "#482: empty completed sweep, live PR 1 merged, current status [$cur] → closed-skip, no POST, rc 0"
+  else
+    bad "#482: empty sweep merged status [$cur]: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
+  fi
+done
+
+echo "# #482 round 5 — crash-error re-reads the event PR before any POST"
+# synchronize for PR 1 at $HEAD. Current status is an open sibling's pending
+# on the shared SHA. Merged → no error POST. Open, or a failed live read,
+# still stamps error (fail closed).
+SIBLING_PENDING="pending|IN PROGRESS: re-evaluating review evidence for PR 2"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="$MERGED_AT" GH_CUR="$SIBLING_PENDING" \
+  EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+  bash -e "$ROOT/recover.sh" >"$ROOT/rec.out" 2>&1
+rec_rc=$?
+if [ "$rec_rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && grep -q "PR #1 is merged/closed; no crash-error stamp (#482)" "$ROOT/summary"; then
+  ok "#482: synchronize, live PR 1 merged, sibling pending on the SHA → crash-error does not POST"
+else
+  bad "#482: crash-error merged: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") out=$(tr '\n' ' ' < "$ROOT/rec.out")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="1=open|" GH_CUR="$SIBLING_PENDING" \
+  EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+  bash -e "$ROOT/recover.sh" >"$ROOT/rec.out" 2>&1
+rec_rc=$?
+if [ "$rec_rc" -eq 0 ] && grep -q "^$HEAD error$" "$ROOT/gh.log" \
+  && ! grep -q "no crash-error stamp" "$ROOT/summary"; then
+  ok "#482: synchronize, live PR 1 open, pending on the SHA → crash-error stamps error"
+else
+  bad "#482: crash-error open: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATE_FAIL=1 GH_PR_STATES="$MERGED_AT" GH_CUR="$SIBLING_PENDING" \
+  EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+  bash -e "$ROOT/recover.sh" >"$ROOT/rec.out" 2>&1
+rec_rc=$?
+if [ "$rec_rc" -eq 0 ] && grep -q "^$HEAD error$" "$ROOT/gh.log" \
+  && ! grep -q "no crash-error stamp" "$ROOT/summary"; then
+  ok "#482: synchronize, live state read fails, pending on the SHA → crash-error stamps error (fail closed)"
+else
+  bad "#482: crash-error read-fail: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
+fi
+
+echo "# #482 round 7 — bash -e: a normal nonzero from pr_live_closed must not abort the step"
+# Actions invokes each run: block as `bash -e {0}`. pr_live_closed returns 1 for
+# an open PR and 2 when the read fails. Both are normal, and both must still stamp.
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST="$(printf '1 %s\n' "$HEAD")" \
+  envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
+    GH_PR_STATES="1=open|" \
+    IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+    bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+prc=$?
+if [ "$prc" -eq 0 ] && grep -q "^$HEAD pending$" "$ROOT/gh.log" \
+  && ! grep -q "no pending stamp" "$ROOT/summary"; then
+  ok "#482: synchronize, live PR open, bash -e → pending stamped (return 1 is not an abort)"
+else
+  bad "#482: errexit open pending: rc=$prc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") out=$(tr '\n' ' ' < "$ROOT/pend.out")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST="$(printf '1 %s\n' "$HEAD")" \
+  envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
+    GH_PR_STATE_FAIL=1 GH_PR_STATES="1=open|" \
+    IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+    bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+prc=$?
+if [ "$prc" -eq 0 ] && grep -q "^$HEAD pending$" "$ROOT/gh.log" \
+  && ! grep -q "no pending stamp" "$ROOT/summary"; then
+  ok "#482: synchronize, live read fails, bash -e → pending stamped (return 2 is not an abort)"
+else
+  bad "#482: errexit read-fail pending: rc=$prc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") out=$(tr '\n' ' ' < "$ROOT/pend.out")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
+  GH_PR_STATES="1=open|" GH_CUR="$SIBLING_PENDING" \
+  EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+  bash -e "$ROOT/recover.sh" >"$ROOT/rec.out" 2>&1
+rec_rc=$?
+if [ "$rec_rc" -eq 0 ] && grep -q "^$HEAD error$" "$ROOT/gh.log" \
+  && ! grep -q "no crash-error stamp" "$ROOT/summary"; then
+  ok "#482: crash-error, live PR open, bash -e → error stamped (return 1 is not an abort)"
+else
+  bad "#482: errexit crash-error open: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") out=$(tr '\n' ' ' < "$ROOT/rec.out")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
+  GH_PR_STATE_FAIL=1 GH_PR_STATES="1=open|" GH_CUR="$SIBLING_PENDING" \
+  EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+  bash -e "$ROOT/recover.sh" >"$ROOT/rec.out" 2>&1
+rec_rc=$?
+if [ "$rec_rc" -eq 0 ] && grep -q "^$HEAD error$" "$ROOT/gh.log" \
+  && ! grep -q "no crash-error stamp" "$ROOT/summary"; then
+  ok "#482: crash-error, live read fails, bash -e → error stamped (return 2 is not an abort)"
+else
+  bad "#482: errexit crash-error read-fail: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") out=$(tr '\n' ' ' < "$ROOT/rec.out")"
+fi
+
+echo "# #482 round 7 — a closed skip must not hide a failed pending step"
+# HEADS_OUTCOME=failure means the pending step failed. An empty completed sweep
+# whose listed heads are all closed is still a skip, and a skip must stay red.
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
+: > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="$MERGED_AT" GH_FP="$FP" GH_CUR="failure|api-error: sweep produced no verdicts" \
+  HEADS_OUTCOME=failure \
+  IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && grep -q "pending stamp step FAILED" "$ROOT/summary" \
+  && grep -q "PR #1 is merged/closed; review-evidence writes no status on it (#482)" "$ROOT/summary" \
+  && grep -q "listed heads are merged/closed" "$ROOT/summary" \
+  && ! grep -q "NOT PUBLISHED" "$ROOT/summary"; then
+  ok "#482: HEADS_OUTCOME=failure + empty completed sweep + listed head closed → publish exits nonzero"
+else
+  bad "#482: post_fail closed-skip: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
+fi
+# The other early exit 0 (no listed heads, sweep found nothing) has the same hole.
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+: > "$WD/heads.txt"
+: > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  HEADS_OUTCOME=failure \
+  IS_SCHEDULE=true EVENT_PR_NUMBER= EVENT_HEAD_SHA= CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -ne 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && grep -q "pending stamp step FAILED" "$ROOT/summary" \
+  && grep -q "nothing to sweep" "$ROOT/summary"; then
+  ok "#482: HEADS_OUTCOME=failure + empty completed sweep + no heads → publish exits nonzero"
+else
+  bad "#482: post_fail empty-queue: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
+fi
+
+echo "# #482 round 8 — a failed live read must not publish success"
+UNVERIFIED='UNVERIFIED: could not confirm PR #1 is open; re-evaluating on the next sweep (#482)'
+# Cached success on the head. A non-event write would skip an unchanged
+# success; a failed live read still posts UNVERIFIED pending.
+CACHED_SUCCESS='success|pass: devin'
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATE_FAIL=1 GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="$CACHED_SUCCESS" \
+  IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ "$(grep -c "^$HEAD pending$" "$ROOT/gh.log" || true)" -eq 1 ] \
+  && ! grep -q "^$HEAD success$" "$ROOT/gh.log" \
+  && grep -F -q -- "- PR 1 @ ${HEAD:0:7}: \`pending\` — $UNVERIFIED" "$ROOT/summary"; then
+  ok "#482: synchronize, success verdict, live read fails → \$HEAD pending (UNVERIFIED), not success, rc 0"
+else
+  bad "#482: Q1 synchronize read-fail: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATE_FAIL=1 GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="$CACHED_SUCCESS" \
+  IS_SCHEDULE=true EVENT_PR_NUMBER= EVENT_HEAD_SHA= CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ "$(grep -c "^$HEAD pending$" "$ROOT/gh.log" || true)" -eq 1 ] \
+  && ! grep -q "^$HEAD success$" "$ROOT/gh.log" \
+  && grep -F -q -- "- PR 1 @ ${HEAD:0:7}: \`pending\` — $UNVERIFIED" "$ROOT/summary"; then
+  ok "#482: schedule, success verdict, live read fails → \$HEAD pending (UNVERIFIED), not the cached success, rc 0"
+else
+  bad "#482: Q1 schedule read-fail: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="$CACHED_SUCCESS" \
+  IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && grep -q "^$HEAD success$" "$ROOT/gh.log" \
+  && ! grep -q "^$HEAD pending$" "$ROOT/gh.log" \
+  && ! grep -F -q "UNVERIFIED:" "$ROOT/summary"; then
+  ok "#482: synchronize, success verdict, live read open → success written"
+else
+  bad "#482: Q1 open read: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
+fi
+
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n' "$HEAD" > "$WD/heads.txt"
+printf '{"number":1,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n' "$HEAD" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATE_FAIL=1 GH_PR_STATES="1=open|" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && grep -q "^$HEAD failure$" "$ROOT/gh.log" \
+  && ! grep -q "^$HEAD pending$" "$ROOT/gh.log" \
+  && ! grep -F -q "UNVERIFIED:" "$ROOT/summary" \
+  && grep -q "^- PR 1 @ ${HEAD:0:7}: \`failure\`" "$ROOT/summary"; then
+  ok "#482: synchronize, failure verdict, live read fails → failure written (non-success stays fail closed)"
+else
+  bad "#482: Q1 failure read-fail: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
+fi
+
+echo "# #482 round 10 — pair-dedupe heads.txt on the \"<n> <sha>\" pair"
+# N2. The open listing still has closed PR 1 at $HEAD. The event is open
+# PR 2 at the same sha. Pair dedupe records both rows. An empty completed
+# sweep must fail closed on PR 2, not treat the only recorded row as closed
+# and exit green.
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST=$(printf '1 %s\n' "$HEAD") \
+  envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+    GH_PR_STATES="1=closed| 2=open|" \
+    IS_SCHEDULE=false EVENT_PR_NUMBER=2 EVENT_HEAD_SHA="$HEAD" \
+    bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+prc=$?
+rows_ok=0
+if [ "$prc" -eq 0 ] && grep -qx "1 $HEAD" "$WD/heads.txt" && grep -qx "2 $HEAD" "$WD/heads.txt"; then
+  rows_ok=1
+fi
+: > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL \
+  GH_PR_STATES="1=closed| 2=open|" GH_CUR="" \
+  IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=2 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+pubrc=$?
+if [ "$rows_ok" -eq 1 ] && [ "$pubrc" -ne 0 ] \
+  && grep -qx "1 $HEAD" "$WD/heads.txt" && grep -qx "2 $HEAD" "$WD/heads.txt" \
+  && grep -q "^$HEAD failure$" "$ROOT/gh.log" \
+  && grep -F -q "on PR 2" "$ROOT/summary" \
+  && ! grep -q "every listed head is merged/closed" "$ROOT/pub.out"; then
+  ok "#482 N2: stale closed row 1 at \$HEAD does not hide the open event PR 2; empty sweep fails closed on PR 2"
+else
+  bad "#482 N2: rows_ok=$rows_ok pending_rc=$prc publish_rc=$pubrc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out") heads=$(tr '\n' ' ' < "$WD/heads.txt") out=$(tr '\n' ' ' < "$ROOT/pend.out")"
+fi
+
+echo "# #482 round 12 — pair coverage, and UNVERIFIED pending when a closed event cannot list open PRs"
+# G1. Both PRs are open on $HEAD. The sweep returns success only for PR 2.
+# PR 2's write must not cover PR 1. PR 1 is the event PR, so the missing
+# verdict fails closed (failure is the last write on $HEAD) and the job is red.
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+printf '1 %s\n2 %s\n' "$HEAD" "$HEAD" > "$WD/heads.txt"
+printf '{"number":2,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+printf '0' > "$WD/sweep.rc"
+envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL -u GH_LIST_FAIL -u HEADS_OUTCOME \
+  GH_PR_STATES="1=open| 2=open|" GH_FP="$FP" GH_CUR="" \
+  IS_SCHEDULE=false EVENT_ACTION=synchronize EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" CANCELLED=false \
+  bash -e "$ROOT/publish.sh" >"$ROOT/pub.out" 2>&1
+rc=$?
+last=$(last_sha_status "$HEAD")
+if [ "$rc" -ne 0 ] && [ "$last" = "$HEAD failure" ] \
+  && grep -q "^$HEAD success$" "$ROOT/gh.log" \
+  && grep -q "no usable verdict" "$ROOT/pub.out" \
+  && grep -q "^- PR 1 @ ${HEAD:0:7}: \`failure\` — no verdict from the sweep" "$ROOT/summary" \
+  && grep -q "^- PR 2 @ ${HEAD:0:7}: \`success\`" "$ROOT/summary"; then
+  ok "#482: same SHA, both open, sweep only for PR 2 → PR 1 failure is the last write and the job is red"
+else
+  bad "#482: pair coverage: rc=$rc last=${last:-?} log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary") pub=$(tr '\n' ' ' < "$ROOT/pub.out")"
+fi
+
+# G2. Closed event, live PR 1 merged, open-PR listing fails. Stamp UNVERIFIED
+# pending on the event head (an open PR we cannot see may share it) and fail
+# the step. A successful listing still skips the stamp (covered above).
+: > "$ROOT/gh.log"; : > "$ROOT/summary"; : > "$ROOT/desc.log"
+GH_LIST_FAIL=1 \
+  envrun env -u GH_PR_STATE_FAIL -u GH_POST_FAIL -u GH_GET_FAIL \
+    GH_DESC_LOG="$ROOT/desc.log" GH_PR_STATES="$MERGED_AT" \
+    IS_SCHEDULE=false EVENT_ACTION=closed EVENT_PR_NUMBER=1 EVENT_HEAD_SHA="$HEAD" \
+    bash -e "$ROOT/pending.sh" >"$ROOT/pend.out" 2>&1
+prc=$?
+if [ "$prc" -ne 0 ] \
+  && [ "$(grep -c "^$HEAD pending$" "$ROOT/gh.log" || true)" -eq 1 ] \
+  && grep -F -q 'UNVERIFIED: open-PR listing failed; re-evaluating (#482)' "$ROOT/desc.log" \
+  && ! grep -F -q 'IN PROGRESS:' "$ROOT/desc.log"; then
+  ok "#482: closed event, live PR 1 merged, listing failed → UNVERIFIED pending on \$HEAD, step nonzero"
+else
+  bad "#482: listing-fail UNVERIFIED: rc=$prc log=$(tr '\n' ' ' < "$ROOT/gh.log") desc=$(tr '\n' ' ' < "$ROOT/desc.log") summary=$(tr '\n' ' ' < "$ROOT/summary") out=$(tr '\n' ' ' < "$ROOT/pend.out")"
+fi
+
 echo
 echo "pr-review-evidence.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
+
