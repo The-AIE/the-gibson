@@ -742,6 +742,9 @@ export async function main(argv) {
     try { open = await ghPages(`repos/${args.repo}/pulls?state=open&per_page=100`); }
     catch (e) { process.stdout.write(`${JSON.stringify({ number: null, headSha: "", ...faultResult(e) })}\n`); process.exitCode = 1; return; }
     for (const p of open) {
+      // #482: a stale or racy state=open page must never yield a verdict line
+      // for a merged or closed PR. Skip before evaluate so no line is emitted.
+      if (p?.state !== "open" || p?.merged_at != null) continue;
       const n = Number(p?.number);
       const r = await evaluateOne({ ...args, pr: String(n), expectedHead: norm(p?.head?.sha ?? "") || null }, config);
       // State fingerprint at evaluation time; the publisher re-reads it right

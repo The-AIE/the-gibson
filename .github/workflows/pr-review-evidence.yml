@@ -80,6 +80,17 @@ jobs:
       # red when THIS event's PR fails, so the check is visible on that PR.
       EVENT_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
       EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # CLOSED EVENTS WRITE NOTHING ON THAT HEAD (#482, #567).
+      # pull_request_target: closed fires after a merge and after a close
+      # without merge. The sweep lists only open PRs, so it never returns a
+      # verdict for that head. Recording the head — the pending stamp, or the
+      # publish step's "sweep produced no verdict" failure — overwrites the
+      # success that cleared the merge. Each shell step that reads
+      # EVENT_HEAD_SHA or EVENT_PR_NUMBER clears both when EVENT_ACTION is
+      # closed, in shell, before any status write. `closed` stays a trigger:
+      # a sibling PR that still shares the head is recovered by the sweep of
+      # the remaining open PRs.
+      EVENT_ACTION: ${{ github.event.action }}
     steps:
       - name: Stamp pending on every open PR head (FIRST, before any checkout)
         id: heads
@@ -92,18 +103,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
+          # #482 / #567: a closed event's head is not a stamp target. The
+          # sweep will not verdict it, and a later "no verdict" failure would
+          # overwrite the success that cleared the merge.
+          if [ "${EVENT_ACTION:-}" = "closed" ]; then
+            echo "closed event: PR #${EVENT_PR_NUMBER:-?} head is not stamped (merged/closed PRs get no new status, #482)"
+            CLOSED_PR="${EVENT_PR_NUMBER:-}"
+            EVENT_HEAD_SHA=
+            EVENT_PR_NUMBER=
+          fi
           listed=0
           if gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
-              --jq '.[] | "\(.number) \(.head.sha)"' > "$RUNNER_TEMP/heads.txt"; then
+              --jq '.[] | select(.state == "open" and .merged_at == null) | "\(.number) \(.head.sha)"' > "$RUNNER_TEMP/heads.txt"; then
             listed=1
           else
             : > "$RUNNER_TEMP/heads.txt"
             echo "::notice::could not list open pull requests; publish will fail closed on the event head"
             echo "- open-PR listing failed; falling back to the event head" >> "$GITHUB_STEP_SUMMARY"
           fi
-          # The event's own head ALWAYS joins the set (Codex round 5, finding
-          # 3): a PR (re)opened between this listing and the sweep, or omitted
-          # by a stale listing, must still be stamped pending now.
+          # #482: a stale open listing right after a merge can still name the closed PR.
+          if [[ "${CLOSED_PR:-}" =~ ^[1-9][0-9]*$ ]]; then
+            grep -v "^${CLOSED_PR} " "$RUNNER_TEMP/heads.txt" > "$RUNNER_TEMP/heads.keep" || true
+            mv "$RUNNER_TEMP/heads.keep" "$RUNNER_TEMP/heads.txt"
+          fi
+          # The event's own head joins the set (Codex round 5, finding 3): a
+          # PR (re)opened between this listing and the sweep, or omitted by a
+          # stale listing, must still be stamped pending now. A closed event
+          # cleared EVENT_HEAD_SHA above, so a merged or closed head does not
+          # join (#482).
           if [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]] && ! grep -q " $EVENT_HEAD_SHA\$" "$RUNNER_TEMP/heads.txt"; then
             printf '%s %s\n' "${EVENT_PR_NUMBER:-0}" "$EVENT_HEAD_SHA" >> "$RUNNER_TEMP/heads.txt"
           fi
@@ -166,13 +193,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANCELLED: ${{ job.status == 'cancelled' }}
-          EVENT_ACTION: ${{ github.event.action }}
+          # EVENT_ACTION is job-level (closed-event guard, #482).
           # continue-on-error turns the pending step's failure green; read its
           # real outcome here so a failed pending stamp makes the job red
           # (Codex round 8, finding 2).
           HEADS_OUTCOME: ${{ steps.heads.outcome }}
         run: |
           set -uo pipefail
+          # #482 / #567: a closed event's head is not a stamp target. The
+          # sweep will not verdict it, and a later "no verdict" failure would
+          # overwrite the success that cleared the merge.
+          if [ "${EVENT_ACTION:-}" = "closed" ]; then
+            echo "closed event: PR #${EVENT_PR_NUMBER:-?} head is not stamped (merged/closed PRs get no new status, #482)"
+            EVENT_HEAD_SHA=
+            EVENT_PR_NUMBER=
+          fi
           post_fail=0
           if [ "${HEADS_OUTCOME:-}" = "failure" ]; then
             post_fail=1
@@ -330,6 +365,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
+          # #482 / #567: a closed event's head is not a stamp target. The
+          # sweep will not verdict it, and a later "no verdict" failure would
+          # overwrite the success that cleared the merge.
+          if [ "${EVENT_ACTION:-}" = "closed" ]; then
+            echo "closed event: PR #${EVENT_PR_NUMBER:-?} head is not stamped (merged/closed PRs get no new status, #482)"
+            EVENT_HEAD_SHA=
+            EVENT_PR_NUMBER=
+          fi
           if ! [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "no event head to correct (scheduled or comment event)"
             exit 0
