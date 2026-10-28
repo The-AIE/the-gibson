@@ -10,6 +10,9 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### Docs and messages: finish retiring the Tier C human merge gate (D-015)
+AGENTS.md, docs/06, docs/14, the release playbook and the policy manifest already carried the D-015 model on main. This clears the remaining stale text: GUIDE, docs 13/29, fleet-review-conventions (the required-check call is G14, not G12), the decision-card template (example is now a G6 billing decision), the gibson and gibson-setup skills, the `tier-c` label description, and the release-preflight blocker message. release-preflight still refuses an admin merge on Tier C; only its wording and test changed. No gate, tier or sensor logic changed. G6 is untouched.
+
 ### Docs: Mission Control is now Agent Kontrol; new doc 31 explains how the two work together
 
 - **What changed:** Every reference to Mission Control (and its "MC" abbreviation) in the README, FAQ, guides, adapters, playbooks, `docs/` and script help text now says Agent Kontrol (AK). `docs/31-agent-kontrol.md` is new: the law/manager split, each hand-off point and which side is authoritative, role mapping, setup, and what the pairing deliberately does not do. The glossary, docs index, README and FAQ link to it. `docs/09` no longer says the runtime store is Supabase (Agent Kontrol uses Postgres).

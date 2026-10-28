@@ -80,7 +80,7 @@ for free.
 - **Right-sized, never under-gated**: install the lean baseline everywhere; add
   the heavy machinery where the audit found risk surfaces. But Law 7 is not
   profile-dependent — if ANY money/auth/consent/PII/security/prod-data surface
-  exists, its human merge gate gets wired regardless of chosen profile. A
+  exists, its Tier C review floor (E3 plus required checks) gets wired regardless of chosen profile. A
   static brochure site with a contact form still has a PII surface.
 - Every owner-credential step (branch protection, App installs, API keys) is an
   Ask Contract item — batched, never a drip.
