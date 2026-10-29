@@ -22,6 +22,7 @@ you can audit.
 >   [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) — customize in
 >   `local/`, keep getting upstream improvements.
 > - 🤖 **"I'm an agent."** Load [AGENTS.md](AGENTS.md) (always mandatory). If a role is dispatched, also load that role playbook. If no role is named, you are a builder and must load [playbooks/builder.md](playbooks/builder.md). If a job is dispatched, also load that job's dispatch prompt. `docs/` is on-demand and non-normative.
+> - 🧭 **"What even is this?"** The [five-minute plain-English overview](docs/32-plain-english.md).
 > - 📚 **Reading order by audience:** [docs/00-INDEX.md](docs/00-INDEX.md) ·
 >   [FAQ.md](FAQ.md) · [docs/00-glossary.md](docs/00-glossary.md)
 >

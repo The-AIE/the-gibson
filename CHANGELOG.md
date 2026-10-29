@@ -13,6 +13,12 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 ### Docs: remove stale "human merge gate on Tier C" wording (D-015)
 README pipeline diagram, FAQ, HOW-IT-WORKS, docs/11, and two playbooks now say Tier C clears on E3 plus required checks with no owner merge step, as D-015 already decided. Doctrine text (AGENTS.md, docs/06, docs/14, playbooks/release.md) and its sensors are amended separately, per D-015's amendment order. No rule, gate, tier or sensor changed. G6 (billing/pricing/payment merge gate) is untouched.
 
+### Docs: `docs/32-plain-english.md` — a five-minute layperson overview
+
+- **What changed:** New `docs/32-plain-english.md` explains the Gibson as a governance harness (the idea, the assembly line, terms of art, the rules that matter most, where adoption stands). The README, docs index and glossary link to it; the glossary gains Coordinator and Lane bot.
+- **Why:** HOW-IT-WORKS.md is comprehensive but long; first-time readers needed a short on-ramp that explains the jargon.
+- **Migration:** None. Non-normative; no rule, gate, tier or sensor changed.
+
 ### Docs: Mission Control is now Agent Kontrol; new doc 31 explains how the two work together
 
 - **What changed:** Every reference to Mission Control (and its "MC" abbreviation) in the README, FAQ, guides, adapters, playbooks, `docs/` and script help text now says Agent Kontrol (AK). `docs/31-agent-kontrol.md` is new: the law/manager split, each hand-off point and which side is authoritative, role mapping, setup, and what the pairing deliberately does not do. The glossary, docs index, README and FAQ link to it. `docs/09` no longer says the runtime store is Supabase (Agent Kontrol uses Postgres).
