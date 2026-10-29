@@ -125,6 +125,7 @@ RISKS
 
 USAGE
   claim.sh <issue> <slug> <scope...> [--slice] [--vendor=NAME]
+  claim.sh --renew <issue>
   claim.sh --help
 
   issue   GitHub issue number
@@ -140,6 +141,16 @@ USAGE
           past the dual-claim refusal, and it is not a formality: the scopes must
           not overlap, and whoever releases a slice must use
           `release-claim.sh <issue> --claim-id <id>` so the siblings survive.
+
+EXPIRY (#557)
+  The claim block carries `- Claim-expires: <UTC>`, 7 days after `- Claimed:`.
+  A claim whose expiry has passed AND whose branch has had no push in 7 days is
+  reported `stale` by `pr-claims.sh expiry`; its scope then stops blocking new
+  claims (the displacement is written into both PR bodies), and claim-reaper.sh
+  labels it `claim-expired`. Nothing is ever closed. A push to the claim branch
+  renews it; so does `claim.sh --renew <issue>`, which rewrites only the
+  `Claim-expires` line of that issue's claim PR body to now + 7 days. A missing
+  or unreadable expiry is never treated as expired.
 
 REQUIREMENTS
   git, gh, and node. node is required BEFORE any mutation: scope-overlap.mjs is
@@ -181,6 +192,145 @@ EXAMPLES
   claim.sh 15 demo-page 'app/demo/**' --slice
 EOF
 }
+
+# Claim lifetime (#557). 7 days; `pr-claims.sh expiry` uses the same constant
+# for "a push renews it", so change them together.
+CLAIM_TTL_SECONDS=604800
+utc_after_ttl() {
+  local epoch
+  epoch=$(( $(date -u +%s) + CLAIM_TTL_SECONDS ))
+  date -u -d "@$epoch" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null ||
+    date -u -r "$epoch" +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+# claim.sh --renew <issue>: move the claim's expiry out to now + TTL by editing
+# only the `- Claim-expires:` line in the claim PR body. Self-contained (it
+# writes no reservation, so the stale-copy and vendor checks do not apply).
+if [[ "${1:-}" == "--renew" ]]; then
+  [[ $# -eq 2 && "${2:-}" =~ ^[0-9]+$ ]] || {
+    echo "claim.sh: ERROR: usage: claim.sh --renew <issue>" >&2
+    exit 2
+  }
+  _rn_issue="$2"
+  command -v gh >/dev/null || {
+    echo "claim.sh: ERROR: gh (GitHub CLI) required" >&2
+    exit 1
+  }
+  _rn_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  # Resolve the target repository from the CANONICAL checkout, exactly as the
+  # create path does, so `gh repo view`, the overlap sensor and every
+  # `gh pr edit` below act on one repository (GIBSON_CANONICAL names it).
+  _rn_canon="${GIBSON_CANONICAL:-$(pwd)}"
+  cd -- "$_rn_canon" 2>/dev/null || {
+    echo "claim.sh: ERROR: cannot enter the canonical checkout '$_rn_canon' to renew in" >&2
+    exit 1
+  }
+  _rn_repo=$(gh repo view --json nameWithOwner -q .nameWithOwner) || {
+    echo "claim.sh: ERROR: cannot resolve the repository to renew in" >&2
+    exit 1
+  }
+  _rn_rows=$("$_rn_dir/pr-claims.sh" list "$_rn_repo") || {
+    echo "claim.sh: ERROR: the live claim inventory for $_rn_repo is unreadable — refusing to renew on evidence it could not read" >&2
+    exit 1
+  }
+  _rn_hits=$(awk -F'\t' -v n="$_rn_issue" '$2 ~ ("^issue-([A-Za-z][A-Za-z0-9]*-)?" n "-") { print $1 "\t" $2 }' <<<"$_rn_rows")
+  _rn_count=$(grep -c . <<<"$_rn_hits" || true)
+  if [[ "$_rn_count" -ne 1 ]]; then
+    echo "claim.sh: ERROR: expected exactly one live claim on issue #$_rn_issue, found $_rn_count — refusing to guess which to renew" >&2
+    exit 1
+  fi
+  _rn_pr=${_rn_hits%%$'\t'*}
+  _rn_id=${_rn_hits#*$'\t'}
+  _rn_body=$(gh pr view "$_rn_pr" --repo "$_rn_repo" --json body -q .body) || {
+    echo "claim.sh: ERROR: cannot read the body of PR #$_rn_pr" >&2
+    exit 1
+  }
+  # A displaced claim is terminal (#557): a newer claim already took its scope,
+  # so renewing would recreate two overlapping live claims. The verdict comes
+  # from `pr-claims.sh expiry`, which honours a Displaced-by record only while
+  # its displacer is itself a live claim (a displacer that closed or rolled
+  # back must not strand this claim). Unreadable record or unreadable expiry
+  # read => refuse (fail closed).
+  _rn_exp=$("$_rn_dir/pr-claims.sh" expiry "$_rn_repo") || {
+    echo "claim.sh: ERROR: cannot read claim expiry/displacement state for $_rn_repo — refusing to renew" >&2
+    exit 1
+  }
+  _rn_row=$(awk -F'\t' -v n="$_rn_pr" '$1 == n { print; exit }' <<<"$_rn_exp")
+  if [[ -z "$_rn_row" ]]; then
+    echo "claim.sh: ERROR: PR #$_rn_pr is missing from the expiry inventory — refusing to renew" >&2
+    exit 1
+  fi
+  _rn_state=$(awk -F'\t' '{ print $3 }' <<<"$_rn_row")
+  _rn_reason=$(awk -F'\t' '{ print $8 }' <<<"$_rn_row")
+  if [[ "$_rn_state" == "displaced" ]]; then
+    echo "claim.sh: ERROR: $_rn_id (PR #$_rn_pr) was displaced and cannot be renewed: ${_rn_reason} — re-claim issue #$_rn_issue from current main" >&2
+    exit 1
+  fi
+  if [[ "$_rn_reason" == "unreadable Displaced by record" ]]; then
+    echo "claim.sh: ERROR: PR #$_rn_pr carries a Displaced-by record this cannot read — refusing to renew a claim that may already be displaced" >&2
+    exit 1
+  fi
+  # A renewal is an admission, not a bookkeeping edit: re-run the overlap check
+  # against every live claim before moving the date.
+  command -v node >/dev/null || {
+    echo "claim.sh: ERROR: node required to re-check overlap before renewing" >&2
+    exit 1
+  }
+  if git -C "$_rn_canon" ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
+    _rn_base=main
+  elif git -C "$_rn_canon" ls-remote --exit-code --heads origin master >/dev/null 2>&1; then
+    _rn_base=master
+  else
+    echo "claim.sh: ERROR: cannot find origin/main or origin/master — refusing to renew without an overlap check" >&2
+    exit 1
+  fi
+  _rn_scope=$(awk -F'\t' -v n="$_rn_pr" '$1 == n { print $3 }' <<<"$_rn_rows")
+  _rn_args=(--repo-path "$_rn_canon" --base "$_rn_base" --claim-id "$_rn_id" --repo "$_rn_repo" --issue "$_rn_issue")
+  # `read -ra` splits on spaces WITHOUT pathname expansion: a literal `*`,
+  # `**` or `lib/**` must reach the sensor byte for byte, as on the create
+  # path, or the overlap gate would compare against whatever files happen to
+  # match in the cwd.
+  IFS=' ' read -ra _rn_tokens <<<"$_rn_scope"
+  for _rn_s in "${_rn_tokens[@]}"; do
+    _rn_args+=(--scope "$_rn_s")
+  done
+  [[ -n "$_rn_scope" ]] || {
+    echo "claim.sh: ERROR: could not read the claim scope of PR #$_rn_pr — refusing to renew" >&2
+    exit 1
+  }
+  if ! env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE node "$_rn_dir/scope-overlap.mjs" "${_rn_args[@]}"; then
+    echo "claim.sh: ERROR: renewing $_rn_id would overlap a live claim — not renewed; resolve the overlap or re-claim" >&2
+    exit 1
+  fi
+  _rn_new=$(utc_after_ttl)
+  _rn_file=$(mktemp "${TMPDIR:-/tmp}/gibson-claim-renew.XXXXXX")
+  # Exactly one Claim-expires line is replaced; none present => insert after
+  # `- Claimed:`; more than one => ambiguous, refuse.
+  _rn_exp_count=$(grep -c '^- Claim-expires: ' <<<"$_rn_body" || true)
+  if [[ "$_rn_exp_count" -gt 1 ]]; then
+    rm -f "$_rn_file"
+    echo "claim.sh: ERROR: PR #$_rn_pr carries $_rn_exp_count Claim-expires lines — refusing to guess which to renew" >&2
+    exit 1
+  fi
+  if [[ "$_rn_exp_count" -eq 1 ]]; then
+    awk -v v="$_rn_new" '/^- Claim-expires: / { print "- Claim-expires: " v; next } { print }' <<<"$_rn_body" > "$_rn_file"
+  else
+    awk -v v="$_rn_new" '{ print } /^- Claimed: / { print "- Claim-expires: " v }' <<<"$_rn_body" > "$_rn_file"
+  fi
+  if ! grep -q '^- Claim-expires: ' "$_rn_file"; then
+    rm -f "$_rn_file"
+    echo "claim.sh: ERROR: PR #$_rn_pr has no '- Claimed:' line to anchor a Claim-expires line on — refusing to renew" >&2
+    exit 1
+  fi
+  gh pr edit "$_rn_pr" --repo "$_rn_repo" --body-file "$_rn_file" || {
+    rm -f "$_rn_file"
+    echo "claim.sh: ERROR: could not update PR #$_rn_pr" >&2
+    exit 1
+  }
+  rm -f "$_rn_file"
+  echo "claim.sh: renewed $_rn_id (PR #$_rn_pr) — Claim-expires: $_rn_new"
+  exit 0
+fi
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || $# -lt 3 ]]; then
   usage
@@ -1265,6 +1415,7 @@ BODY=$(mktemp "${TMPDIR:-/tmp}/gibson-claim-body.XXXXXX")
   printf '%s\n' "- Claim scope: ${SCOPE}"
   printf '%s\n' "- Session: ${SESSION}"
   printf '%s\n' "- Claimed: ${UTC}"
+  printf '%s\n' "- Claim-expires: $(utc_after_ttl)"
   printf '%s\n' "- Original branch point: ${ORIGINAL_BRANCH_POINT}"
   printf '%s\n' "- Reservation commit: ${RESERVATION_SHA}"
   printf '%s\n' ""
@@ -1309,7 +1460,10 @@ done
 if [[ "$SLICE" -eq 1 ]]; then
   _adm_args+=(--slice)
 fi
-if ! run_sensor "$SCRIPT_DIR/scope-overlap.mjs" "${_adm_args[@]}"; then
+_adm_rc=0
+_adm_out=$(run_sensor "$SCRIPT_DIR/scope-overlap.mjs" "${_adm_args[@]}") || _adm_rc=$?
+[[ -z "$_adm_out" ]] || printf '%s\n' "$_adm_out"
+if [[ "$_adm_rc" -ne 0 ]]; then
   die "post-create admission refused for $CLAIM_ID (PR #$PR_NUMBER) — see the reason above.
   Either a live claim with a stronger prior holds this issue or overlapping scope (the race resolving deterministically: the lower PR number wins), or the live inventory could not be settled and read, which is refused rather than guessed.
   This lane's PR is being closed and its branch, worktree and label rolled back only once that close is proven; re-run once the other lane releases, claim a disjoint scope, or pass --slice if a deliberate second lane with non-overlapping scope on this issue is really what you want."
@@ -1337,6 +1491,43 @@ if [[ "$PROVENANCE_RC" -ne 0 ]]; then
   ${PROVENANCE_JSON:-<no receipt>}"
 fi
 info "reservation: $RESERVATION_SHA"
+
+# Expired claims this claim displaced (#557). The `Displaced by` record on the
+# DISPLACED PR is what makes displacement terminal (pr-claims.sh reads it as
+# such, so a later push or --renew cannot revive that claim). It is therefore
+# the LAST step before success: every gate that can still roll this claim back
+# has already passed, so a rolled-back lane never strands a claim it was
+# displacing. A write that still fails here rolls this lane back, and
+# pr-claims.sh ignores a record whose displacer is no longer a live claim, so
+# even a partial stamp does not freeze anyone out. The note on this PR is
+# informational.
+record_displacement() { # pr-number line -> 0 only when the line is readable back
+  local n="$1" line="$2" body tmp
+  body=$(gh pr view "$n" --repo "$REPO" --json body -q .body 2>/dev/null) || return 1
+  if ! grep -qxF -- "$line" <<<"$body"; then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/gibson-claim-displace.XXXXXX")
+    { printf '%s\n' "$body"; printf '%s\n' "$line"; } > "$tmp"
+    gh pr edit "$n" --repo "$REPO" --body-file "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+    body=$(gh pr view "$n" --repo "$REPO" --json body -q .body 2>/dev/null) || return 1
+  fi
+  grep -qxF -- "$line" <<<"$body"
+}
+while IFS= read -r _dl; do
+  [[ "$_dl" == "scope-overlap: displaced-claim "* ]] || continue
+  read -r _ _ _d_id _d_pr _d_exp <<<"$_dl"
+  [[ "$_d_id" == issue-* && "$_d_pr" =~ ^[0-9]+$ ]] || continue
+  record_displacement "$_d_pr" "- Displaced by: ${CLAIM_ID} (PR #${PR_NUMBER})" ||
+    die "could not durably record the displacement of ${_d_id} (PR #${_d_pr}) — without it that claim could be renewed back into overlap; rolling this claim back"
+  gh label create claim-expired --repo "$REPO" --color BFD4F2 \
+    --description "PR-body claim expired or displaced (#557)" >/dev/null 2>&1 || true
+  gh pr edit "$_d_pr" --repo "$REPO" --add-label claim-expired >/dev/null 2>&1 ||
+    info "WARNING: could not label PR #${_d_pr} claim-expired"
+  record_displacement "$PR_NUMBER" "- Displaced claim: ${_d_id} (PR #${_d_pr}, expired ${_d_exp})" ||
+    info "WARNING: could not record the displacement of ${_d_id} on PR #${PR_NUMBER}"
+done <<EOF
+$_adm_out
+EOF
 
 LABEL_ADDED=0  # success — do not undo label
 CLAIM_COMPLETE=1

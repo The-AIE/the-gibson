@@ -30,7 +30,16 @@ WHAT IT DOES
   (parked ≠ dead). A legacy ledger claim whose id also appears as an open
   PR-body claim is kept for the same reason, so dual representations cannot
   re-open a reaped path. Legacy ledger claims without an open PR keep their
-  existing evidence-based stale/reap behaviour. API/ref failures, malformed
+  existing evidence-based stale/reap behaviour.
+
+  EXPIRED PR-BODY CLAIMS (#557): protection is not forever. A PR-body claim that
+  `pr-claims.sh expiry` reports `stale` (its `Claim-expires:` passed and its
+  branch has had no push for 7 days) is LABELLED `claim-expired` on its PR so a
+  human or Mission Control sees it. That label is the whole action: the PR is
+  never closed, the claim never released, the issue never touched, the branch
+  never deleted. Dry-run prints what it would label; --apply labels. An expiry
+  that is missing, duplicated or unparseable is `unknown` and never labelled;
+  a failed expiry read only warns. API/ref failures, malformed
   evidence, unreadable worktrees, unregistered or unsafe paths, symlink/device
   evidence, future-clock evidence, or race-time activity fail closed (refuse
   reaping). When GitHub-native claims apply, a failed or successful-but-
@@ -529,6 +538,64 @@ EOF
 fi
 # Empty when GitHub-native claims do not apply; still safe for later grep -qxF.
 OPEN_PR_PROTECTED_IDS="${OPEN_PR_PROTECTED_IDS:-}"
+
+# --- expired PR-body claims: label only (#557) -----------------------------
+# The open-PR protection above stays absolute for release. What an expired
+# claim loses is its *invisibility*: it gets the `claim-expired` label so the
+# displacement path in scope-overlap.mjs has a human-readable counterpart.
+# Never closes a PR, never releases a claim, never touches the issue or branch.
+# Any failure here is a warning, not a refusal: labelling is advisory and must
+# not turn a good ledger run into a failed one.
+EXPIRED_LABEL="claim-expired"
+EXPIRED_PR_NUMBERS=""
+if [[ -n "$PR_REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+  _ex_rc=0
+  _RC_CAP_STDOUT=""
+  _RC_CAP_STDERR=""
+  _rc_capture_streams "$SCRIPT_DIR/pr-claims.sh" expiry "$PR_REPO" || _ex_rc=$?
+  _ex_rows="$_RC_CAP_STDOUT"
+  _RC_CAP_STDERR=""
+  if [[ "$_ex_rc" -ne 0 ]]; then
+    warn "could not read claim expiry for $PR_REPO — no claim labelled claim-expired this run"
+  else
+    while IFS= read -r _ex_line; do
+      [[ -n "$_ex_line" ]] || continue
+      _ex_n=$(cut -f1 <<<"$_ex_line")
+      _ex_id=$(cut -f2 <<<"$_ex_line")
+      _ex_state=$(cut -f3 <<<"$_ex_line")
+      _ex_eff=$(cut -f6 <<<"$_ex_line")
+      [[ "$_ex_state" == "stale" || "$_ex_state" == "displaced" ]] || continue
+      [[ "$_ex_n" =~ ^[0-9]+$ ]] || continue
+      [[ "$_ex_id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+- ]] || continue
+      if [[ "$CLAIM_ID_FILTER_SET" -eq 1 && "$_ex_id" != "$CLAIM_ID_FILTER" ]]; then
+        continue
+      fi
+      EXPIRED_PR_NUMBERS="${EXPIRED_PR_NUMBERS}${_ex_n} ${_ex_id} ${_ex_eff}"$'\n'
+    done <<EOF
+$_ex_rows
+EOF
+  fi
+  unset _ex_rc _ex_rows _ex_line _ex_n _ex_id _ex_state _ex_eff
+fi
+if [[ -n "$EXPIRED_PR_NUMBERS" ]]; then
+  while read -r _xn _xid _xeff; do
+    [[ -n "$_xn" ]] || continue
+    if [[ "$APPLY" -eq 1 ]]; then
+      gh label create "$EXPIRED_LABEL" --repo "$PR_REPO" --color BFD4F2 \
+        --description "PR-body claim past its Claim-expires and idle 7 days (#557)" >/dev/null 2>&1 || true
+      if gh pr edit "$_xn" --repo "$PR_REPO" --add-label "$EXPIRED_LABEL" >/dev/null 2>&1; then
+        info "PR #$_xn claim $_xid expired ${_xeff:-?}: labelled $EXPIRED_LABEL (PR left open, claim not released)"
+      else
+        warn "could not label PR #$_xn $EXPIRED_LABEL (claim $_xid expired ${_xeff:-?}); PR left open"
+      fi
+    else
+      info "DRY RUN: PR #$_xn claim $_xid expired ${_xeff:-?}: would label $EXPIRED_LABEL (PR left open, claim not released)"
+    fi
+  done <<EOF
+$EXPIRED_PR_NUMBERS
+EOF
+fi
+unset _xn _xid _xeff
 
 # --- ledger ref: require successful fetch of exact remote base ------------
 # Never fall back to local main/master, cached stale origin refs after a
