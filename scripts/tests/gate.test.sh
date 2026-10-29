@@ -2807,5 +2807,181 @@ unset -f path_dev_ino path_dev_ino_bsd_first
 
 # ---------------------------------------------------------------------------
 echo
+# ---------------------------------------------------------------------------
+echo "diagnostic identities: equal/lower counts never excuse new failures (#375)"
+# ---------------------------------------------------------------------------
+DIAG="$ROOT/diagnostic-identities"
+mkdir -p "$DIAG/.agents"
+git init -q "$DIAG"
+printf 'fixture\n' > "$DIAG/README"
+git -C "$DIAG" add README
+git -C "$DIAG" -c user.name=gibson-test -c user.email=test@gibson.invalid -c commit.gpgsign=false commit -qm base
+DIAG_A='GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","old diagnostic A"]'
+DIAG_B='GIBSON_DIAGNOSTIC_V1 ["src/b.ts",3,4,"RULE_B","old diagnostic B"]'
+DIAG_C='GIBSON_DIAGNOSTIC_V1 ["src/c.ts",5,6,"RULE_C","new diagnostic C"]'
+diag_config() {
+  node - "$DIAG/.agents/gate.json" "$1" "${2:-lint}" <<'JS'
+const fs = require("node:fs");
+const config = {generate:"",typecheck:"",lint:"",test:"",build:""};
+config[process.argv[4]] = process.argv[3];
+fs.writeFileSync(process.argv[2], JSON.stringify(config));
+JS
+}
+diag_baseline() {
+  out=$(cd "$DIAG" && bash "$BASELINE_SH" 2>&1); rc=$?
+  [[ "$rc" -eq 0 ]] || bad "diagnostic baseline setup (rc=$rc): $out"
+}
+diag_expect() {
+  local expected="$1" label="$2" reason="$3"
+  shift 3
+  out=$(cd "$DIAG" && bash "$GATE" "$@" 2>&1); rc=$?
+  if [[ "$expected" -eq 0 && "$rc" -eq 0 ]] && echo "$out" | grep 'GREEN' >/dev/null; then
+    ok "$label"
+  elif [[ "$expected" -ne 0 && "$rc" -ne 0 ]] \
+      && echo "$out" | grep -E "$reason" >/dev/null && ! echo "$out" | grep 'GREEN' >/dev/null; then
+    ok "$label"
+  else
+    bad "$label (rc=$rc): $out"
+  fi
+}
+# Actual reported scenario, using both production scripts and unstructured lint.
+diag_config 'cat output.txt; exit 1'
+printf 'error: old diagnostic\n' > "$DIAG/output.txt"
+diag_baseline
+printf 'error: different new diagnostic\n' > "$DIAG/output.txt"
+diag_expect 1 "reported one-old/one-new lint fixture cannot return GREEN" 'opaque diagnostics'
+# Same opaque output is insufficient too: summary identity is not failure identity.
+printf '1 failed\n' > "$DIAG/output.txt"
+diag_baseline
+diag_expect 1 "unchanged summary-only red baseline fails closed" 'opaque diagnostics'
+
+printf '%s\n' "$DIAG_A" "$DIAG_B" > "$DIAG/output.txt"
+diag_baseline
+cp "$DIAG/.gibson-baseline.json" "$DIAG/valid-baseline.json"
+if node - "$DIAG/.gibson-baseline.json" <<'JS'
+const b=require(process.argv[2]);
+process.exit(b.diagnostics.version===1 && b.diagnostics.lint.length===2 && b.failures.lint===1 ? 0 : 1);
+JS
+then ok "writer stores versioned complete identities even when count heuristic sees one";
+else bad "writer diagnostic envelope missing or malformed"; fi
+diag_expect 0 "unchanged named diagnostic multiset passes" ''
+printf '%s\n' "$DIAG_B" "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 0 "diagnostic order does not matter" ''
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 0 "removing a known diagnostic passes" ''
+printf '%s\n' "$DIAG_C" > "$DIAG/output.txt"
+diag_expect 1 "fixing two old errors and adding one new error fails" 'new diagnostic identity'
+printf '%s\n' "$DIAG_A" "$DIAG_C" > "$DIAG/output.txt"
+diag_expect 1 "mixed fix plus regression with equal count fails" 'new diagnostic identity'
+for changed in \
+  'GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","different detail under same header"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["src/other.ts",1,2,"RULE_A","old diagnostic A"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_NEW","old diagnostic A"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["src/a.ts",2,2,"RULE_A","old diagnostic A"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","old diagnostic A\nnew continuation detail"]'; do
+  printf '%s\n' "$changed" > "$DIAG/output.txt"
+  diag_expect 1 "changed path/code/location/message/detail is a new identity: $changed" 'new diagnostic identity'
+done
+printf '%s\n' "$DIAG_A" "$DIAG_A" > "$DIAG/output.txt"
+diag_baseline
+printf '%s\n' "$DIAG_A" "$DIAG_A" "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 1 "increasing duplicate diagnostic multiplicity fails" 'increased multiplicity'
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 0 "decreasing duplicate diagnostic multiplicity passes" ''
+cp "$DIAG/valid-baseline.json" "$DIAG/.gibson-baseline.json"
+for opaque in '' '1 failed' 'GIBSON_DIAGNOSTIC_V2 ["x",null,null,"X","unknown"]' \
+  'GIBSON_DIAGNOSTIC_V1 {"summary":"1 failed"}' \
+  'GIBSON_DIAGNOSTIC_V1 ["x",null,1,"X","bad position pair"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["x",0,1,"X","invalid line"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["x",1,1,"X","message","unclassified extra"]'; do
+  printf '%s\n' "$opaque" > "$DIAG/output.txt"
+  diag_expect 1 "empty/summary/unknown/malformed failing output is opaque: $opaque" 'opaque diagnostics'
+done
+printf '%s\nadditional unclassified detail\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 1 "known header plus new unclassified detail fails closed" 'opaque diagnostics'
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_config 'cat ./output.txt; exit 1'
+diag_expect 1 "changed red command cannot borrow diagnostic evidence" 'command/exit binding changed'
+diag_config 'cat output.txt; exit 2'
+diag_expect 1 "changed nonzero exit cannot borrow diagnostic evidence" 'command/exit binding changed'
+diag_config ''
+diag_expect 1 "disabling a red baseline command is not diagnostic removal" 'command disabled'
+diag_config 'cat output.txt; exit 0'
+diag_expect 1 "explicit failure record contradicts candidate exit 0" 'contradicts exit 0'
+prior_diag_bytes=$(cat "$DIAG/.gibson-baseline.json")
+out=$(cd "$DIAG" && bash "$BASELINE_SH" 2>&1); rc=$?
+if [[ "$rc" -ne 0 && "$(cat "$DIAG/.gibson-baseline.json")" == "$prior_diag_bytes" ]] \
+    && echo "$out" | grep 'contradict' >/dev/null; then
+  ok "baseline writer rejects contradictory exit 0 without replacing authority"
+else bad "contradictory baseline accepted or authority replaced (rc=$rc): $out"; fi
+# Genuine green removal is allowed; no diagnostic oracle is needed for exit 0.
+printf 'clean\n' > "$DIAG/output.txt"
+diag_expect 0 "fully fixing known failures passes with exit 0" ''
+diag_config 'cat output.txt; exit 1'
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+node - "$DIAG/valid-baseline.json" "$DIAG/.gibson-baseline.json" <<'JS'
+const fs=require("node:fs"); const b=JSON.parse(fs.readFileSync(process.argv[2]));
+delete b.diagnostics; fs.writeFileSync(process.argv[3],JSON.stringify(b));
+JS
+diag_expect 1 "legacy count-only red baseline cannot excuse red" 'legacy baseline'
+diag_config 'true'
+diag_expect 0 "legacy baseline still allows an all-green candidate" ''
+# All present but invalid evidence is rejected before running a configured command.
+diag_config 'touch should-not-run; exit 1'
+for shape in version missing-step record position empty-red exit-binding green-record opaque-green extra-field; do
+  node - "$DIAG/valid-baseline.json" "$DIAG/.gibson-baseline.json" "$shape" <<'JS'
+const fs=require("node:fs"); const b=JSON.parse(fs.readFileSync(process.argv[2]));
+switch(process.argv[4]) {
+  case "version": b.diagnostics.version=2; break;
+  case "missing-step": delete b.diagnostics.test; break;
+  case "record": b.diagnostics.lint=[{}]; break;
+  case "position": b.diagnostics.lint[0][1]=null; break;
+  case "empty-red": b.diagnostics.lint=[]; break;
+  case "exit-binding": b.exit_codes.lint="1"; break;
+  case "green-record": b.exit_codes.lint=0; break;
+  case "opaque-green": b.diagnostics.test=null; break;
+  case "extra-field": b.diagnostics.unknown=[]; break;
+}
+fs.writeFileSync(process.argv[3],JSON.stringify(b));
+JS
+  diag_expect 1 "malformed baseline diagnostic evidence fails before commands: $shape" 'invalid baseline diagnostic evidence'
+  [[ ! -e "$DIAG/should-not-run" ]] || bad "malformed evidence ran a configured command: $shape"
+done
+# Diagnostic identity and test deletion are independent controls. A metric waiver
+# may authorize exactly the count change but must never authorize a new failure.
+diag_config 'cat output.txt; exit 1' test
+printf '%s\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' "$DIAG_A" > "$DIAG/output.txt"
+rm "$DIAG/.gibson-baseline.json"
+diag_baseline
+diag_expect 0 "unchanged structured test failure retains independent metrics" ''
+printf '%s\nGIBSON_TEST_METRICS total=9 skipped=0 todo=0\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 1 "known diagnostic cannot hide a test-count reduction" 'test-integrity'
+diag_expect 0 "exact test-removal waiver works only for unchanged diagnostics" '' --waiver-text 'Test-integrity: removed 1 for obsolete fixture'
+printf '%s\nGIBSON_TEST_METRICS total=9 skipped=0 todo=0\n' "$DIAG_C" > "$DIAG/output.txt"
+diag_expect 1 "test-removal waiver never excuses a new diagnostic" 'new diagnostic identity' --waiver-text 'Test-integrity: removed 1 for obsolete fixture'
+printf '%s\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0 extra=detail\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 1 "unclassified metric-line detail cannot hide a new failure" 'opaque diagnostics'
+# The baseline writer must parse with the oracle frozen BEFORE the command:
+# a configured step can rewrite helpers on disk despite child-shell isolation.
+mkdir -p "$DIAG/oracle"
+cp "$GATE" "$DIAG/oracle/gate.sh"
+cp "$BASELINE_SH" "$DIAG/oracle/gate-baseline.sh"
+cat > "$DIAG/poison-helper.sh" <<'POISON'
+#!/usr/bin/env bash
+printf '%s\n' '#!/usr/bin/env bash' 'printf '\''process.stdout.write("null")'\''' > oracle/gate.sh
+cat output.txt
+exit 1
+POISON
+diag_config 'bash poison-helper.sh'
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+rm "$DIAG/.gibson-baseline.json"
+out=$(cd "$DIAG" && bash oracle/gate-baseline.sh 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && node - "$DIAG/.gibson-baseline.json" <<'JS'
+const b=require(process.argv[2]);
+process.exit(b.diagnostics.lint?.length===1 && b.diagnostics.lint[0][3]==="RULE_A" ? 0 : 1);
+JS
+then ok "baseline diagnostic oracle is frozen before helper rewrite";
+else bad "rewritten helper controlled diagnostic evidence (rc=$rc): $out"; fi
+
 echo "gate.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

@@ -9,8 +9,11 @@ gate-baseline.sh — snapshot green-gate failure counts at branch point
 WHAT IT DOES
   Runs the target repo's generate/typecheck/lint/test/build commands (from
   .agents/gate.json, package.json scripts, or env overrides) and writes
-  .gibson-baseline.json with failure counts / exit codes AND test-suite
+  .gibson-baseline.json with failure counts / exit codes, versioned diagnostic identities AND test-suite
   metrics (total / skipped / todo) for the test-integrity sensor (issue #70).
+  Diagnostic format/compatibility: see gate.sh --help. Opaque failing output is
+  stored as null and can never authorize a failing candidate. Legacy counts
+  remain report-only; a baseline is local evidence, never merge authority.
 
 WHY
   The green gate is "zero NEW failures vs. branch point" (docs/06). Without a
@@ -74,6 +77,10 @@ info() { echo "gate-baseline.sh: $*" >&2; }
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TI="$SCRIPT_DIR/test-integrity.mjs"
 command -v node >/dev/null || die "node is required"
+# Freeze the parser before configured commands can rewrite its source on disk.
+DIAGNOSTIC_JS=$(bash "$SCRIPT_DIR/gate.sh" --diagnostic-parser-source) \
+  || die "cannot freeze diagnostic parser"
+diagnostic_tool() { node -e "$DIAGNOSTIC_JS" "$@"; }
 
 # ---------------------------------------------------------------------------
 # Path identity + parent-chain authority (Bash 3.2, macOS + Linux)
@@ -427,6 +434,10 @@ FC_TEST=0
 FC_BUILD=0
 TEST_CAPTURE=""
 TEST_CAPTURED=0
+DI_TYPECHECK='[]'
+DI_LINT='[]'
+DI_TEST='[]'
+DI_BUILD='[]'
 
 # ---------------------------------------------------------------------------
 # Configured-command isolation (issue #70)
@@ -452,7 +463,7 @@ run_configured_child() {
 run_count_failures() {
   local step="$1"
   local cmd="$2"
-  local out ec fc
+  local out ec fc diagnostics
   if [[ -z "$cmd" ]]; then
     case "$step" in
       typecheck) EC_TYPECHECK=0; FC_TYPECHECK=0 ;;
@@ -472,6 +483,14 @@ run_count_failures() {
   if [[ ${#out} -gt $MAX_CAPTURE_CHARS ]]; then
     die "captured $step output exceeds size cap (${MAX_CAPTURE_CHARS} chars; fail closed)"
   fi
+  diagnostics=$(printf '%s' "$out" | diagnostic_tool record "$step" "$ec") \
+    || die "$step diagnostic evidence is contradictory"
+  case "$step" in
+    typecheck) DI_TYPECHECK=$diagnostics ;;
+    lint) DI_LINT=$diagnostics ;;
+    test) DI_TEST=$diagnostics ;;
+    build) DI_BUILD=$diagnostics ;;
+  esac
   case "$step" in
     typecheck) EC_TYPECHECK=$ec ;;
     lint) EC_LINT=$ec ;;
@@ -708,6 +727,13 @@ atomic_write "$OUT" "$OUT_PARENT_SNAP" <<EOF
     "lint": $ec_li,
     "test": $ec_te,
     "build": $ec_bu
+  },
+  "diagnostics": {
+    "version": 1,
+    "typecheck": $DI_TYPECHECK,
+    "lint": $DI_LINT,
+    "test": $DI_TEST,
+    "build": $DI_BUILD
   },
   "test_metrics": $METRICS_EMBED
 }

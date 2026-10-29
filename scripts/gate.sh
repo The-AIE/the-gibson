@@ -2,15 +2,150 @@
 # gate.sh — green gate vs. baseline (docs/06) + test-integrity (issue #70)
 set -euo pipefail
 
+# Shared diagnostic oracle (#375). gate-baseline freezes this source in shell
+# memory BEFORE configured commands; it must never execute a live helper path
+# after those commands can rewrite it. Source-only mode has no gate side effects.
+DIAGNOSTIC_JS=$(cat <<'GIBSON_DIAGNOSTIC_JS'
+const steps = ["typecheck", "lint", "test", "build"];
+const [mode, step, arg, exit] = process.argv.slice(1);
+function record(value) {
+  if (!Array.isArray(value) || value.length !== 5 ||
+      ![value[0], value[3], value[4]].every(v => typeof v === "string" && v.trim().length > 0) ||
+      !((value[1] === null && value[2] === null) ||
+        [value[1], value[2]].every(v => Number.isSafeInteger(v) && v > 0))) {
+    throw new Error("malformed diagnostic identity");
+  }
+  return value;
+}
+function capture(text, ec) {
+  const lines = text.split(/\r?\n/);
+  if (ec === 0) {
+    if (lines.some(line => /^\s*GIBSON_DIAGNOSTIC/.test(line))) {
+      throw new Error("explicit diagnostic contradicts exit 0");
+    }
+    return [];
+  }
+  const records = [];
+  for (const line of lines) {
+    if (line.trim() === "") continue;
+    if (line.startsWith("GIBSON_DIAGNOSTIC_V1 ")) {
+      try { records.push(record(JSON.parse(line.slice(21)))); }
+      catch { return null; }
+    } else if (step === "test" &&
+        /^GIBSON_TEST_METRICS total=(0|[1-9][0-9]*) skipped=(0|[1-9][0-9]*) todo=(0|[1-9][0-9]*)$/.test(line)) {
+      // Independently parsed and ratcheted by test-integrity.mjs; never a diagnostic.
+    } else {
+      return null;
+    }
+  }
+  return records.length > 0 ? records : null;
+}
+function validate(base) {
+  if (!Object.hasOwn(base, "diagnostics")) return; // Legacy: strict all-green only.
+  const d = base.diagnostics;
+  if (!d || Array.isArray(d) || d.version !== 1 ||
+      Object.keys(d).sort().join(",") !== [...steps, "version"].sort().join(",")) {
+    throw new Error("unsupported or malformed diagnostic evidence version");
+  }
+  for (const name of steps) {
+    const ec = base.exit_codes?.[name];
+    if (!Number.isSafeInteger(ec) || ec < 0 || ec > 255 ||
+        typeof base.commands?.[name] !== "string") {
+      throw new Error("malformed diagnostic command/exit binding");
+    }
+    const ids = d[name];
+    if (ids === null && ec !== 0) continue; // Explicitly opaque; cannot excuse red.
+    if (!Array.isArray(ids) || (ec === 0 ? ids.length !== 0 : ids.length === 0)) {
+      throw new Error("malformed diagnostic evidence for step");
+    }
+    ids.forEach(record);
+  }
+}
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { input += chunk; });
+process.stdin.on("end", () => {
+  try {
+    if (mode === "validate") {
+      validate(JSON.parse(input));
+      return;
+    }
+    if (!steps.includes(step)) throw new Error("unknown diagnostic step");
+    if (mode === "record") {
+      process.stdout.write(JSON.stringify(capture(input, Number(arg))));
+      return;
+    }
+    if (mode !== "compare") throw new Error("unknown diagnostic operation");
+    const split = input.indexOf("\0");
+    if (split < 0) throw new Error("missing diagnostic comparison input");
+    const base = JSON.parse(input.slice(0, split));
+    validate(base);
+    if (!Object.hasOwn(base, "diagnostics")) {
+      throw new Error("legacy baseline has no diagnostic identities; re-run gate-baseline.sh");
+    }
+    if (base.commands[step] !== arg || base.exit_codes[step] !== Number(exit)) {
+      throw new Error("diagnostic command/exit binding changed");
+    }
+    const known = base.diagnostics[step];
+    const candidate = capture(input.slice(split + 1), Number(exit));
+    if (known === null || candidate === null) {
+      throw new Error("opaque diagnostics cannot establish zero new failures; require exit 0 or structured records");
+    }
+    const remaining = new Map();
+    for (const id of known) {
+      const key = JSON.stringify(id);
+      remaining.set(key, (remaining.get(key) || 0) + 1);
+    }
+    for (const id of candidate) {
+      const key = JSON.stringify(id);
+      const count = remaining.get(key) || 0;
+      if (count === 0) throw new Error("new diagnostic identity or increased multiplicity");
+      remaining.set(key, count - 1);
+    }
+  } catch (err) {
+    process.stderr.write("diagnostics: " + err.message + " (fail closed)\n");
+    process.exitCode = 1;
+  }
+});
+GIBSON_DIAGNOSTIC_JS
+)
+if [[ "${1:-}" == "--diagnostic-parser-source" ]]; then
+  [[ $# -eq 1 ]] || { echo "diagnostic source mode takes no arguments" >&2; exit 2; }
+  printf '%s\n' "$DIAGNOSTIC_JS"
+  exit 0
+fi
+diagnostic_tool() { node -e "$DIAGNOSTIC_JS" "$@"; }
+
 usage() {
   cat <<'EOF'
 gate.sh — run the green gate; fail on NEW failures vs. baseline
 
 WHAT IT DOES
   Runs generate → typecheck → lint → test → build using the same command
-  resolution as gate-baseline.sh, compares failure counts / exit codes to
-  .gibson-baseline.json, and exits non-zero if any step is newly red or
-  has more failures than baseline.
+  resolution as gate-baseline.sh. Failing steps must emit structured diagnostic
+  identities whose multiset is a subset of the trusted baseline, with the same
+  command and exit code. Counts are report-only; equal counts never excuse a
+  new diagnostic. Unsupported/opaque failing output is RED.
+
+DIAGNOSTIC FORMAT (v1)
+  One complete record per line, with no other output on a failing step:
+    GIBSON_DIAGNOSTIC_V1 ["src/file.ts",1,2,"TS1234","full diagnostic message"]
+  The fixed tuple is [path,line,column,code,message]. Path/code/message must
+  be nonempty strings; positions must both be positive integers or null/null.
+  Include all significant detail in message. Record order is irrelevant;
+  multiplicity matters. No ANSI stripping, path rewriting or message trimming.
+  Test steps may also emit canonical GIBSON_TEST_METRICS total=N skipped=N
+  todo=N on one line; the independent test-integrity ratchet still applies.
+  Wrappers must describe actual diagnostics, not just failure summaries. Plain
+  text, empty/summary-only failures, unknown versions and unclassified output
+  cannot prove identity. Such runners must exit 0 to pass. Explicit diagnostic
+  records paired with exit 0 are contradictory and rejected.
+
+COMPATIBILITY
+  New baselines carry diagnostics.version=1. Legacy baselines can still pass
+  an all-green candidate (subject to test-integrity); they cannot excuse red.
+  Re-record diagnostic evidence at the trusted branch point, never at a failing
+  candidate merely to make it green. Malformed/unknown evidence fails closed.
 
   After the test step it also runs the test-integrity sensor (issue #70):
   a drop in test total or a rise in skip/todo vs the baseline hard-fails
@@ -88,7 +223,7 @@ MAX_CAPTURE_CHARS=$((8 * 1024 * 1024))
 
 # ---------------------------------------------------------------------------
 # Baseline authority snapshot (before any configured command)
-# Compare failure counts and test-integrity against this trusted snapshot
+# Compare diagnostic identities and test-integrity against this trusted snapshot
 # only — never re-read the baseline path after untrusted commands return.
 # Disappearance, replacement, parent drift, or byte change is RED.
 # ---------------------------------------------------------------------------
@@ -264,6 +399,9 @@ if [[ -f "$BASELINE" ]]; then
   SNAP_BYTES=$(cat -- "$BASELINE") \
     || die "cannot read baseline: $BASELINE"
   command -v node >/dev/null || die "node is required to parse the trusted baseline"
+  # Validate diagnostic evidence before any configured command (legacy is strict).
+  printf '%s' "$SNAP_BYTES" | diagnostic_tool validate \
+    || die "invalid baseline diagnostic evidence"
   # Extract failure/exit/metrics from the trusted bytes via stdin (no re-read path).
   eval "$(printf '%s' "$SNAP_BYTES" | node -e '
     let s = "";
@@ -466,8 +604,14 @@ TEST_STEP_RAN=0
 run_step() {
   local step="$1"
   local cmd="$2"
-  local out ec fc b_fc b_ec
-  [[ -z "$cmd" ]] && return 0
+  local out ec fc b_fc b_ec diag_out
+  b_ec=$(baseline_ec "$step")
+  if [[ -z "$cmd" ]]; then
+    if [[ "$SNAP_PRESENT" -eq 1 && "$b_ec" -ne 0 ]]; then
+      fail "$step failing baseline command disabled; diagnostic removal not proven"
+    fi
+    return 0
+  fi
   info "$step: $cmd"
   set +e
   # Command substitution is already a subshell; still route through the
@@ -488,6 +632,14 @@ run_step() {
   # Authority must still match the pre-command snapshot before any verdict.
   if ! verify_baseline_authority "after $step"; then
     return
+  fi
+
+  # Exit 0 plus an explicit failure record is contradictory, not a removal.
+  if [[ $ec -eq 0 ]]; then
+    if ! diag_out=$(printf '%s' "$out" | diagnostic_tool record "$step" "$ec" 2>&1); then
+      fail "$step $diag_out"
+      return
+    fi
   fi
 
   fc=0
@@ -514,15 +666,16 @@ run_step() {
     fail "$step newly failing (baseline was green)"
     return
   fi
-  # More failures than baseline
-  if [[ "$fc" -gt "$b_fc" ]]; then
-    echo "$out" | tail -n 40
-    fail "$step failures $fc > baseline $b_fc"
-    return
-  fi
-  # Still red but not worse — allowed (pre-existing)
+  # Counts remain useful for reporting, never authorization. Compare complete
+  # diagnostic multisets from the original trusted bytes and in-memory output.
   if [[ $ec -ne 0 ]]; then
-    info "$step still red but within baseline (fc=$fc <= $b_fc)"
+    if diag_out=$(printf '%s\0%s' "$SNAP_BYTES" "$out" |
+        diagnostic_tool compare "$step" "$cmd" "$ec" 2>&1); then
+      info "$step pre-existing diagnostics only (fc=$fc; baseline fc=$b_fc)"
+    else
+      printf '%s\n' "$out" | tail -n 40
+      fail "$step $diag_out"
+    fi
   else
     info "$step OK"
   fi
