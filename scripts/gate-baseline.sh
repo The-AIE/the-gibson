@@ -82,6 +82,37 @@ DIAGNOSTIC_JS=$(bash "$SCRIPT_DIR/gate.sh" --diagnostic-parser-source) \
   || die "cannot freeze diagnostic parser"
 diagnostic_tool() { node -e "$DIAGNOSTIC_JS" "$@"; }
 
+# Validate bytes before Bash command substitution can discard NULs. The final
+# status footer comes from the trusted parent shell, not the captured payload.
+# Parser failure after partial stdout must never become valid capture evidence.
+capture_text() {
+  local capture_status
+  command -v node >/dev/null || return 125
+  "$@" 2>&1 | node -e "$DIAGNOSTIC_JS" capture-text
+  capture_status=("${PIPESTATUS[@]}")
+  printf '\nGIBSON_CAPTURE_STATUS_V1:%s:%s' "${capture_status[0]}" "${capture_status[1]}"
+}
+
+decode_text_capture() {
+  local capture_frame="$1" capture_dest="$2" capture_ec_dest="$3"
+  local capture_footer capture_payload capture_producer capture_parser
+  capture_footer=${capture_frame##*$'\n'}
+  if [[ ! "$capture_footer" =~ ^GIBSON_CAPTURE_STATUS_V1:([0-9]+):([0-9]+)$ ]]; then
+    return 1
+  fi
+  capture_producer=${BASH_REMATCH[1]}
+  capture_parser=${BASH_REMATCH[2]}
+  [[ "$capture_parser" -eq 0 ]] || return 1
+  capture_payload=${capture_frame%$'\n'*}
+  case "$capture_payload" in
+    GIBSON_CAPTURE_TEXT_V1) capture_payload="" ;;
+    GIBSON_CAPTURE_TEXT_V1$'\n'*) capture_payload=${capture_payload#GIBSON_CAPTURE_TEXT_V1$'\n'} ;;
+    *) return 1 ;;
+  esac
+  printf -v "$capture_dest" '%s' "$capture_payload"
+  printf -v "$capture_ec_dest" '%s' "$capture_producer"
+}
+
 # ---------------------------------------------------------------------------
 # Path identity + parent-chain authority (Bash 3.2, macOS + Linux)
 # Untrusted gate steps must not pre-poison predictable paths, replace parent
@@ -419,8 +450,10 @@ PRIOR_OUT_PRESENT=0
 PRIOR_OUT_BYTES=""
 if [[ -f "$OUT" && ! -L "$OUT" ]]; then
   PRIOR_OUT_PRESENT=1
-  # shellcheck disable=SC2002
-  PRIOR_OUT_BYTES=$(cat -- "$OUT") || die "cannot read prior baseline: $OUT"
+  PRIOR_OUT_BYTES=$(capture_text cat -- "$OUT") || die "cannot read prior baseline: $OUT"
+  decode_text_capture "$PRIOR_OUT_BYTES" PRIOR_OUT_BYTES PRIOR_READ_EC \
+    || die "prior baseline has invalid text capture (NUL/UTF-8/parser)"
+  [[ "$PRIOR_READ_EC" -eq 0 ]] || die "cannot read prior baseline: $OUT"
 fi
 
 # In-memory step results (no pathname visible to configured commands).
@@ -463,7 +496,7 @@ run_configured_child() {
 run_count_failures() {
   local step="$1"
   local cmd="$2"
-  local out ec fc diagnostics
+  local out ec fc diagnostics capture_rc
   if [[ -z "$cmd" ]]; then
     case "$step" in
       typecheck) EC_TYPECHECK=0; FC_TYPECHECK=0 ;;
@@ -477,9 +510,12 @@ run_count_failures() {
   set +e
   # Command substitution is already a subshell; still route through the
   # isolation helper so no branch-configured string is eval'd in parent.
-  out=$(run_configured_child "$cmd" 2>&1)
-  ec=$?
+  out=$(capture_text run_configured_child "$cmd")
+  capture_rc=$?
   set -e
+  if [[ "$capture_rc" -ne 0 ]] || ! decode_text_capture "$out" out ec; then
+    die "$step invalid text capture (NUL/UTF-8/parser; fail closed)"
+  fi
   if [[ ${#out} -gt $MAX_CAPTURE_CHARS ]]; then
     die "captured $step output exceeds size cap (${MAX_CAPTURE_CHARS} chars; fail closed)"
   fi

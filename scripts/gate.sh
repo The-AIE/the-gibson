@@ -61,11 +61,21 @@ function validate(base) {
     ids.forEach(record);
   }
 }
-let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", chunk => { input += chunk; });
+const chunks = [];
+process.stdin.on("data", chunk => { chunks.push(chunk); });
 process.stdin.on("end", () => {
   try {
+    const bytes = Buffer.concat(chunks);
+    // Fatal decoding preserves U+FFFD identities and never replaces malformed
+    // bytes. Preserve BOMs too: unknown prefixes must remain unknown output.
+    const input = new TextDecoder("utf-8", {fatal: true, ignoreBOM: true}).decode(bytes);
+    if (mode === "capture-text") {
+      if (bytes.includes(0)) throw new Error("NUL in captured text");
+      // Retain the prior command-substitution trailing-LF behavior, without
+      // placing unvalidated bytes in any Bash variable.
+      process.stdout.write("GIBSON_CAPTURE_TEXT_V1\n" + input.replace(/\n+$/, ""));
+      return;
+    }
     if (mode === "validate") {
       validate(JSON.parse(input));
       return;
@@ -103,6 +113,10 @@ process.stdin.on("end", () => {
       remaining.set(key, count - 1);
     }
   } catch (err) {
+    if (mode === "capture-text") {
+      process.stdout.write("GIBSON_CAPTURE_REFUSED_V1");
+      return;
+    }
     process.stderr.write("diagnostics: " + err.message + " (fail closed)\n");
     process.exitCode = 1;
   }
@@ -115,6 +129,37 @@ if [[ "${1:-}" == "--diagnostic-parser-source" ]]; then
   exit 0
 fi
 diagnostic_tool() { node -e "$DIAGNOSTIC_JS" "$@"; }
+
+# Validate bytes before Bash command substitution can discard NULs. The final
+# status footer comes from the trusted parent shell, not the captured payload.
+# Parser failure after partial stdout must never become valid capture evidence.
+capture_text() {
+  local capture_status
+  command -v node >/dev/null || return 125
+  "$@" 2>&1 | node -e "$DIAGNOSTIC_JS" capture-text
+  capture_status=("${PIPESTATUS[@]}")
+  printf '\nGIBSON_CAPTURE_STATUS_V1:%s:%s' "${capture_status[0]}" "${capture_status[1]}"
+}
+
+decode_text_capture() {
+  local capture_frame="$1" capture_dest="$2" capture_ec_dest="$3"
+  local capture_footer capture_payload capture_producer capture_parser
+  capture_footer=${capture_frame##*$'\n'}
+  if [[ ! "$capture_footer" =~ ^GIBSON_CAPTURE_STATUS_V1:([0-9]+):([0-9]+)$ ]]; then
+    return 1
+  fi
+  capture_producer=${BASH_REMATCH[1]}
+  capture_parser=${BASH_REMATCH[2]}
+  [[ "$capture_parser" -eq 0 ]] || return 1
+  capture_payload=${capture_frame%$'\n'*}
+  case "$capture_payload" in
+    GIBSON_CAPTURE_TEXT_V1) capture_payload="" ;;
+    GIBSON_CAPTURE_TEXT_V1$'\n'*) capture_payload=${capture_payload#GIBSON_CAPTURE_TEXT_V1$'\n'} ;;
+    *) return 1 ;;
+  esac
+  printf -v "$capture_dest" '%s' "$capture_payload"
+  printf -v "$capture_ec_dest" '%s' "$capture_producer"
+}
 
 usage() {
   cat <<'EOF'
@@ -133,7 +178,8 @@ DIAGNOSTIC FORMAT (v1)
   The fixed tuple is [path,line,column,code,message]. Path/code/message must
   be nonempty strings; positions must both be positive integers or null/null.
   Include all significant detail in message. Record order is irrelevant;
-  multiplicity matters. No ANSI stripping, path rewriting or message trimming.
+  multiplicity matters. NUL or malformed UTF-8 output is rejected before shell
+  capture. No ANSI stripping, path rewriting or message trimming.
   Test steps may also emit canonical GIBSON_TEST_METRICS total=N skipped=N
   todo=N on one line; the independent test-integrity ratchet still applies.
   Wrappers must describe actual diagnostics, not just failure summaries. Plain
@@ -395,10 +441,12 @@ if [[ -f "$BASELINE" ]]; then
   SNAP_PRESENT=1
   SNAP_LEAF_ID=$(path_dev_ino "$BASELINE") \
     || die "cannot identity baseline leaf: $BASELINE"
-  # shellcheck disable=SC2002
-  SNAP_BYTES=$(cat -- "$BASELINE") \
-    || die "cannot read baseline: $BASELINE"
   command -v node >/dev/null || die "node is required to parse the trusted baseline"
+  SNAP_BYTES=$(capture_text cat -- "$BASELINE") \
+    || die "cannot read baseline: $BASELINE"
+  decode_text_capture "$SNAP_BYTES" SNAP_BYTES SNAP_READ_EC \
+    || die "baseline capture contains NUL, invalid UTF-8, or a failed parser (fail closed)"
+  [[ "$SNAP_READ_EC" -eq 0 ]] || die "cannot read baseline: $BASELINE"
   # Validate diagnostic evidence before any configured command (legacy is strict).
   printf '%s' "$SNAP_BYTES" | diagnostic_tool validate \
     || die "invalid baseline diagnostic evidence"
@@ -450,7 +498,7 @@ fi
 # Re-check live baseline matches the pre-command snapshot (fail closed).
 verify_baseline_authority() {
   local when="$1"
-  local cur_id cur_bytes
+  local cur_id cur_bytes cur_read_ec
 
   if [[ "$SNAP_PRESENT" -eq 0 ]]; then
     # Bootstrap: baseline was absent. Appearance mid-run is not trusted and
@@ -482,11 +530,18 @@ verify_baseline_authority() {
     fail "baseline authority drift ($when): baseline leaf replaced"
     return 1
   fi
-  # shellcheck disable=SC2002
-  cur_bytes=$(cat -- "$BASELINE") || {
+  cur_bytes=$(capture_text cat -- "$BASELINE") || {
     fail "baseline authority drift ($when): cannot re-read baseline bytes"
     return 1
   }
+  if ! decode_text_capture "$cur_bytes" cur_bytes cur_read_ec; then
+    fail "baseline authority drift ($when): invalid text capture (NUL/UTF-8/parser)"
+    return 1
+  fi
+  if [[ "$cur_read_ec" -ne 0 ]]; then
+    fail "baseline authority drift ($when): cannot re-read baseline bytes"
+    return 1
+  fi
   if [[ "$cur_bytes" != "$SNAP_BYTES" ]]; then
     fail "baseline authority drift ($when): baseline content changed"
     return 1
@@ -604,7 +659,7 @@ TEST_STEP_RAN=0
 run_step() {
   local step="$1"
   local cmd="$2"
-  local out ec fc b_fc b_ec diag_out
+  local out ec fc b_fc b_ec diag_out capture_rc
   b_ec=$(baseline_ec "$step")
   if [[ -z "$cmd" ]]; then
     if [[ "$SNAP_PRESENT" -eq 1 && "$b_ec" -ne 0 ]]; then
@@ -616,9 +671,14 @@ run_step() {
   set +e
   # Command substitution is already a subshell; still route through the
   # isolation helper so no branch-configured string is eval'd in parent.
-  out=$(run_configured_child "$cmd" 2>&1)
-  ec=$?
+  out=$(capture_text run_configured_child "$cmd")
+  capture_rc=$?
   set -e
+  if [[ "$capture_rc" -ne 0 ]] || ! decode_text_capture "$out" out ec; then
+    fail "$step invalid text capture (NUL/UTF-8/parser; fail closed)"
+    verify_baseline_authority "after $step (invalid capture)" || true
+    return
+  fi
   if [[ ${#out} -gt $MAX_CAPTURE_CHARS ]]; then
     fail "$step captured output exceeds size cap (${MAX_CAPTURE_CHARS} chars)"
     verify_baseline_authority "after $step (oversize)" || true

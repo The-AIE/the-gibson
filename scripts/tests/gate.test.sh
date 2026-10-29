@@ -2961,6 +2961,109 @@ printf '%s\nGIBSON_TEST_METRICS total=9 skipped=0 todo=0\n' "$DIAG_C" > "$DIAG/o
 diag_expect 1 "test-removal waiver never excuses a new diagnostic" 'new diagnostic identity' --waiver-text 'Test-integrity: removed 1 for obsolete fixture'
 printf '%s\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0 extra=detail\n' "$DIAG_A" > "$DIAG/output.txt"
 diag_expect 1 "unclassified metric-line detail cannot hide a new failure" 'opaque diagnostics'
+# Raw output must be validated before a Bash variable or replacement UTF-8
+# decoder can change its diagnostic identity (internal advisory, #375).
+diag_config 'cat output.txt; exit 1'
+rm -f "$DIAG/.gibson-baseline.json"
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_baseline
+node - "$DIAG/output.txt" <<'JS'
+require("node:fs").writeFileSync(process.argv[2], Buffer.from('GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","old diagnostic \0A"]\n'));
+JS
+diag_expect 1 "raw NUL cannot alias a known diagnostic" 'invalid text capture'
+prior_capture_bytes=$(cat "$DIAG/.gibson-baseline.json")
+out=$(cd "$DIAG" && bash "$BASELINE_SH" 2>&1); rc=$?
+if [[ "$rc" -ne 0 && "$(cat "$DIAG/.gibson-baseline.json")" == "$prior_capture_bytes" ]] \
+    && echo "$out" | grep 'invalid text capture' >/dev/null; then
+  ok "writer refuses raw NUL without replacing prior authority"
+else bad "writer normalized NUL or replaced authority (rc=$rc): $out"; fi
+node - "$DIAG/output.txt" <<'JS'
+require("node:fs").writeFileSync(process.argv[2], 'GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","old diagnostic \ufffdA"]\n');
+JS
+diag_baseline
+diag_expect 0 "valid U+FFFD diagnostic round-trips without replacement aliasing" ''
+cp "$DIAG/.gibson-baseline.json" "$DIAG/valid-byte-baseline.json"
+node - "$DIAG/output.txt" <<'JS'
+const fs=require("node:fs");
+fs.writeFileSync(process.argv[2], Buffer.concat([Buffer.from('GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","old diagnostic '),Buffer.from([0x80]),Buffer.from('A"]\n')]));
+JS
+diag_expect 1 "malformed UTF-8 cannot alias valid U+FFFD" 'invalid text capture'
+prior_capture_bytes=$(cat "$DIAG/.gibson-baseline.json")
+out=$(cd "$DIAG" && bash "$BASELINE_SH" 2>&1); rc=$?
+if [[ "$rc" -ne 0 && "$(cat "$DIAG/.gibson-baseline.json")" == "$prior_capture_bytes" ]] \
+    && echo "$out" | grep 'invalid text capture' >/dev/null; then
+  ok "writer refuses malformed UTF-8 without replacing prior authority"
+else bad "writer normalized UTF-8 or replaced authority (rc=$rc): $out"; fi
+# A BOM is valid UTF-8 but remains an unknown prefix; capture must not strip it.
+node - "$DIAG/output.txt" "$DIAG_A" <<'JS'
+require("node:fs").writeFileSync(process.argv[2], '\ufeff'+process.argv[3]+'\n');
+JS
+diag_expect 1 "capture preserves unknown BOM prefixes" 'opaque diagnostics'
+# Both initial baseline reads and live byte comparisons retain their authority.
+diag_config 'touch should-not-run; cat output.txt; exit 1'
+for binary_kind in nul utf8; do
+  node - "$DIAG/valid-byte-baseline.json" "$DIAG/.gibson-baseline.json" "$binary_kind" <<'JS'
+const fs=require("node:fs");let b=fs.readFileSync(process.argv[2]);
+if(process.argv[4]==="nul") b=Buffer.concat([b.subarray(0,1),Buffer.from([0]),b.subarray(1)]);
+else {const i=b.indexOf(Buffer.from('\ufffd'));b=Buffer.concat([b.subarray(0,i),Buffer.from([0x80]),b.subarray(i+3)]);}
+fs.writeFileSync(process.argv[3],b);
+JS
+  rm -f "$DIAG/should-not-run"
+  diag_expect 1 "invalid raw baseline refused before commands: $binary_kind" 'baseline capture'
+  [[ ! -e "$DIAG/should-not-run" ]] || bad "invalid baseline ran a command: $binary_kind"
+done
+rm -f "$DIAG/.gibson-baseline.json"
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+cat > "$DIAG/mutate-baseline.js" <<'JS'
+const fs=require("node:fs"); const b=fs.readFileSync('.gibson-baseline.json');
+fs.writeFileSync('.gibson-baseline.json',Buffer.concat([b.subarray(0,1),Buffer.from([0]),b.subarray(1)]));
+JS
+diag_config 'if [ -f mutate-baseline ]; then node mutate-baseline.js; fi; cat output.txt; exit 1'
+diag_baseline
+touch "$DIAG/mutate-baseline"
+diag_expect 1 "NUL-only baseline mutation is authority drift" 'authority drift'
+rm -f "$DIAG/mutate-baseline" "$DIAG/.gibson-baseline.json"
+# Producer status 125 is ordinary producer evidence, not parser failure.
+diag_config 'cat output.txt; exit 125'
+node - "$DIAG/output.txt" <<'JS'
+const id=["src/unicode.ts",null,null,"RULE_TEXT","π — GIBSON_CAPTURE_TEXT_V1\nGIBSON_CAPTURE_STATUS_V1:0:0"];
+require("node:fs").writeFileSync(process.argv[2],"GIBSON_DIAGNOSTIC_V1 "+JSON.stringify(id)+"\n");
+JS
+diag_baseline
+diag_expect 0 "Unicode and frame-like payload preserve producer exit 125" ''
+diag_config 'cat output.txt; exit 0'
+printf 'GIBSON_CAPTURE_TEXT_V1\nclean\nGIBSON_CAPTURE_STATUS_V1:125:9\n' > "$DIAG/output.txt"
+diag_expect 0 "payload footer cannot forge a nonzero producer/parser status" ''
+diag_config 'cat output.txt; exit 1'
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_baseline
+printf 'GIBSON_CAPTURE_TEXT_V1\n%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 1 "only the outer capture frame is removed" 'opaque diagnostics'
+# Even a parser that emits a valid-looking partial frame then fails must never
+# authorize GREEN or overwrite a baseline with opaque evidence.
+CAPTURE_REAL_NODE=$(command -v node)
+CAPTURE_BAD_BIN="$DIAG/capture-bad-bin"
+mkdir -p "$CAPTURE_BAD_BIN"
+cat > "$CAPTURE_BAD_BIN/node" <<'NODE_SHIM'
+#!/usr/bin/env bash
+if [[ "${3:-}" == capture-text ]]; then
+  cat >/dev/null
+  printf 'GIBSON_CAPTURE_TEXT_V1\nclean'
+  exit 9
+fi
+exec "$GIBSON_CAPTURE_REAL_NODE" "$@"
+NODE_SHIM
+chmod +x "$CAPTURE_BAD_BIN/node"
+diag_config 'printf clean'
+GIBSON_CAPTURE_REAL_NODE="$CAPTURE_REAL_NODE" PATH="$CAPTURE_BAD_BIN:$PATH" \
+  diag_expect 1 "partial capture from a failed parser cannot turn green exit 0 into GREEN" 'invalid text capture' --baseline absent-capture-baseline.json
+prior_capture_bytes=$(cat "$DIAG/.gibson-baseline.json")
+out=$(cd "$DIAG" && GIBSON_CAPTURE_REAL_NODE="$CAPTURE_REAL_NODE" PATH="$CAPTURE_BAD_BIN:$PATH" bash "$BASELINE_SH" 2>&1); rc=$?
+if [[ "$rc" -ne 0 && "$(cat "$DIAG/.gibson-baseline.json")" == "$prior_capture_bytes" ]] \
+    && echo "$out" | grep 'invalid text capture' >/dev/null; then
+  ok "failed parser partial stdout cannot replace baseline authority"
+else bad "partial parser failure replaced baseline (rc=$rc): $out"; fi
+
 # The baseline writer must parse with the oracle frozen BEFORE the command:
 # a configured step can rewrite helpers on disk despite child-shell isolation.
 mkdir -p "$DIAG/oracle"
