@@ -1,0 +1,3 @@
+{"id":"smoke-echo-contains","input":"gibson eval smoke alpha","tier":"A","expect":{"type":"contains","value":"smoke alpha"}}
+{"id":"smoke-echo-regex","input":"run 42 ok","tier":"A","expect":{"type":"regex","value":"^run \\d+ ok$"}}
+{"id":"smoke-echo-absent","input":"all clear","tier":"A","expect":{"type":"not_contains","value":"FAIL"}}
