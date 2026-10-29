@@ -37,6 +37,8 @@ make_repo() {
   cp "$REPO_ROOT/scripts/prepush.sh" "$d/scripts/"
   cp "$REPO_ROOT/scripts/lib/convention-probes.sh" "$REPO_ROOT/scripts/lib/wall-timeout.sh" \
      "$REPO_ROOT/scripts/lib/agent-vendor.sh" "$d/scripts/lib/"
+  cp "$REPO_ROOT/scripts/scope-recheck.mjs" "$REPO_ROOT/scripts/pr-claims.sh" "$REPO_ROOT/scripts/scope-overlap.mjs" "$d/scripts/"
+  cp "$REPO_ROOT/scripts/lib/args.mjs" "$d/scripts/lib/"
   reach_stub "$d" 0
   cat > "$d/scripts/ok.mjs" <<'EOF'
 const a = process.argv.slice(2);
@@ -63,6 +65,8 @@ cat > "$ROOT/bin/gh" <<'GH'
 #!/usr/bin/env bash
 [[ -z "${GH_STUB_LOG:-}" ]] || printf '%s\n' "$*" >> "$GH_STUB_LOG"
 case "$*" in
+  "pr view"*) echo 'no pull requests found for branch "x"' >&2; exit 1 ;;
+  "pr list"*) echo '[]'; exit 0 ;;
   *search/commits*)
     case "$*" in
       *"author-email:lane@gibson.test"*) printf 'lane@gibson.test\tmrhinkle\n' ;;
@@ -241,6 +245,7 @@ gate_exercises() { grep -qF "$2" "$1"; }
 RUNALL="$REPO_ROOT/scripts/tests/run-all.sh"
 GOOSE="$REPO_ROOT/scripts/tests/goose-recipes.test.sh"
 DCO="$REPO_ROOT/scripts/tests/dco-handoff.test.sh"
+SCOPE="$REPO_ROOT/scripts/tests/scope-recheck.test.sh"
 # probe name -> "gate file|needle". Every probe prepush.sh runs must appear here,
 # and the needle must still be in that gate file.
 probe_gate() {
@@ -250,6 +255,9 @@ probe_gate() {
     bash-n)              echo "$RUNALL|cp_bash_n" ;;
     recipe-hash)         echo "$GOOSE|cp_recipe_hash_drift" ;;
     agent-vendor)        echo "$DCO|cp_agent_vendor_walk" ;;
+    claim-scope)         echo "$SCOPE|outside-scope" ;;
+    docs-numbers)        echo "$SCOPE|docs-number-reused" ;;
+    workflows-registered) echo "$SCOPE|unregistered-workflow" ;;
     *) return 1 ;;
   esac
 }
