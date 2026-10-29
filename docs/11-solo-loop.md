@@ -47,7 +47,7 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 │   ── context reset ──
 │   6. REVIEW    lens review of the PR; Tier C → cross-vendor if  [reviewer hat]
 │                REVIEWER_CMD is set, else adversarial self-pass
-│                + flag for human merge gate
+│                + flag Tier C for E3 (D-015)
 │   ── context reset ──
 │   7. UX-EVAL   Playwright vs. the PR's preview deployment       [ux-evaluator hat]
 │   8. SECURITY  CI layers run on the PR automatically; read      [security hat]

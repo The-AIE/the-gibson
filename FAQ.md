@@ -65,7 +65,7 @@ Flat-rate pools absorb volume; metered tokens buy judgment.
 ## What is Tier C?
 
 Money, auth, consent/PII, security boundaries, schema, prod data — adversarial
-review + **human merge gate** ([docs/06](docs/06-quality-gates.md)).
+review + **E3 cross-vendor review plus required checks, no owner merge step** (D-015; [docs/06](docs/06-quality-gates.md)).
 
 ## How does the harness improve itself?
 

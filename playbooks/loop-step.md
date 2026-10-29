@@ -139,7 +139,7 @@ touch /path/to/target/gibson/HALT
 - Entry: green PR#.
 - Read-only multi-lens review. Prefer `REVIEWER_CMD` cross-vendor if set
   (especially Tier B/C). Else adversarial self-pass **from files only** + flag
-  human merge gate for Tier C.
+  the E3 floor for Tier C (D-015).
 - Verdict APPROVE → next `ux-evaluator` (or `security` if no UI).
 - REQUEST_CHANGES → next `builder`, round += 1; if `round` has reached the
   per-tier cap in `config/review-round-caps.json` (default A=1 / B=2 / C=3) the

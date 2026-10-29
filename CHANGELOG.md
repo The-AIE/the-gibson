@@ -10,6 +10,9 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### Docs: remove stale "human merge gate on Tier C" wording (D-015)
+README pipeline diagram, FAQ, HOW-IT-WORKS, docs/11, and two playbooks now say Tier C clears on E3 plus required checks with no owner merge step, as D-015 already decided. Doctrine text (AGENTS.md, docs/06, docs/14, playbooks/release.md) and its sensors are amended separately, per D-015's amendment order. No rule, gate, tier or sensor changed. G6 (billing/pricing/payment merge gate) is untouched.
+
 ### Docs: `docs/32-plain-english.md` — a five-minute layperson overview
 
 - **What changed:** New `docs/32-plain-english.md` explains the Gibson as a governance harness (the idea, the assembly line, terms of art, the rules that matter most, where adoption stands). The README, docs index and glossary link to it; the glossary gains Coordinator and Lane bot.
