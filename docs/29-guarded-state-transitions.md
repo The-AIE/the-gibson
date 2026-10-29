@@ -63,7 +63,7 @@ claim semantics — [doc 05](05-concurrency.md) still owns those.
 
 [Doc 23](23-delivery-control.md)'s promote step already binds a production advance to
 a **verified SHA on `main`** rather than a loose "looks done." The same discipline
-generalizes to any formal review point, including Tier C approval and Blueprint
+generalizes to any formal review point, including the Tier C exact-head review and Blueprint
 sign-off: treat a decision or spec artifact as moving through its own small state
 machine —
 
@@ -78,8 +78,8 @@ approval) is detectable rather than assumed away. **Superseded** entries are nev
 rewritten; a correction is a new entry that links back, matching the append-only
 convention `memory/DECISIONS.md` and `memory/LESSONS.md` already use.
 
-This is not a new gate — G10/G12 ([doc 14](14-human-gates.md)) still decide *when* a
-human reviews something. This only says: once reviewed, record what exactly was
+This is not a new gate — G10 ([doc 14](14-human-gates.md)) still decides *when* a human decides something,
+and the G12 floor (E3 at the exact head plus required checks) still decides when Tier C is mergeable. This only says: once reviewed, record what exactly was
 reviewed, so "approved" can't silently drift to mean "approved, plus whatever changed
 after."
 
