@@ -1910,7 +1910,7 @@ TargetApp has a deadline, a human in the loop, 25 workflows and 40 gate scripts,
 **Why:** gates pay for themselves where there is product flow to protect; on a repo with eight merges a month the same gates are most of the cost.
 
 **How to apply:** set process weight per repo from its measured throughput and stakes. A repo under ~20 merges/month gets the fast path and thin CI by default; add a gate there only when an incident in that repo justifies it. Review the per-repo weight whenever fleet-health shows a 5x throughput gap between repos under the same rules. See [[one-attestation-model]], [[agents-approving-agents]].
-**Harness fix:** set process weight per repo from its measured throughput and stakes. A repo under ~20 merges/month gets the fast path and thin CI by default; add a gate there only when an incident in that repo justifies it. Review the per-repo weight whenever fleet-health shows a 5x throughput gap between repos under the same rules. See [[one-attestation-model]], [[agents-approving-agents]].
+**Harness fix:** none shipped; previous text was a copy of How to apply, not a harness artifact.
 **Status:** intake 2026-10-08 from fleet memory `feedback_process_scales_with_repo_health.md` (no sensor yet)
 **Tags:** #ci #fleet #gate #intake #review
 
@@ -1921,7 +1921,7 @@ By 2026-10-08 the development loop had the coordinator coordinating, the approve
 **Why:** supervision layers that share the same blind spots add cost, not safety; an agent approving an agent's requests to act is the cross-vendor-review rule violated at the control level.
 
 **How to apply:** one coordinator, one reviewer of a different vendor, deterministic gates, and a human on the carve-outs. No agent approves another agent's permission prompts. A supervision job must name the failure it would catch that the gates would not; otherwise it is not added. Paused 2026-10-08: the four the approver agent/Einstein dev-supervision jobs alongside the coordinator. See [[process-scales-with-repo-health]].
-**Harness fix:** one coordinator, one reviewer of a different vendor, deterministic gates, and a human on the carve-outs. No agent approves another agent's permission prompts. A supervision job must name the failure it would catch that the gates would not; otherwise it is not added. Paused 2026-10-08: the four the approver agent/Einstein dev-supervision jobs alongside the coordinator. See [[process-scales-with-repo-health]].
+**Harness fix:** none shipped; previous text was a copy of How to apply, not a harness artifact.
 **Status:** intake 2026-10-08 from fleet memory `feedback_agents_approving_agents.md` (no sensor yet)
 **Tags:** #fleet #intake #merge #review
 
@@ -1930,4 +1930,293 @@ By 2026-10-08 the development loop had the coordinator coordinating, the approve
 **Why:** the template was only ever exercised on public, user-owned repos, where anonymous fetches succeed and the Action needs no license. `test-integrity-resolve` already authenticated its fetches, so the gap was a single step, and no sensor compared the jobs.
 **Harness fix:** the gate job's base fetch authenticates with the job token through a per-command `extraheader` (masked, never written to `.git/config`) and runs before `npm ci`, so no PR-head code has executed while the token is in the step environment. gitleaks runs as the pinned, SHA-256-verified MIT CLI, scoped with `--log-opts` to the PR's commits: the CLI default is every branch's full history, which review caught failing on an unrelated branch's old secret, re-creating the red-on-adoption failure. Both range ends are proven present with `git cat-file -e` first, because gitleaks exits 0 after scanning 0 commits when a range end is missing (second review round). `scripts/tests/ci-conventions.test.sh` sections (i) and (j) fail on any `gitleaks/gitleaks-action` use, on a gitleaks scan without `--log-opts` or without a range-presence proof, and on an unauthenticated gate-job fetch or a gate-job token visible at or after `npm ci` (step or job-level env); mutations 40–49 prove each fires.
 **Status:** fixed (#412)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/412
 **Tags:** #ci #adoption #security #template
+
+## L-098 · 2026-10-23 · prepush-gate-empty-locale
+**What happened:** https://github.com/The-AIE/the-gibson/issues/535 records that a fleet lane pre-push gate ran a Node test runner with an empty LANG and LC_ALL, and six database-backed suites failed for a reason unrelated to the code under test. The issue says the gate must export a default locale before it runs any gate command, filling only when unset. https://github.com/The-AIE/the-gibson/pull/531
+**Root cause:** unknown. The public issue states the empty locale and the failed suites; this ledger does not record a verified cause beyond that statement.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/535 https://github.com/The-AIE/the-gibson/pull/531
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-10-23
+**Ingested:** 2026-10-23
+**Tags:** #gate #locale #intake
+
+## L-099 · 2026-09-07 · sensor-monitor-latched-red
+**What happened:** Fail-closed sensor monitoring itself latched red after the fault cleared https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/212
+**Root cause:** unknown. The pattern column on the public incident list is "false green / false red"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/212
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-07
+**Ingested:** 2026-10-03
+**Tags:** #false-green #false-red #intake
+
+## L-100 · 2026-09-07 · stash-drop-destroyed-unrelated-work
+**What happened:** Conditional `git stash push` + unconditional `drop` destroyed unrelated work https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "destructive edit from unchecked input"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-07
+**Ingested:** 2026-10-03
+**Tags:** #destructive-edit #intake
+
+## L-101 · 2026-09-07 · review-evidence-no-verdict-false-red
+**What happened:** Review-evidence sweep "no-verdict" false red auto-filed twice https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/381 https://github.com/The-AIE/the-gibson/issues/382
+**Root cause:** unknown. The pattern column on the public incident list is "false red"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/381 https://github.com/The-AIE/the-gibson/issues/382
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-07
+**Ingested:** 2026-10-03
+**Tags:** #false-red #intake
+
+## L-102 · 2026-09-09 · reviewer-version-skew-false-network
+**What happened:** Reviewer CLI/model version skew produced no verdict; misdiagnosed as a network outage https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "host toolchain / false signal"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-09
+**Ingested:** 2026-10-03
+**Tags:** #false-signal #intake
+
+## L-103 · 2026-09-09 · empty-commit-stale-exact-head-review
+**What happened:** An empty commit moved the head and invalidated a pinned exact-head review https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "stale head"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-09
+**Ingested:** 2026-10-03
+**Tags:** #stale-head #intake
+
+## L-104 · 2026-09-09 · builder-dispatch-stall-empty-log
+**What happened:** Builder dispatch with a long spec stalled: near-zero CPU, empty log https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/408 https://github.com/The-AIE/the-gibson/issues/310
+**Root cause:** unknown. The pattern column on the public incident list is "liveness"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/408 https://github.com/The-AIE/the-gibson/issues/310
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-09
+**Ingested:** 2026-10-03
+**Tags:** #liveness #intake
+
+## L-105 · 2026-09-10 · empty-check-conclusion-read-as-clear
+**What happened:** Empty check conclusion read as "clear"; attestation posted on a red head https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "false green"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-10
+**Ingested:** 2026-10-03
+**Tags:** #false-green #intake
+
+## L-106 · 2026-09-10 · local-gate-skipped-changed-file-tests
+**What happened:** Local gate skipped tests that read the changed file; CI red, main red after merge https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "test selection"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-10
+**Ingested:** 2026-10-03
+**Tags:** #test-selection #intake
+
+## L-107 · 2026-09-10 · concurrent-npm-ci-partial-install
+**What happened:** Two concurrent `npm ci` in sibling worktrees left a partial install https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/391
+**Root cause:** unknown. The pattern column on the public incident list is "shared-resource collision"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/391
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-10
+**Ingested:** 2026-10-03
+**Tags:** #shared-resource #intake
+
+## L-108 · 2026-09-11 · grep-vq-alias-opens-whitelist
+**What happened:** `grep -vq` under a grep alias never selects; whitelist gate silently open https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "false green"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-11
+**Ingested:** 2026-10-03
+**Tags:** #false-green #intake
+
+## L-109 · 2026-09-11 · printf-heredoc-empty-stdin
+**What happened:** `printf … | python3 - <<heredoc` read empty stdin; false "0 markers" https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "false green"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-11
+**Ingested:** 2026-10-03
+**Tags:** #false-green #intake
+
+## L-110 · 2026-09-12 · rtl-waitfor-passes-on-mutant
+**What happened:** RTL `waitFor` passed on the mutant before an effect reset https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "test passes on broken code"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-12
+**Ingested:** 2026-10-03
+**Tags:** #tests #intake
+
+## L-111 · 2026-09-16 · spec-rewrite-builder-wrong-tree
+**What happened:** Spec path rewrite: builder worked in a self-created worktree; runner saw zero diff https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "brief drift / wrong tree"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-16
+**Ingested:** 2026-10-03
+**Tags:** #wrong-tree #intake
+
+## L-112 · 2026-09-16 · test-count-oracle-disagrees
+**What happened:** Test-count oracle by grep disagreed with the runner's collected count (7 vs 16) https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "detector claims more than it proves"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-16
+**Ingested:** 2026-10-03
+**Tags:** #detector #intake
+
+## L-113 · 2026-09-21 · gh-issue-edit-blanked-bodies
+**What happened:** `gh issue edit -F` from a 0-byte file blanked three issue bodies https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "destructive edit from unchecked input"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-21
+**Ingested:** 2026-10-03
+**Tags:** #destructive-edit #intake
+
+## L-114 · 2026-09-21 · two-owner-comments-blocked-merges
+**What happened:** Two owner comments required per merge; merges fell from 38/week to 1 https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/399
+**Root cause:** unknown. The pattern column on the public incident list is "gate cannot be satisfied"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/399
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-21
+**Ingested:** 2026-10-03
+**Tags:** #merge-gate #intake
+
+## L-115 · 2026-09-24 · nested-builder-sandbox-permissions
+**What happened:** Builder CLI nested in a reviewer sandbox fails on filesystem permissions https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "host toolchain"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-24
+**Ingested:** 2026-10-03
+**Tags:** #host-toolchain #intake
+
+## L-116 · 2026-09-28 · spec-review-against-stale-main
+**What happened:** Spec review ran against a local main 86 commits stale; reported real files missing https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "stale reference"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-28
+**Ingested:** 2026-10-03
+**Tags:** #stale-reference #intake
+
+## L-117 · 2026-09-30 · believed-live-services-were-not
+**What happened:** Host-side agent services believed live were not (deaf channel, unauthenticated memory, crash-looping dispatcher, jobs writing to unread files) https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "built but not wired"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-30
+**Ingested:** 2026-10-03
+**Tags:** #not-wired #intake
+
+## L-118 · 2026-10-02 · trailing-comment-bypasses-inspection
+**What happened:** Sensor PR: trailing comment bypasses inspection; same-step token exposure evades check https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/pull/413
+**Root cause:** unknown. The pattern column on the public incident list is "detector claims more than it proves"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/pull/413
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-10-02
+**Ingested:** 2026-10-03
+**Tags:** #detector #intake
+
+## L-119 · 2026-10-03 · parser-fail-open-under-green-ci
+**What happened:** Parser PR in an adopter: four fail-open parser classes despite green CI https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "detector claims more than it proves"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-10-03
+**Ingested:** 2026-10-03
+**Tags:** #fail-open #intake
+
+## L-120 · 2026-10-03 · lockfile-mislabelled-prod-deps
+**What happened:** Lockfile change mis-marked production-optional dependencies as dev https://github.com/The-AIE/the-gibson/issues/419
+**Root cause:** unknown. The pattern column on the public incident list is "brief drift"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-10-03
+**Ingested:** 2026-10-03
+**Tags:** #brief-drift #intake
+
+## L-121 · 2026-10-03 · coordinator-no-acceptable-review-evidence
+**What happened:** Coordinator: zero merges in 24 rounds; cannot produce acceptable review evidence https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/399
+**Root cause:** unknown. The pattern column on the public incident list is "gate cannot be satisfied"; that column is a pattern tag, not a verified cause.
+**Harness fix:** none shipped in this repository
+**Status:** unknown (no sensor yet)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/419 https://github.com/The-AIE/the-gibson/issues/399
+**Proof:** unknown
+**Reverted attempt:** unknown
+**Occurred:** 2026-10-03
+**Ingested:** 2026-10-03
+**Tags:** #merge-gate #intake

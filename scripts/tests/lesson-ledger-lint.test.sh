@@ -49,6 +49,23 @@ entry() {
   printf '%s\n' ""
 }
 
+# Lesson at or above the schema cutoff. Values default to the word unknown.
+schema_entry() {
+  local n="$1" status="$2" evidence="${3:-unknown}" proof="${4:-unknown}" reverted="${5:-unknown}"
+  printf '%s\n' "## $(lid "$n") · 2026-10-23 · fixture-lesson-${n}"
+  printf '%s\n' "**What happened:** fixture"
+  printf '%s\n' "**Root cause:** unknown"
+  printf '%s\n' "**Harness fix:** none shipped in this repository"
+  printf '%s\n' "**Status:** ${status}"
+  printf '%s\n' "**Evidence:** ${evidence}"
+  printf '%s\n' "**Proof:** ${proof}"
+  printf '%s\n' "**Reverted attempt:** ${reverted}"
+  printf '%s\n' "**Occurred:** 2026-10-23"
+  printf '%s\n' "**Ingested:** 2026-10-23"
+  printf '%s\n' "**Tags:** #fixture"
+  printf '%s\n' ""
+}
+
 run_lint() {
   local tree="$1"
   shift
@@ -692,6 +709,117 @@ if [[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null; then
 else
   bad "live tree (rc=$rc): $out"
 fi
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep 'evidence-report' >/dev/null \
+    && echo "$out" | grep 'proof-unknown=' >/dev/null \
+    && echo "$out" | grep "$(lid 98) evidence=well-formed proof=unknown" >/dev/null \
+    && echo "$out" | grep "$(lid 97) evidence=well-formed proof=unknown" >/dev/null \
+    && ! echo "$out" | grep -F 'unknown is not correct' >/dev/null \
+    && ! echo "$out" | grep -E 'healthy|proof=ok|proof=correct' >/dev/null; then
+  ok "live report counts unknown and does not call it correct"
+else
+  bad "live report shape (rc=$rc)"
+fi
+live_notes=$(node - "$REPO_ROOT" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const root = process.argv[2];
+const problems = [];
+const lid = (n) => "L-" + String(n).padStart(3, "0");
+const iid = (n) => "I-" + String(n).padStart(3, "0");
+const ledger = fs.readFileSync(path.join(root, "memory/LESSONS.md"), "utf8");
+function section(id) {
+  const head = "## " + id + " ";
+  const i = ledger.indexOf(head);
+  if (i < 0) return null;
+  const rest = ledger.slice(i);
+  const next = rest.slice(1).search(/\n## /);
+  return next < 0 ? rest : rest.slice(0, next + 1);
+}
+function field(text, name) {
+  const re = new RegExp("^\\*\\*" + name + ":\\*\\* (.*)$", "m");
+  const m = text.match(re);
+  return m ? m[1] : null;
+}
+const honest = "none shipped; previous text was a copy of How to apply, not a harness artifact.";
+for (const n of [95, 96]) {
+  const sec = section(lid(n));
+  if (!sec) { problems.push("missing " + n); continue; }
+  if (field(sec, "Harness fix") !== honest) problems.push(n + " harness fix was not repaired");
+  if (field(sec, "Harness fix") === field(sec, "How to apply")) problems.push(n + " harness still copies how to apply");
+}
+const sec97 = section(lid(97));
+if (!sec97) problems.push("missing 97");
+else {
+  if (field(sec97, "Status") !== "fixed (#412)") problems.push("97 status changed");
+  if (/^\*\*Proof:\*\*/m.test(sec97)) problems.push("97 must not grow a Proof line");
+  const ev = field(sec97, "Evidence") || "";
+  if (!ev.includes("/issues/419") || !ev.includes("/issues/412")) problems.push("97 evidence urls");
+}
+const dates = ["2026-09-07","2026-09-07","2026-09-07","2026-09-09","2026-09-09","2026-09-09","2026-09-10","2026-09-10","2026-09-10","2026-09-11","2026-09-11","2026-09-12","2026-09-16","2026-09-16","2026-09-21","2026-09-21","2026-09-24","2026-09-28","2026-09-30","2026-09-30","2026-10-02","2026-10-03","2026-10-03","2026-10-03"];
+const lessonNums = [99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,97,118,119,120,121];
+const indexPath = path.join(root, "memory/incidents/INDEX.md");
+const index = fs.readFileSync(indexPath, "utf8");
+const rows = index.split(/\n/).filter((line) => /^I-\d{3} L-\d{3}$/.test(line));
+if (rows.length !== 24) problems.push("index rows " + rows.length);
+const seen = new Map();
+for (const line of rows) {
+  const parts = line.split(" ");
+  seen.set(parts[0], parts[1]);
+}
+for (let i = 0; i < 24; i++) {
+  const id = iid(i + 1);
+  const want = lid(lessonNums[i]);
+  if (seen.get(id) !== want) problems.push("index " + id + " -> " + seen.get(id));
+  const file = path.join(root, "memory/incidents", id + ".md");
+  if (!fs.existsSync(file)) { problems.push("missing file " + id); continue; }
+  const body = fs.readFileSync(file, "utf8");
+  if (!body.startsWith("## " + id + " · " + dates[i] + " · ")) problems.push(id + " heading");
+  if (field(body, "Lesson") !== want) problems.push(id + " lesson field");
+  if (field(body, "Occurred") !== dates[i]) problems.push(id + " occurred");
+  if (field(body, "Ingested") !== "2026-10-03") problems.push(id + " ingested");
+  if (field(body, "Proof") !== "unknown") problems.push(id + " proof");
+  if (field(body, "Status") !== "unknown") problems.push(id + " status");
+  if (field(body, "Reverted attempt") !== "unknown") problems.push(id + " reverted");
+  const ev = field(body, "Evidence") || "";
+  if (!ev.includes("/issues/419")) problems.push(id + " evidence");
+  if (/^\s*fixed\b/i.test(field(body, "Status") || "")) problems.push(id + " marked fixed");
+}
+const sec98 = section(lid(98));
+if (!sec98 || !sec98.startsWith("## " + lid(98) + " · 2026-10-23 · ")) problems.push("98 heading");
+else {
+  if (field(sec98, "Proof") !== "unknown") problems.push("98 proof");
+  if (!/^unknown\b/.test(field(sec98, "Status") || "")) problems.push("98 status");
+  if (/^\s*fixed\b/i.test(field(sec98, "Status") || "")) problems.push("98 fixed");
+  const ev = field(sec98, "Evidence") || "";
+  if (!ev.includes("/issues/535") || !ev.includes("/pull/531")) problems.push("98 evidence");
+  if (field(sec98, "Harness fix") !== "none shipped in this repository") problems.push("98 harness");
+}
+let cursor = sec98 ? ledger.indexOf(sec98) : 0;
+for (let n = 99; n <= 121; n++) {
+  const sec = section(lid(n));
+  if (!sec) { problems.push("missing lesson " + n); continue; }
+  const at = ledger.indexOf(sec);
+  if (at < cursor) problems.push("lesson order " + n);
+  cursor = at;
+  if (field(sec, "Proof") !== "unknown") problems.push(n + " proof");
+  if (!/^unknown\b/.test(field(sec, "Status") || "")) problems.push(n + " status");
+  if (/^\s*fixed\b/i.test(field(sec, "Status") || "")) problems.push(n + " fixed");
+  if (!(field(sec, "Evidence") || "").includes("/issues/419")) problems.push(n + " evidence");
+  if (field(sec, "Harness fix") !== "none shipped in this repository") problems.push(n + " harness");
+}
+if (problems.length) {
+  console.log(problems.join("\n"));
+  process.exit(1);
+}
+console.log("live schema checks passed");
+NODE
+)
+live_rc=$?
+if [[ "$live_rc" -eq 0 ]]; then
+  ok "live ledger schema checks"
+else
+  bad "live ledger schema checks: ${live_notes}"
+fi
 
 
 echo "# Codex #316 round 4: mid-line HTML comment; trailing '# pins' on a code line"
@@ -747,6 +875,323 @@ printf '%s\n' "$out" | grep "cited $A99 is absent" >/dev/null && ok "r3-4: an en
 printf '%s\n' '#!/bin/bash' "# pins $A1" > "$R3/scripts/tests/q.test.sh"
 run_lint "$R3" --offline
 printf '%s\n' "$out" | grep "$A1 status claims" >/dev/null && bad "r3-2 control: a real comment-line marker was rejected: $out" || ok "r3-2 control: a real '# pins' comment line is a pin"
+
+echo "# evidence schema"
+home_mark=$(printf '%s%s%s' '/' 'Users' '/')
+canary="${home_mark}example/canary"
+assign=$(printf '%s%s%s' 'token' '=' 'canarycanarycanary')
+sha=$(node -e 'process.stdout.write("a".repeat(40))')
+sha_upper=$(node -e 'process.stdout.write("A".repeat(40))')
+
+OLD_OK="$ROOT/schema-old-ok"
+make_tree "$OLD_OK"
+{ printf '%s\n' '---'; entry 1 "fixed"; } > "$OLD_OK/memory/LESSONS.md"
+run_lint "$OLD_OK" --offline
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep "$(lid 1) evidence=unknown proof=unknown" >/dev/null \
+    && echo "$out" | grep 'OK' >/dev/null \
+    && ! echo "$out" | grep -F 'unknown is not correct' >/dev/null \
+    && ! echo "$out" | grep -E 'healthy|proof=ok|proof=correct' >/dev/null; then
+  ok "omitted fields on an old fixed lesson report unknown"
+else
+  bad "old omitted fields (rc=$rc): $out"
+fi
+
+FIX_UNK="$ROOT/schema-fixed-unknown"
+make_tree "$FIX_UNK"
+{
+  printf '%s\n' "## $(lid 1) · 2026-09-04 · fixed-unknown-proof"
+  printf '%s\n' "**Status:** fixed"
+  printf '%s\n' "**Proof:** unknown"
+  printf '%s\n' "**Tags:** #fixture"
+} > "$FIX_UNK/memory/LESSONS.md"
+run_lint "$FIX_UNK" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'unknown is not correct' >/dev/null; then
+  ok "explicit unknown proof on a fixed lesson fails"
+else
+  bad "fixed unknown proof (rc=$rc): $out"
+fi
+
+NEW_OK="$ROOT/schema-new-ok"
+make_tree "$NEW_OK"
+{ schema_entry 98 "unknown (no sensor yet)"; } > "$NEW_OK/memory/LESSONS.md"
+run_lint "$NEW_OK" --offline
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep "$(lid 98) evidence=unknown proof=unknown reverted=unknown" >/dev/null \
+    && ! echo "$out" | grep -F 'unknown is not correct' >/dev/null; then
+  ok "schema lesson with unknown values passes"
+else
+  bad "schema unknown values (rc=$rc): $out"
+fi
+
+MISS="$ROOT/schema-missing-evidence"
+make_tree "$MISS"
+{
+  printf '%s\n' "## $(lid 98) · 2026-10-23 · missing-evidence"
+  printf '%s\n' "**Status:** unknown (no sensor yet)"
+  printf '%s\n' "**Proof:** unknown"
+  printf '%s\n' "**Reverted attempt:** unknown"
+  printf '%s\n' "**Occurred:** 2026-10-23"
+  printf '%s\n' "**Ingested:** 2026-10-23"
+  printf '%s\n' "**Tags:** #fixture"
+} > "$MISS/memory/LESSONS.md"
+run_lint "$MISS" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'the absent value is not unknown' >/dev/null; then
+  ok "omitted evidence on a schema lesson fails"
+else
+  bad "omitted schema evidence (rc=$rc): $out"
+fi
+
+BADH="$ROOT/schema-bad-heading"
+make_tree "$BADH"
+{
+  printf '%s\n' "## $(lid 98) · 2026-10 · not-strict"
+  printf '%s\n' "**Status:** unknown (no sensor yet)"
+  printf '%s\n' "**Evidence:** unknown"
+  printf '%s\n' "**Proof:** unknown"
+  printf '%s\n' "**Reverted attempt:** unknown"
+  printf '%s\n' "**Occurred:** 2026-10-23"
+  printf '%s\n' "**Ingested:** 2026-10-23"
+  printf '%s\n' "**Tags:** #fixture"
+} > "$BADH/memory/LESSONS.md"
+run_lint "$BADH" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'heading is not' >/dev/null; then
+  ok "schema lesson heading must carry a full date and slug"
+else
+  bad "schema heading (rc=$rc): $out"
+fi
+
+BADP="$ROOT/schema-bad-proof"
+make_tree "$BADP"
+{ schema_entry 98 "unknown (no sensor yet)" "unknown" "abcd scripts/gate.sh scripts/tests/fixtures/demo"; } > "$BADP/memory/LESSONS.md"
+run_lint "$BADP" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Proof is not unknown' >/dev/null; then
+  ok "short proof sha fails"
+else
+  bad "short proof (rc=$rc): $out"
+fi
+
+UPP="$ROOT/schema-upper-proof"
+make_tree "$UPP"
+{ schema_entry 98 "unknown (no sensor yet)" "unknown" "$sha_upper scripts/gate.sh scripts/tests/fixtures/demo"; } > "$UPP/memory/LESSONS.md"
+run_lint "$UPP" --offline
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Proof is not unknown' >/dev/null \
+  && ok "uppercase proof sha fails" || bad "uppercase proof (rc=$rc): $out"
+
+GOODP="$ROOT/schema-good-proof"
+make_tree "$GOODP"
+mkdir -p "$GOODP/scripts/tests/fixtures/demo"
+printf '%s\n' 'echo ok' > "$GOODP/scripts/gate.sh"
+{ schema_entry 98 "unknown (no sensor yet)" "https://github.com/acme/app/issues/1" "$sha scripts/gate.sh scripts/tests/fixtures/demo"; } > "$GOODP/memory/LESSONS.md"
+run_lint "$GOODP" --offline
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep 'proof=unverified' >/dev/null \
+    && ! echo "$out" | grep -E 'proof=verified|proof=correct|healthy' >/dev/null \
+    && ! echo "$out" | grep -F 'unknown is not correct' >/dev/null; then
+  ok "shaped proof with existing paths is unverified"
+else
+  bad "shaped proof (rc=$rc): $out"
+fi
+
+MISSP="$ROOT/schema-missing-path"
+make_tree "$MISSP"
+mkdir -p "$MISSP/scripts/tests/fixtures/demo"
+{ schema_entry 98 "unknown (no sensor yet)" "unknown" "$sha scripts/missing-gate.sh scripts/tests/fixtures/demo"; } > "$MISSP/memory/LESSONS.md"
+run_lint "$MISSP" --offline
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'entrypoint is absent' >/dev/null \
+  && ok "shaped proof with a missing entrypoint fails" \
+  || bad "missing proof path (rc=$rc): $out"
+
+SYML="$ROOT/schema-symlink-proof"
+make_tree "$SYML"
+mkdir -p "$SYML/scripts/tests/fixtures/demo"
+printf '%s\n' 'echo ok' > "$SYML/scripts/real-gate.sh"
+ln -s real-gate.sh "$SYML/scripts/gate.sh"
+{ schema_entry 98 "unknown (no sensor yet)" "unknown" "$sha scripts/gate.sh scripts/tests/fixtures/demo"; } > "$SYML/memory/LESSONS.md"
+run_lint "$SYML" --offline
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'does not follow' >/dev/null \
+  && ok "symlink proof path is refused" || bad "symlink proof (rc=$rc): $out"
+
+PRIV="$ROOT/schema-privacy"
+make_tree "$PRIV"
+{ schema_entry 98 "unknown (no sensor yet)" "$canary $assign"; } > "$PRIV/memory/LESSONS.md"
+run_lint "$PRIV" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'privacy rule home-users' >/dev/null \
+    && echo "$out" | grep -F 'privacy rule assigned-secret' >/dev/null \
+    && ! echo "$out" | grep -F "$canary" >/dev/null \
+    && ! echo "$out" | grep -F "$assign" >/dev/null; then
+  ok "evidence privacy hit names the rule and does not echo the canary"
+else
+  bad "evidence privacy (rc=$rc): $out"
+fi
+
+PROSE="$ROOT/schema-prose-path"
+make_tree "$PROSE"
+{
+  printf '%s\n' "## $(lid 98) · 2026-10-23 · prose-path"
+  printf '%s\n' "**What happened:** a log mentioned ${canary}"
+  printf '%s\n' "**Root cause:** unknown"
+  printf '%s\n' "**Harness fix:** none shipped in this repository"
+  printf '%s\n' "**Status:** unknown (no sensor yet)"
+  printf '%s\n' "**Evidence:** unknown"
+  printf '%s\n' "**Proof:** unknown"
+  printf '%s\n' "**Reverted attempt:** unknown"
+  printf '%s\n' "**Occurred:** 2026-10-23"
+  printf '%s\n' "**Ingested:** 2026-10-23"
+  printf '%s\n' "**Tags:** #fixture"
+} > "$PROSE/memory/LESSONS.md"
+run_lint "$PROSE" --offline
+if [[ "$rc" -eq 0 ]] && ! echo "$out" | grep -F 'home-users' >/dev/null \
+    && ! echo "$out" | grep -F "$canary" >/dev/null; then
+  ok "a home path in lesson prose is not an evidence field"
+else
+  bad "prose path (rc=$rc): $out"
+fi
+
+FENCE="$ROOT/schema-fenced"
+make_tree "$FENCE"
+{
+  printf '%s\n' "## $(lid 98) · 2026-10-23 · fenced-copy"
+  printf '%s\n' "**What happened:** fixture"
+  printf '%s\n' "**Status:** unknown (no sensor yet)"
+  printf '%s\n' "**Evidence:** unknown"
+  printf '%s\n' '```'
+  printf '%s\n' "**Evidence:** ${canary}"
+  printf '%s\n' '```'
+  printf '%s\n' "**Proof:** unknown"
+  printf '%s\n' "**Reverted attempt:** unknown"
+  printf '%s\n' "**Occurred:** 2026-10-23"
+  printf '%s\n' "**Ingested:** 2026-10-23"
+  printf '%s\n' "**Tags:** #fixture"
+} > "$FENCE/memory/LESSONS.md"
+run_lint "$FENCE" --offline
+if [[ "$rc" -eq 0 ]] && ! echo "$out" | grep -F 'home-users' >/dev/null; then
+  ok "a fenced copy is not a lesson evidence field"
+else
+  bad "fenced evidence (rc=$rc): $out"
+fi
+
+BADEV="$ROOT/schema-bad-evidence"
+make_tree "$BADEV"
+{ schema_entry 1 "intake" "not-a-url"; } > "$BADEV/memory/LESSONS.md"
+run_lint "$BADEV" --offline
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Evidence is not unknown' >/dev/null \
+  && ok "explicit malformed evidence fails on an old lesson" \
+  || bad "malformed evidence (rc=$rc): $out"
+
+REV_BAD="$ROOT/schema-reverted-unknown"
+make_tree "$REV_BAD"
+{
+  printf '%s\n' "## $(lid 1) · 2026-09-04 · reverted-unknown"
+  printf '%s\n' "**Status:** reverted"
+  printf '%s\n' "**Reverted attempt:** unknown"
+  printf '%s\n' "**Tags:** #fixture"
+} > "$REV_BAD/memory/LESSONS.md"
+run_lint "$REV_BAD" --offline
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Reverted attempt is unknown' >/dev/null \
+  && ok "reverted with unknown attempt fails" \
+  || bad "reverted unknown (rc=$rc): $out"
+
+REV_OK="$ROOT/schema-reverted-recorded"
+make_tree "$REV_OK"
+{
+  printf '%s\n' "## $(lid 1) · 2026-09-04 · reverted-recorded"
+  printf '%s\n' "**Status:** reverted"
+  printf '%s\n' "**Reverted attempt:** rolled back because the check could not run"
+  printf '%s\n' "**Tags:** #fixture"
+} > "$REV_OK/memory/LESSONS.md"
+run_lint "$REV_OK" --offline
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'reverted=recorded' >/dev/null \
+  && ok "reverted with a reason is recorded" \
+  || bad "reverted recorded (rc=$rc): $out"
+
+write_incident() {
+  local dest="$1" lesson_line="$2"
+  mkdir -p "$dest/memory/incidents"
+  {
+    printf '%s\n' "## I-001 · 2026-09-07 · fixture-incident"
+    printf '%s\n' "**Occurred:** 2026-09-07"
+    printf '%s\n' "**Ingested:** 2026-10-03"
+    if [[ -n "$lesson_line" ]]; then printf '%s\n' "$lesson_line"; fi
+    printf '%s\n' "**Evidence:** https://github.com/acme/app/issues/419"
+    printf '%s\n' "**Proof:** unknown"
+    printf '%s\n' "**Reverted attempt:** unknown"
+    printf '%s\n' "**Status:** unknown"
+    printf '%s\n' "**Summary:** fixture"
+  } > "$dest/memory/incidents/I-001.md"
+}
+
+MAP_OK="$ROOT/incident-mapped"
+make_tree "$MAP_OK"
+{ entry 1 "fixed"; } > "$MAP_OK/memory/LESSONS.md"
+write_incident "$MAP_OK" "**Lesson:** $(lid 1)"
+printf '%s %s\n' "I-001" "$(lid 1)" > "$MAP_OK/memory/incidents/INDEX.md"
+run_lint "$MAP_OK" --offline
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'incidents=1' >/dev/null \
+  && ok "one mapped incident passes" || bad "mapped incident (rc=$rc): $out"
+
+FIXDIR="$REPO_ROOT/scripts/tests/fixtures/lesson-ledger/mapped"
+run_lint "$FIXDIR" --offline
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'incidents=1' >/dev/null && echo "$out" | grep 'OK' >/dev/null \
+  && ok "checked-in mapped fixture passes" || bad "mapped fixture (rc=$rc): $out"
+
+UNMAP="$ROOT/incident-unmap"
+make_tree "$UNMAP"
+{ entry 1 "fixed"; } > "$UNMAP/memory/LESSONS.md"
+write_incident "$UNMAP" ""
+printf '%s %s\n' "I-001" "$(lid 1)" > "$UNMAP/memory/incidents/INDEX.md"
+run_lint "$UNMAP" --offline
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'is unmapped' >/dev/null \
+  && ! echo "$out" | grep -F 'multiply mapped' >/dev/null \
+  && ok "incident without a lesson id is unmapped" || bad "unmapped incident (rc=$rc): $out"
+
+MULTI="$ROOT/incident-multi"
+make_tree "$MULTI"
+{ entry 1 "fixed"; entry 2 "fixed"; } > "$MULTI/memory/LESSONS.md"
+write_incident "$MULTI" "**Lesson:** $(lid 1) $(lid 2)"
+printf '%s %s\n' "I-001" "$(lid 1)" > "$MULTI/memory/incidents/INDEX.md"
+run_lint "$MULTI" --offline
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'multiply mapped' >/dev/null \
+  && ok "two lesson ids on one incident fail" || bad "multiply mapped (rc=$rc): $out"
+
+DIS="$ROOT/incident-disagree"
+make_tree "$DIS"
+{ entry 1 "fixed"; entry 2 "fixed"; } > "$DIS/memory/LESSONS.md"
+write_incident "$DIS" "**Lesson:** $(lid 1)"
+printf '%s %s\n' "I-001" "$(lid 2)" > "$DIS/memory/incidents/INDEX.md"
+run_lint "$DIS" --offline
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'INDEX.md maps' >/dev/null \
+  && ok "index row that disagrees with the incident fails" \
+  || bad "index disagree (rc=$rc): $out"
+
+ABSENT="$ROOT/incident-absent"
+make_tree "$ABSENT"
+{ entry 1 "fixed"; } > "$ABSENT/memory/LESSONS.md"
+write_incident "$ABSENT" "**Lesson:** $(lid 50)"
+printf '%s %s\n' "I-001" "$(lid 50)" > "$ABSENT/memory/incidents/INDEX.md"
+run_lint "$ABSENT" --offline
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'absent from' >/dev/null \
+  && ok "incident lesson missing from the ledger fails" \
+  || bad "absent lesson (rc=$rc): $out"
+
+NOIDX="$ROOT/incident-no-index"
+make_tree "$NOIDX"
+{ entry 1 "fixed"; } > "$NOIDX/memory/LESSONS.md"
+write_incident "$NOIDX" "**Lesson:** $(lid 1)"
+run_lint "$NOIDX" --offline
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'INDEX.md is missing' >/dev/null \
+  && ok "incident files without an index fail" || bad "missing index (rc=$rc): $out"
+
+IFENCE="$ROOT/incident-fence"
+make_tree "$IFENCE"
+{ entry 1 "fixed"; } > "$IFENCE/memory/LESSONS.md"
+write_incident "$IFENCE" "**Lesson:** $(lid 1)"
+printf '%s\n' '```' "**Evidence:** ${canary}" '```' >> "$IFENCE/memory/incidents/I-001.md"
+printf '%s %s\n' "I-001" "$(lid 1)" > "$IFENCE/memory/incidents/INDEX.md"
+run_lint "$IFENCE" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'privacy rule home-users' >/dev/null \
+    && ! echo "$out" | grep -F "$canary" >/dev/null; then
+  ok "incident text is scrubbed inside a fence"
+else
+  bad "incident fence (rc=$rc): $out"
+fi
 
 echo "lesson-ledger-lint.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
