@@ -5,6 +5,9 @@
 //   Measures a PR's diff (`git diff --numstat -z -M base...head`), classifies each
 //   file as product / tests / docs / generated using config/pr-size.v1.json,
 //   and fails when the product or total size exceeds the configured budgets.
+//   A PR whose every file path (both sides of a rename, binary attachments
+//   included) matches a docs pattern is exempt when config sets
+//   docsOnlyExempt: true.
 //   Local --exception or GIBSON_PR_SIZE_EXCEPTION=1 downgrades a breach to a
 //   warning for operator-run checks; CI does not wire labels to this override.
 //
@@ -106,7 +109,10 @@ export function loadConfig(path) {
     }
     classes[c] = pats;
   }
-  return { exceptionLabel: cfg.exceptionLabel, budgets, classes };
+  if (cfg.docsOnlyExempt !== undefined && typeof cfg.docsOnlyExempt !== "boolean") {
+    throw new Error("config docsOnlyExempt must be a boolean when present");
+  }
+  return { exceptionLabel: cfg.exceptionLabel, budgets, classes, docsOnlyExempt: cfg.docsOnlyExempt === true };
 }
 
 // Glob subset: `**` = any path prefix/suffix (including empty), `*` = within a
@@ -129,13 +135,14 @@ export function globToRegExp(glob) {
   return new RegExp(`^${re}$`);
 }
 
-export function classify(path, classes) {
+export function matchesAny(path, pats) {
   const base = path.slice(path.lastIndexOf("/") + 1);
+  return pats.some((pat) => globToRegExp(pat).test(pat.includes("/") ? path : base));
+}
+
+export function classify(path, classes) {
   for (const c of CLASSES) {
-    for (const pat of classes[c]) {
-      const target = pat.includes("/") ? path : base;
-      if (globToRegExp(pat).test(target)) return c;
-    }
+    if (matchesAny(path, classes[c])) return c;
   }
   return "product";
 }
@@ -162,12 +169,14 @@ function safeAdd(a, b, label) {
   return n;
 }
 
-function makeRow(a, d, path) {
-  if (!path) throw malformed(JSON.stringify([a, d, path]));
+// `path` is the destination (what a file is accounted as); `oldPath` is the
+// rename source, equal to `path` when the row is not a rename.
+function makeRow(a, d, path, oldPath = path) {
+  if (!path || !oldPath) throw malformed(JSON.stringify([a, d, oldPath, path]));
   const added = parseCount(a, "added");
   const deleted = parseCount(d, "deleted");
   if (added.binary !== deleted.binary) throw malformed(`binary row must use '-' for both added and deleted: ${JSON.stringify([a, d, path])}`);
-  return { added: added.value, deleted: deleted.value, binary: added.binary, path };
+  return { added: added.value, deleted: deleted.value, binary: added.binary, path, oldPath };
 }
 
 // Git C-quotes paths with non-ASCII, control, quote or backslash bytes unless
@@ -222,7 +231,8 @@ function quotedGitPathEnd(s, start) {
 
 // Newline-delimited rename/path field. Git C-quotes each unusual path
 // independently (`"old\\tname" => "new\\tname"`), and either side of a
-// rename may be quoted or plain; classify on the destination. A fully
+// rename may be quoted or plain; classify on the destination, keep the source
+// for the docs-only check. A fully
 // C-quoted single path is returned as-is after unquoting: a decoded name that
 // happens to contain " => " or braces is a filename, not rename syntax
 // (Grok review of #398).
@@ -236,17 +246,25 @@ function decodeSingleTextPath(p) {
 function decodeNumstatTextPath(path) {
   if (path.startsWith('"')) {
     const firstEnd = quotedGitPathEnd(path, 0);
-    if (firstEnd === path.length) return unquoteGitPath(path);
-    if (firstEnd > 0 && path.startsWith(" => ", firstEnd)) return decodeSingleTextPath(path.slice(firstEnd + 4));
-    return path;
+    if (firstEnd === path.length) {
+      const p = unquoteGitPath(path);
+      return { oldPath: p, path: p };
+    }
+    if (firstEnd > 0 && path.startsWith(" => ", firstEnd)) {
+      return { oldPath: unquoteGitPath(path.slice(0, firstEnd)), path: decodeSingleTextPath(path.slice(firstEnd + 4)) };
+    }
+    return { oldPath: path, path };
   }
   // Plain source; a quoted destination starts at the first ` => "`.
   const q = path.indexOf(' => "');
   if (q >= 0) {
     const dest = path.slice(q + 4);
-    if (quotedGitPathEnd(dest, 0) === dest.length) return unquoteGitPath(dest);
+    if (quotedGitPathEnd(dest, 0) === dest.length) return { oldPath: path.slice(0, q), path: unquoteGitPath(dest) };
   }
-  return path.replace(/\{[^{}]* => ([^{}]*)\}/g, "$1").replace(/^.* => /, "").replace(/\/\//g, "/");
+  return {
+    oldPath: path.replace(/\{([^{}]*) => [^{}]*\}/g, "$1").replace(/ => .*$/, "").replace(/\/\//g, "/"),
+    path: path.replace(/\{[^{}]* => ([^{}]*)\}/g, "$1").replace(/^.* => /, "").replace(/\/\//g, "/"),
+  };
 }
 
 // NUL-delimited (`--numstat -z`): "<a>\t<d>\t<path>\0" per file; a rename is
@@ -262,12 +280,14 @@ export function parseNumstatZ(text) {
     if (parts.length < 3) throw malformed(JSON.stringify(toks[i]));
     const [a, d] = parts;
     let path = parts.slice(2).join("\t");
+    let oldPath = path;
     if (path === "") {
       if (i + 2 >= toks.length) throw malformed("truncated rename record");
+      oldPath = toks[i + 1];
       path = toks[i + 2];
       i += 2;
     }
-    rows.push(makeRow(a, d, path));
+    rows.push(makeRow(a, d, path, oldPath));
   }
   return rows;
 }
@@ -283,8 +303,8 @@ export function parseNumstatText(text) {
     const parts = line.split("\t");
     if (parts.length < 3) throw malformed(JSON.stringify(line));
     const [a, d] = parts;
-    const path = decodeNumstatTextPath(parts.slice(2).join("\t"));
-    rows.push(makeRow(a, d, path));
+    const { oldPath, path } = decodeNumstatTextPath(parts.slice(2).join("\t"));
+    rows.push(makeRow(a, d, path, oldPath));
   }
   return rows;
 }
@@ -298,7 +318,13 @@ export function parseNumstat(text, { requireNul = false } = {}) {
 export function evaluate(rows, cfg, { exception = false, identity = null } = {}) {
   const byClass = { product: { files: 0, lines: 0 }, tests: { files: 0, lines: 0 }, docs: { files: 0, lines: 0 }, generated: { files: 0, lines: 0 } };
   const files = [];
+  // Docs-only eligibility is docs-pattern membership of every path, both
+  // rename endpoints, independent of the generated/tests precedence that
+  // decides accounting: docs/diagram.svg counts as generated but is still a
+  // document; src/a.ts moved to docs/a.ts is not.
+  let allDocsPaths = rows.length > 0;
   for (const r of rows) {
+    if (!matchesAny(r.path, cfg.classes.docs) || !matchesAny(r.oldPath ?? r.path, cfg.classes.docs)) allDocsPaths = false;
     const cls = classify(r.path, cfg.classes);
     const lines = safeAdd(r.added, r.deleted, `line sum for ${r.path}`);
     byClass[cls].files += 1;
@@ -312,13 +338,19 @@ export function evaluate(rows, cfg, { exception = false, identity = null } = {})
   for (const k of BUDGET_KEYS) {
     if (metrics[k] > cfg.budgets[k]) findings.push({ budget: k, value: metrics[k], limit: cfg.budgets[k] });
   }
-  const breached = findings.length > 0;
-  const verdict = breached ? (exception ? "exception" : "exceeded") : "within-budget";
+  // A document-only PR (every path matches a docs pattern, attachments
+  // included) is exempt from the budgets when config opts in. Decided by path
+  // in the trusted base config, never by anything the PR says about itself,
+  // and one non-docs path (either side of a rename) voids it.
+  const docsOnly = cfg.docsOnlyExempt === true && allDocsPaths;
+  const breached = findings.length > 0 && !docsOnly;
+  const verdict = breached ? (exception ? "exception" : "exceeded") : findings.length > 0 ? "docs-only-exempt" : "within-budget";
   return {
     ok: !breached || exception,
     verdict,
     breached,
     exception,
+    docsOnly,
     identity,
     metrics,
     byClass,
@@ -358,7 +390,7 @@ export function renderText(result, cfg) {
       );
     }
   } else {
-    out.push("  ok — within budget");
+    out.push(result.verdict === "docs-only-exempt" ? "  ok — over budget but document-only (docsOnlyExempt): every file path matches a docs pattern" : "  ok — within budget");
   }
   return out.join("\n");
 }
@@ -397,7 +429,8 @@ function announceGitHub(result, cfg, text) {
   const m = result.metrics;
   const brief = `product ${m.productLines}/${cfg.budgets.productLines} lines, ${m.productFiles}/${cfg.budgets.productFiles} files; total ${m.totalLines}/${cfg.budgets.totalLines} lines`;
   let line;
-  if (!result.breached) line = `::notice title=pr-size::within budget (${brief})`;
+  if (result.verdict === "docs-only-exempt") line = `::notice title=pr-size::document-only PR exempt from budgets (${brief})`;
+  else if (!result.breached) line = `::notice title=pr-size::within budget (${brief})`;
   else if (result.exception) line = `::warning title=pr-size::OVER BUDGET — passing only under explicit local exception '${cfg.exceptionLabel}' (${brief})`;
   else line = `::error title=pr-size::over budget (${brief})`;
   console.error(line);
