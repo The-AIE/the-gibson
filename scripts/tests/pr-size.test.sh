@@ -247,6 +247,81 @@ for f in "${WF_FILES[@]}"; do
   grep -q 'git cat-file -e "\$GIBSON_PR_BASE:\$f"' "$f" && ok "$f: proves base-file absence before skipping" || bad "$f: absence not proven with cat-file"
 done
 
+# --- docs-only exemption (opt-in config; path-decided)
+sed 's/"exceptionLabel"/"docsOnlyExempt": true, "exceptionLabel"/' "$TMP/cfg.json" >"$TMP/cfg-docs.json"
+run_docs() { env -u GITHUB_ACTIONS -u GITHUB_STEP_SUMMARY node "$SENSOR" --config "$TMP/cfg-docs.json" --numstat "$@"; }
+printf '900%s0%sdocs/big.md\n-%s-%sdocs/img/diagram.png\n' "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/docsonly.txt"
+run_sensor "$TMP/docsonly.txt" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "docs-only PR still fails when config does not opt in" || bad "default config exempted docs rc=$rc"
+out=$(run_docs "$TMP/docsonly.txt" 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == *"docs-only-exempt"* ]] && ok "docs-only PR with attachment is exempt when opted in" || bad "docs-only not exempt rc=$rc: $out"
+printf '900%s0%sdocs/big.md\n1%s0%ssrc/a.ts\n' "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/mixed.txt"
+run_docs "$TMP/mixed.txt" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "one non-docs file voids the exemption" || bad "mixed PR exempted rc=$rc"
+printf '' >"$TMP/empty.txt"
+out=$(run_docs "$TMP/empty.txt" 2>&1); rc=$?
+[[ "$out" != *"docs-only-exempt"* ]] && ok "empty diff is not reported as docs-only" || bad "empty diff reported docs-only"
+printf '900%s0%sdocs/big.md\n-%s-%sscripts/evil.png\n' "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/attach-out.txt"
+run_docs "$TMP/attach-out.txt" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "attachment outside docs paths voids the exemption" || bad "attachment outside docs exempted rc=$rc"
+printf '{"docsOnlyExempt":"yes","exceptionLabel":"x","budgets":{"productLines":1,"productFiles":1,"totalLines":1,"totalFiles":1},"classes":{"generated":["a"],"tests":["b"],"docs":["c"]}}' >"$TMP/cfg-bad.json"
+node "$SENSOR" --config "$TMP/cfg-bad.json" --numstat "$TMP/docsonly.txt" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 2 ]] && ok "non-boolean docsOnlyExempt is a config error" || bad "bad docsOnlyExempt rc=$rc"
+# Offline text renames: both endpoints must be docs paths; quoted/literal-arrow paths stay single files.
+printf '900%s0%sdocs/big.md\n0%s0%s{src => docs}/a.ts\n' "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/t-src2docs.txt"
+run_docs "$TMP/t-src2docs.txt" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "text brace rename src -> docs voids the exemption" || bad "text src->docs rename exempted rc=$rc"
+printf '900%s0%sdocs/big.md\n0%s0%s"src/say\\"hi.ts" => docs/hi.md\n' "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/t-qsrc2docs.txt"
+run_docs "$TMP/t-qsrc2docs.txt" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "text quoted-source rename into docs voids the exemption" || bad "quoted src->docs rename exempted rc=$rc"
+printf '900%s0%sdocs/big.md\n0%s0%sdocs/{a.md => b.md}\n0%s0%s"docs/caf\\303\\251 => x.md"\n' "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/t-docs2docs.txt"
+out=$(run_docs "$TMP/t-docs2docs.txt" 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == *"docs-only-exempt"* ]] && ok "text docs -> docs rename and quoted literal-arrow doc stay exempt" || bad "text docs->docs rc=$rc: $out"
+# Docs eligibility is docs-pattern membership, not the accounting class.
+printf '{"docsOnlyExempt":true,"exceptionLabel":"x","budgets":{"productLines":100,"productFiles":3,"totalLines":300,"totalFiles":10},"classes":{"generated":["*.svg","bun.lockb"],"tests":["**/tests/**"],"docs":["*.md","**/*.md","docs/**"]}}' >"$TMP/cfg-overlap.json"
+printf '900%s0%sdocs/big.md\n-%s-%sdocs/diagram.svg\n-%s-%sdocs/bun.lockb\n5%s0%sdocs/tests/guide.md\n' "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/overlap.txt"
+out=$(env -u GITHUB_ACTIONS node "$SENSOR" --config "$TMP/cfg-overlap.json" --numstat "$TMP/overlap.txt" --format json 2>/dev/null); rc=$?
+[[ $rc -eq 0 ]] && node -e '
+  const j = JSON.parse(process.argv[1]);
+  const cls = Object.fromEntries(j.largest.map((f) => [f.path, f.class]));
+  if (j.verdict !== "docs-only-exempt" || cls["docs/diagram.svg"] !== "generated" || cls["docs/bun.lockb"] !== "generated" || cls["docs/tests/guide.md"] !== "tests") { console.error(j); process.exit(1); }
+' "$out" && ok "docs/ svg, lockfile and tests/ paths stay eligible and keep their accounting class" || bad "docs overlap rc=$rc: $out"
+for extra in "-$TAB-${TAB}assets/logo.svg" "-$TAB-${TAB}bun.lockb" "5${TAB}0${TAB}src/tests/a.sh"; do
+  printf '900%s0%sdocs/big.md\n%s\n' "$TAB" "$TAB" "$extra" >"$TMP/overlap-out.txt"
+  env -u GITHUB_ACTIONS node "$SENSOR" --config "$TMP/cfg-overlap.json" --numstat "$TMP/overlap-out.txt" >/dev/null 2>&1; rc=$?
+  [[ $rc -eq 1 ]] && ok "non-docs generated/test path voids the exemption (${extra##*"$TAB"})" || bad "${extra##*"$TAB"} exempted rc=$rc"
+done
+
+# --- docs-only exemption against real git (-z renames), in disposable repos
+# Hermetic git: no global/system config or hooks; the repo under test is a temp dir.
+tgit() { GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$1" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null "${@:2}"; }
+SENSOR_ABS="$REPO_ROOT/$SENSOR"
+mkrepo() {
+  local r="$TMP/git-$1"
+  mkdir -p "$r/src" "$r/docs" && tgit "$r" init -q -b trunk
+  seq 1 50 | sed 's/^/const line = /' >"$r/src/a.ts"
+  seq 1 50 | sed 's/^/doc line /' >"$r/docs/old.md"
+  tgit "$r" add -A && tgit "$r" commit -q -m base && tgit "$r" checkout -q -b topic
+  seq 1 900 | sed 's/^/big doc /' >"$r/docs/big.md"
+  echo "$r"
+}
+live_docs() { (cd "$1" && GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null env -u GITHUB_ACTIONS -u GITHUB_STEP_SUMMARY node "$SENSOR_ABS" --config "$TMP/cfg-docs.json" --base trunk --head topic --format json); }
+r=$(mkrepo src2docs); tgit "$r" mv src/a.ts docs/a.ts && tgit "$r" add -A && tgit "$r" commit -q -m mv
+z=$(tgit "$r" diff --numstat -z -M trunk...topic | tr '\0' '|')
+[[ "$z" == *"|src/a.ts|docs/a.ts|"* ]] && ok "git reports the source->docs move as a -z rename" || bad "rename not detected: $z"
+out=$(live_docs "$r" 2>&1); rc=$?
+[[ $rc -eq 1 && "$out" == *'"verdict": "exceeded"'* && "$out" == *'"path": "docs/a.ts"'* ]] && ok "live: over-budget docs + unchanged src -> docs rename rejects (destination path reported)" || bad "live src->docs rename rc=$rc: $out"
+r=$(mkrepo docs2docs); tgit "$r" mv docs/old.md docs/new.md && tgit "$r" add -A && tgit "$r" commit -q -m mv
+out=$(live_docs "$r" 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == *'"verdict": "docs-only-exempt"'* ]] && ok "live: docs -> docs rename stays exempt" || bad "live docs->docs rc=$rc: $out"
+r=$(mkrepo mixed); echo 'export const x = 1;' >>"$r/src/a.ts" && tgit "$r" add -A && tgit "$r" commit -q -m edit
+out=$(live_docs "$r" 2>&1); rc=$?
+[[ $rc -eq 1 && "$out" == *'"verdict": "exceeded"'* ]] && ok "live: over-budget docs + ordinary product edit rejects" || bad "live mixed rc=$rc: $out"
+r=$(mkrepo overlap); mkdir -p "$r/docs/tests" && echo '<svg/>' >"$r/docs/diagram.svg" && echo guide >"$r/docs/tests/guide.md"
+tgit "$r" add -A && tgit "$r" commit -q -m overlap
+out=$(cd "$r" && GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null env -u GITHUB_ACTIONS node "$SENSOR_ABS" --config "$TMP/cfg-overlap.json" --base trunk --head topic --format json 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == *'"verdict": "docs-only-exempt"'* ]] && ok "live: docs/diagram.svg + docs/tests/guide.md stay eligible" || bad "live overlap rc=$rc: $out"
+
 echo
 if [[ $FAIL -eq 0 ]]; then
   echo "pr-size.test.sh: $PASS passed"

@@ -10,6 +10,9 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### pr-size: document-only PRs are exempt from the size budgets
+`config/pr-size.v1.json` sets `docsOnlyExempt: true` (owner sign-off: Mark, 2026-10-26). A PR whose every file path matches the configured docs patterns, binary attachments under docs paths included, no longer fails `pr-size` for being large. A rename qualifies only when both its source and destination are docs paths, so moving code into `docs/` voids it, as does any other non-docs file. Eligibility is by docs-pattern membership in the trusted base config (a `docs/diagram.svg` still counts as generated, but is still a document), and an empty diff does not qualify. Product and mixed PRs are unchanged.
+
 ### Docs: `docs/32-plain-english.md` — a five-minute layperson overview
 
 - **What changed:** New `docs/32-plain-english.md` explains the Gibson as a governance harness (the idea, the assembly line, terms of art, the rules that matter most, where adoption stands). The README, docs index and glossary link to it; the glossary gains Coordinator and Lane bot.
