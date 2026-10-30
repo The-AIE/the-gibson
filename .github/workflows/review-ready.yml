@@ -126,8 +126,10 @@ jobs:
               pr=${PRT_PR_NUMBER}
               case "${pr}" in ''|*[!0-9]*) skip "pull request number is not numeric" ;; esac
               # The latest completed successful self-gate pull_request run for this exact head, if any.
+              # The API reports .path with a ref suffix (".github/workflows/x.yml@refs/pull/N/merge");
+              # strip it exactly as step 2 does (${r_path%%@*}) and compare the whole remaining path.
               run_id=$(gh api "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&event=pull_request&status=completed&per_page=100" \
-                --jq "[.workflow_runs[] | select(.path == \"${SELF_GATE_PATH}\" and .conclusion == \"success\" and ([.pull_requests[]?.number] | index(${pr})) != null)] | sort_by(.run_started_at) | last | .id // empty") \
+                --jq "[.workflow_runs[] | select(((.path // \"\") | split(\"@\") | .[0]) == \"${SELF_GATE_PATH}\" and .conclusion == \"success\" and ([.pull_requests[]?.number] | index(${pr})) != null)] | sort_by(.run_started_at) | last | .id // empty") \
                 || fail "could not list self-gate runs at ${HEAD_SHA}"
               [ -n "${run_id}" ] || skip "no successful self-gate run at ${HEAD_SHA} yet; the workflow_run event will signal when it finishes"
               ;;

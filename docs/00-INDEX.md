@@ -102,6 +102,7 @@ Findings, backlogs, retros, and other history remain in `docs/`, `memory/`, and
 | 29 | [guarded-state-transitions](29-guarded-state-transitions.md) | Illegal state moves fail loud; frozen decision packages |
 | 30 | [verification-lever](30-verification-lever.md) | `gibson-verify`: receipts at an exact head; verified vs claim-only |
 | 31 | [agent-kontrol](31-agent-kontrol.md) | Gibson = law, Agent Kontrol = manager: hand-off points, setup, the rename from Mission Control |
+| 32 | [plain-english](32-plain-english.md) | Five-minute layperson overview: the idea, the assembly line, terms of art, the rules that matter most |
 | — | [goose-license-verification](GOOSE-LICENSE-VERIFICATION.md) | #29 findings: Apache-2.0 embed / re-brand / pin / AAIF governance |
 | — | [autonomy-modes](autonomy-modes.md) | Four modes + per-tool overrides mapped to Goose; no new Gibson session defaults |
 | — | [conventions](CONVENTIONS.md) | Code & doc target contract — live vs planned state, retrofit batches, and owner gates |

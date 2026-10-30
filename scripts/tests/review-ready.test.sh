@@ -337,6 +337,31 @@ echo '{"workflow_runs":[{"id":8000,"path":".github/workflows/other.yml","conclus
 run_step "${PRT[@]}"; silent "no successful self-gate run" "no self-gate run at the head yet: skips (the workflow_run event signals later)"
 reset_world
 
+echo "# pull_request_target lookup: the API's .path carries a @ref suffix"
+# The real runs list reports ".github/workflows/<file>@<ref>". The lookup must strip the
+# suffix exactly as the later run check does, and still match the WHOLE remaining path, the
+# PR and success. Every decoy below is newer than the genuine run, so ordering alone cannot pass.
+SFX="@refs/pull/77/merge"
+write_run "$SG_PATH$SFX" pull_request success "$HEAD" example/repo
+jq -n --arg p "$SG_PATH$SFX" --arg q "$SG_PATH@refs/pull/12/merge" '{workflow_runs:[
+  {id:9001, path:$p, conclusion:"success", run_started_at:"2026-10-25T15:30:00Z", pull_requests:[{number:77}]},
+  {id:9000, path:$p, conclusion:"failure", run_started_at:"2026-10-25T15:40:00Z", pull_requests:[{number:77}]},
+  {id:8001, path:$q, conclusion:"success", run_started_at:"2026-10-25T15:55:00Z", pull_requests:[{number:12}]},
+  {id:8002, path:".github/workflows/evil.yml@refs/pull/77/merge", conclusion:"success", run_started_at:"2026-10-25T15:57:00Z", pull_requests:[{number:77}]},
+  {id:8003, path:".github/workflows/gibson-self-gate.yml.evil.yml@refs/pull/77/merge", conclusion:"success", run_started_at:"2026-10-25T15:58:00Z", pull_requests:[{number:77}]},
+  {id:8004, path:"x/.github/workflows/gibson-self-gate.yml@refs/pull/77/merge", conclusion:"success", run_started_at:"2026-10-25T15:59:00Z", pull_requests:[{number:77}]}
+]}' > "$ROOT/fixture/runs-list.json"
+run_step "${PRT[@]}"
+if [[ $RC -eq 0 && "$STATUS_LOG" == "$want_status" && "$(count_lines "$STATUS_LOG")" == 1 && "$(printf '%s' "$DISPATCH_LOG" | jq -s length)" == 1 && "$SUMMARY" == *"self-gate run 9001,"* ]]; then
+  ok "a suffixed genuine self-gate path is found (run 9001) and emits exactly once, over newer wrong-PR, wrong-file and failed decoys"
+else bad "suffixed lookup: rc=$RC statuses=$(count_lines "$STATUS_LOG") out=$OUT summary=$SUMMARY"; fi
+jq '.workflow_runs |= map(select(.id != 9001))' "$ROOT/fixture/runs-list.json" > "$ROOT/l.tmp" && mv "$ROOT/l.tmp" "$ROOT/fixture/runs-list.json"
+run_step "${PRT[@]}"; silent "no successful self-gate run" "with the genuine run gone, no suffixed decoy (wrong PR, wrong file, look-alike file, failed) is selected"
+reset_world
+run_step "${PRT[@]}"
+if [[ $RC -eq 0 && "$STATUS_LOG" == "$want_status" && "$SUMMARY" == *"self-gate run 9001,"* ]]; then ok "a bare (unsuffixed) self-gate path is still found"; else bad "bare lookup: rc=$RC summary=$SUMMARY"; fi
+reset_world
+
 echo "# idempotent per head"
 echo '[{"id":5,"context":"review-ready","state":"success"}]' > "$ROOT/fixture/statuses.json"
 run_step; silent "already exists" "a review-ready success already at the head: no second status, no second dispatch"
