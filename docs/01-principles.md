@@ -111,6 +111,9 @@ watchers) is ground truth for liveness, semantic reporting (MCP) is ground truth
 meaning; everything lands in a store *we* own. And reporting is honest: failures
 verbatim, skips named, "done" only after verification.
 
+The mechanism that makes "nobody polls" true, and the rule that a pause is a recorded
+decision, is in [docs/33](33-event-driven-operating-model.md).
+
 ## 10. Harnessability is a property of the target repo
 
 Fowler's "ambient affordances": typed languages, clear module boundaries, generated
