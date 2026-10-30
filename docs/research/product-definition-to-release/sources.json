@@ -237,7 +237,7 @@
       "id": "E17",
       "title": "OpenSpec agent machine contract",
       "url": "https://github.com/Fission-AI/OpenSpec/blob/8e0288df12d401b0e183e2f47254d22528c1dffb/docs/agent-contract.md",
-      "evidence": "Planning-complete semantics and opaque extension metadata; not release evidence",
+      "evidence": "Planning-complete semantics and machine handoff; not release evidence",
       "accessed": "2026-10-30"
     },
     {
@@ -251,7 +251,7 @@
       "id": "E19",
       "title": "OpenSpec CLI contract",
       "url": "https://github.com/Fission-AI/OpenSpec/blob/8e0288df12d401b0e183e2f47254d22528c1dffb/docs/cli.md",
-      "evidence": "Structural validation/archive/partial-effect semantics; source reading only",
+      "evidence": "Opaque extension metadata and structural validation/archive/partial-effect semantics; source reading only",
       "accessed": "2026-10-30"
     },
     {

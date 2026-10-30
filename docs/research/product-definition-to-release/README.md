@@ -37,6 +37,8 @@ Keep one owner-facing product journey while preserving portable, explicit compon
 
 Use existing epics for durable outcomes and proposed releases for small demonstrated benefits. Keep two delivery items active, with a third lane only for a concrete blocker. Trial OpenSpec as the specification/change layer before building another one; retain Gibson's required PLAN/issue handoffs and evidence authority. These follow-up recommendations are detailed in the two addenda above, without creating release milestones or changing epic parents.
 
+The [release-ordered plan and estimates](11-release-structure.md) now map the current open PR work to release/parked buckets. With two active lanes and a small existing-stack pilot, estimate **2–5 working weeks through the first useful product release**, **3–7 through the integrated operator pilot**, and **4–8 through a first measured improvement** when observation overlaps. Independent review, access and owner/live-activation holds can extend elapsed calendar time; optional parked platform work is excluded from those initial slices.
+
 This is a recommendation to evaluate, not permission to merge codebases or deploy the integrated system. The research panel is optional research input; the locked [single-primary-model path](https://github.com/The-AIE/the-gibson/issues/18) remains the product baseline.
 
 ## Incremental benefits

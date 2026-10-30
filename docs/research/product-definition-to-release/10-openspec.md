@@ -34,7 +34,7 @@ These are documented/source capabilities, not our tested integration. The defaul
 
 ## Preserve distinct meanings of done
 
-The machine contract's `isPlanningComplete` and compatibility alias `isComplete` mean planning artifacts exist. They do not mean implementation is done. Task/apply progress is another fact. Lowercase `x-` metadata offers a possible reference hook without forking, but OpenSpec treats it as opaque; Gibson must validate any evidence/authority binding it owns. [Agent contract](https://github.com/Fission-AI/OpenSpec/blob/8e0288df12d401b0e183e2f47254d22528c1dffb/docs/agent-contract.md).
+The machine contract's `isPlanningComplete` and compatibility alias `isComplete` mean planning artifacts exist. They do not mean implementation is done. Task/apply progress is another fact. [Agent contract](https://github.com/Fission-AI/OpenSpec/blob/8e0288df12d401b0e183e2f47254d22528c1dffb/docs/agent-contract.md). Lowercase `x-` metadata offers a possible reference hook without forking, but OpenSpec treats it as opaque; Gibson must validate any evidence/authority binding it owns. [CLI metadata contract](https://github.com/Fission-AI/OpenSpec/blob/8e0288df12d401b0e183e2f47254d22528c1dffb/docs/cli.md).
 
 The assistant verification workflow covers completeness/correctness/coherence and explicitly distinguishes apply state from a verification verdict. It is useful guidance, not Gibson's independent exact-head review or a demonstrated deployment. [Verification template](https://github.com/Fission-AI/OpenSpec/blob/8e0288df12d401b0e183e2f47254d22528c1dffb/src/core/templates/workflows/verify-change.ts).
 
