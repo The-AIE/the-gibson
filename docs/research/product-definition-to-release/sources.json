@@ -1,0 +1,230 @@
+{
+  "research_date": "2026-10-30",
+  "scope": "Public research source register. Source documentation, fixture drives and future product evidence are distinct.",
+  "sources": [
+    {
+      "id": "G1",
+      "title": "Gibson source snapshot",
+      "url": "https://github.com/The-AIE/the-gibson/tree/babef4b3ce969289b698c55babffd97c2f5720b7",
+      "evidence": "Pinned source audit",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G2",
+      "title": "Single-primary-model north star",
+      "url": "https://github.com/The-AIE/the-gibson/issues/18",
+      "evidence": "Product contract; current issue read",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G3",
+      "title": "Control-plane architecture direction",
+      "url": "https://github.com/The-AIE/the-gibson/issues/165",
+      "evidence": "Proposed architecture; not a completeness claim",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G4",
+      "title": "Planner playbook",
+      "url": "https://github.com/The-AIE/the-gibson/blob/babef4b3ce969289b698c55babffd97c2f5720b7/playbooks/planner.md",
+      "evidence": "Written workflow/source",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G5",
+      "title": "Decomposer playbook",
+      "url": "https://github.com/The-AIE/the-gibson/blob/babef4b3ce969289b698c55babffd97c2f5720b7/playbooks/decomposer.md",
+      "evidence": "Written workflow/source",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G6",
+      "title": "Decomposition lint",
+      "url": "https://github.com/The-AIE/the-gibson/blob/babef4b3ce969289b698c55babffd97c2f5720b7/scripts/decompose-lint.mjs",
+      "evidence": "Source; four-issue fixture drive OK",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G7",
+      "title": "Decomposition graph",
+      "url": "https://github.com/The-AIE/the-gibson/blob/babef4b3ce969289b698c55babffd97c2f5720b7/scripts/decompose-graph.mjs",
+      "evidence": "Source; four-issue DAG fixture drive OK",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G8",
+      "title": "Contract-met helper",
+      "url": "https://github.com/The-AIE/the-gibson/blob/babef4b3ce969289b698c55babffd97c2f5720b7/scripts/contract-met.mjs#L119",
+      "evidence": "Source; prose linkage vs behavioral proof distinction",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G9",
+      "title": "Portable receipt limits",
+      "url": "https://github.com/The-AIE/the-gibson/blob/babef4b3ce969289b698c55babffd97c2f5720b7/docs/delivery-receipt-v1.md",
+      "evidence": "Source; collect observed unavailable/exit 2",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G10",
+      "title": "UX evaluator",
+      "url": "https://github.com/The-AIE/the-gibson/blob/babef4b3ce969289b698c55babffd97c2f5720b7/playbooks/ux-evaluator.md",
+      "evidence": "Written evaluation contract",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G11",
+      "title": "Learning guidance",
+      "url": "https://github.com/The-AIE/the-gibson/blob/babef4b3ce969289b698c55babffd97c2f5720b7/docs/09-memory-and-self-improvement.md",
+      "evidence": "Documentary guidance; not proof of automated learning",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G12",
+      "title": "Backlog refinement epic",
+      "url": "https://github.com/The-AIE/the-gibson/issues/167",
+      "evidence": "Existing ownership/reuse seam; refresh before implementation",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G13",
+      "title": "Outcome-learning epic",
+      "url": "https://github.com/The-AIE/the-gibson/issues/210",
+      "evidence": "Existing ownership/reuse seam",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "G14",
+      "title": "Portable adoption epic",
+      "url": "https://github.com/The-AIE/the-gibson/issues/214",
+      "evidence": "Existing ownership/advisory-first seam",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "A1",
+      "title": "Agent Kontrol/Gibson boundary",
+      "url": "https://github.com/mrhinkle/agent-kontrol/blob/847b22b56f6203abadf3c1a41f9ba326c0bbe3ac/docs/GIBSON.md",
+      "evidence": "Public source documentation; not live deployment proof",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "A2",
+      "title": "Agent Kontrol architecture",
+      "url": "https://github.com/mrhinkle/agent-kontrol/blob/847b22b56f6203abadf3c1a41f9ba326c0bbe3ac/docs/ARCHITECTURE.md",
+      "evidence": "Public source architecture",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "A3",
+      "title": "Agent Kontrol telemetry limits",
+      "url": "https://github.com/mrhinkle/agent-kontrol/blob/847b22b56f6203abadf3c1a41f9ba326c0bbe3ac/docs/TELEMETRY.md",
+      "evidence": "Public source; external forwarding documented unbuilt",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E1",
+      "title": "Atomic features",
+      "url": "https://atomic.dev/features/",
+      "evidence": "Vendor primary documentation; no reproduced benchmark",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E2",
+      "title": "Atomic Vault",
+      "url": "https://docs.atomic.dev/getting-started/atomic-vault",
+      "evidence": "Vendor primary documentation",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E3",
+      "title": "Atomic Git shim",
+      "url": "https://docs.atomic.dev/getting-started/git-shim",
+      "evidence": "Vendor primary documentation; linked-Git-worktree limitation",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E4",
+      "title": "Atomic native repository",
+      "url": "https://github.com/atomicdotdev/atomic",
+      "evidence": "Primary README; native COW sandbox/OCI path distinct from shim",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E5",
+      "title": "Langfuse overview",
+      "url": "https://langfuse.com/docs",
+      "evidence": "Vendor primary documentation; no activated instance",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E6",
+      "title": "Langfuse self-hosting",
+      "url": "https://langfuse.com/self-hosting",
+      "evidence": "Vendor primary documentation; operating requirements",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E7",
+      "title": "Langfuse license boundary",
+      "url": "https://langfuse.com/self-hosting/license-key",
+      "evidence": "Vendor primary documentation; verify on adoption",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E8",
+      "title": "Langfuse masking",
+      "url": "https://langfuse.com/docs/observability/features/masking",
+      "evidence": "Vendor primary documentation; actual exporter must be tested",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E9",
+      "title": "GitHub Spec Kit",
+      "url": "https://github.github.com/spec-kit/",
+      "evidence": "Official documentation; comparator not product trial",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E10",
+      "title": "Kiro feature specs",
+      "url": "https://kiro.dev/docs/specs/feature-specs/",
+      "evidence": "Official documentation; comparator",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E11",
+      "title": "Kiro quick spec",
+      "url": "https://kiro.dev/docs/specs/quick-spec/",
+      "evidence": "Official documentation; comparator",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E12",
+      "title": "OpenHands component overview",
+      "url": "https://docs.openhands.dev/overview/introduction",
+      "evidence": "Official documentation; capability/license verification needed on adoption",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E13",
+      "title": "Temporal durable AI",
+      "url": "https://docs.temporal.io/ai",
+      "evidence": "Official documentation; optional mechanism not chosen",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "E14",
+      "title": "GitHub artifact attestations",
+      "url": "https://docs.github.com/en/actions/concepts/security/artifact-attestations",
+      "evidence": "Official documentation; provenance is not secure behavior",
+      "accessed": "2026-10-30"
+    },
+    {
+      "id": "M1",
+      "title": "Public model catalogue",
+      "url": "https://openrouter.ai/api/v1/models",
+      "evidence": "Read-only catalogue; exact model IDs/prices checked; not proof of completed calls",
+      "accessed": "2026-10-30"
+    }
+  ]
+}
