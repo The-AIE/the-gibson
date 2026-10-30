@@ -49,9 +49,9 @@ Added design/reliability/authorization details in R1, R4, R5 and R8 are labeled 
 ## 3. Acceptance scenarios
 
 - SC1: valid request submission yields one durable reference and the requester can retrieve it.
-- SC2: coordinator updates a valid status and the requester sees the updated state.
+- SC2: the coordinator finds the submitted request by its durable reference in the queue, updates a valid status, and the requester sees the updated state.
 - SC3: a different requester attempts direct URL/API access and receives no other user's request data.
-- SC4: an invalid status or unauthorized role change is refused.
+- SC4: an invalid status or unauthorized role change is refused; a requester attempting to modify another person's request through a direct API/URL is refused, and a trusted fixture confirms that the target request remains unchanged.
 - SC5: a lost response followed by retry creates one request/effect under the selected idempotency contract.
 - SC6: a failed save preserves useful input and communicates the failure without showing success.
 - SC7: an independently observed user completes the flow with the agreed accessibility/device behavior.

@@ -13,7 +13,7 @@ Official documentation was inspected on **2026-10-30**. These are documentary ca
 
 | Layer | Existing offering or seam | Research implication |
 |---|---|---|
-| Product/specification workflow | GitHub Spec Kit, Kiro, Gibson planner/decomposer | Compare planning fidelity and usable scope before designing another spec framework |
+| Product/specification workflow | OpenSpec, GitHub Spec Kit, Kiro, Gibson planner/decomposer | Compare planning fidelity and usable scope before designing another spec framework |
 | Coding-agent execution/workspaces | Existing coding agents, OpenHands | Keep execution replaceable; a runner does not own product acceptance or release authority |
 | Intent/change/provenance | Git/GitHub and Atomic.dev | Significant overlap with the proposed traceability value; evaluate reuse rather than assume an empty market |
 | Runtime coordination/owner experience | Agent Kontrol | Existing task/decision/progress surfaces are a plausible integration home |
@@ -39,6 +39,8 @@ Its deployment is a separate decision. Self-hosting includes web/worker services
 Default experiment content should be identifiers, timings, category/verdict and observed usage/cost. Full prompts, source and transcripts need a deliberate data/retention decision. Masking must be checked on the actual export path. [Masking](https://langfuse.com/docs/observability/features/masking). No Langfuse instance or data export is activated by this research.
 
 ## Specification toolkits
+
+OpenSpec is the first candidate for a bounded spec/change-layer trial. Its released workflow supplies proposal/spec/design/task artifacts and structural/status tooling. Keep completion, behavioral evidence and deployed release distinct: its archive operation synchronizes/moves artifacts rather than authenticating delivery. See the [version-pinned OpenSpec assessment](10-openspec.md) for source evidence, compatibility, negative cases and the reversible trial. This is a later source-research addendum, not an external-panel finding.
 
 GitHub Spec Kit documents a specification-to-planning/tasks/implementation process with agent integrations. Benchmark or adapt its artifacts; Gibson must demonstrate value beyond producing similar documents. [Official documentation](https://github.github.com/spec-kit/).
 

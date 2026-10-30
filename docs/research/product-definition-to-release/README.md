@@ -27,11 +27,15 @@ The hypothesis must earn its scope. “Any prompt to enterprise-grade software�
 7. [Gibson + Agent Kontrol product decision](07-agent-kontrol.md).
 8. [Worked product-description → specification → scope → release example](08-worked-example.md).
 9. [Open decisions and adoption sequence](09-decisions.md).
-10. [Cross-model synthesis](reviews/synthesis.md), [individual contributions](reviews/README.md), [shared sanitized model brief](reviews/shared-brief.md), and [source register](sources.json).
+10. [OpenSpec adoption assessment](10-openspec.md).
+11. [How epics, releases and work items fit together](11-release-structure.md).
+12. [Cross-model synthesis](reviews/synthesis.md), [individual contributions](reviews/README.md), [shared sanitized model brief](reviews/shared-brief.md), and [source register](sources.json).
 
 ## Immediate recommendation to test
 
 Keep one owner-facing product journey while preserving portable, explicit component boundaries. Reuse Gibson's repository contracts/checks and Agent Kontrol's existing coordination/presentation. First test one owner-readable acceptance/evidence packet over an existing plan and scoped increment. Distinguish linkage, demonstrated behavior and deployment; implement only the missing connection. Then exercise the complete description/spec/scope/release journey. Optional ecosystem adapters can remove work we would otherwise build.
+
+Use existing epics for durable outcomes and proposed releases for small demonstrated benefits. Keep two delivery items active, with a third lane only for a concrete blocker. Trial OpenSpec as the specification/change layer before building another one; retain Gibson's required PLAN/issue handoffs and evidence authority. These follow-up recommendations are detailed in the two addenda above, without creating release milestones or changing epic parents.
 
 This is a recommendation to evaluate, not permission to merge codebases or deploy the integrated system. The research panel is optional research input; the locked [single-primary-model path](https://github.com/The-AIE/the-gibson/issues/18) remains the product baseline.
 
@@ -52,6 +56,8 @@ Enterprise requirements enter the first specification and remain visible through
 Gibson source audit is pinned to **babef4b3ce969289b698c55babffd97c2f5720b7**. Agent Kontrol source references are pinned to **847b22b56f6203abadf3c1a41f9ba326c0bbe3ac**. Official ecosystem documentation was inspected on **2026-10-30**; documentary capabilities are not hands-on performance results.
 
 Codex supplied the current-state audit, initial position and synthesis. GLM 5.3, Kimi, Grok and Claude supplied four completed independent first memos from the same sanitized conceptual brief. A second round supplied the same bounded public-source findings and each model's own first memo: GLM, Kimi and Grok completed; Claude returned partial text with provider finish reason `content_filter`. The partial result is preserved and not counted as a completed follow-up. No request was regenerated. Read the synthesis for retractions, substantive disagreements and recommendations not adopted. The total provider-reported cost for both rounds was **$0.426288949**; this is not a billing audit, product benchmark or release approval.
+
+The OpenSpec and release-organization addenda answer later owner questions using Codex source research. They were not part of the external models' inputs; no model endorsement or additional billed panel is implied. OpenSpec v1.15.0 was inspected as source/documentation, not installed or exercised.
 
 ## Collaboration
 

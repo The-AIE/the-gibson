@@ -32,6 +32,8 @@ The four external first contributions are received. Public-source follow-ups inc
 | Codebase/deploy consolidation | Defer | Repeated cross-repo change/release cost, coupling/exit analysis and an accepted migration/rollback plan |
 | Atomic | Disposable comparison/interoperability trial | Native sandbox vs Git-shim compatibility, source/review/evidence identity, recovery and operating cost |
 | Langfuse | Optional measurement adapter | A useful evaluation question, data/retention/masking and deployment/license decisions; observed benefit |
+| Specification/change layer | Trial pinned OpenSpec v1.15.0 before building our own; preserve current required handoffs | Brownfield/change trial, artifact/authority mapping, generated-instruction inspection and comparison with current templates |
+| Work organization | Existing outcome epics plus small release checkpoints; two active deliveries and one justified blocker lane | Concrete useful release acceptance, dependencies and existing owner/claim reconciliation; no bulk reparenting yet |
 | First implementation slice | One acceptance/evidence packet over an existing plan and scoped increment; then the smallest missing behavioral-evidence connection | Source/backlog reconciliation, owner decision benefit, a bounded accepted contract and the negative cases in P1–P4 |
 
 The first implementation slice is not automatically a new blanket approval. Use existing owner/claim/review boundaries and avoid duplicate work under current epics.

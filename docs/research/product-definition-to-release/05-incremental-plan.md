@@ -34,7 +34,7 @@ Project the same references into Agent Kontrol only when that comparison is usef
 
 **Minimum deliverable:** a short plain-language intake using existing chat/planner patterns, a versioned product definition/specification, stable requirement IDs, explicit assumptions/unknowns/non-goals, user scenarios and a plain-language change summary. Produce an exportable artifact, not a mandatory hosted account.
 
-**Reuse:** planner and operator decision templates, #18's single-primary-model path, existing research/refinement contracts where applicable. Benchmark a minimal Spec Kit-style artifact path before building another specification framework. Following the panel, also compare a narrow acceptance/evidence-and-change compiler over existing agents/spec tools with the full guided product path.
+**Reuse:** planner and operator decision templates, #18's single-primary-model path, existing research/refinement contracts where applicable. Following the later owner question, [trial OpenSpec's released artifact workflow](10-openspec.md) as the first candidate, preserving current PLAN/issue outputs; compare with a minimal Spec Kit-style path before building another specification framework. Following the panel, also compare a narrow acceptance/evidence-and-change compiler over existing agents/spec tools with the full guided product path.
 
 **Scope:** preserve meaning; clarify consequential ambiguity; distinguish requested requirement from model suggestion; record the appropriate acceptance/decision reference. Low-risk assumptions may remain visible without manufacturing a new confirmation step for every edit.
 
@@ -113,6 +113,8 @@ Project the same references into Agent Kontrol only when that comparison is usef
 Capture the relevant requirements at Increment 1, include their work/evidence in Increment 2, satisfy the release's applicable floor before Increment 3, expose their real status at Increment 4, and measure regressions at Increment 5. Higher assurance may expand scope; it must not be hidden in “done.”
 
 ## Now / Next / Later
+
+The [release and epic map](11-release-structure.md) distinguishes lasting outcomes from shippable checkpoints. The increments above describe benefits, not an instruction to open five simultaneous implementation lanes.
 
 **Now:** complete this research package and choose the first user segment, real pilot journey, assurance profile and representative evaluation. Keep existing recovery priorities and claims intact. Candidate prototype work is not automatically admitted.
 
