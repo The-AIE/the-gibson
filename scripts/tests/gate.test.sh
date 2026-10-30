@@ -3046,6 +3046,10 @@ CAPTURE_BAD_BIN="$DIAG/capture-bad-bin"
 mkdir -p "$CAPTURE_BAD_BIN"
 cat > "$CAPTURE_BAD_BIN/node" <<'NODE_SHIM'
 #!/usr/bin/env bash
+if [[ "${3:-}" == capture-text && -n "${GIBSON_CAPTURE_SKIP_FIRST:-}" && ! -e "$GIBSON_CAPTURE_SKIP_FIRST" ]]; then
+  : > "$GIBSON_CAPTURE_SKIP_FIRST"
+  exec "$GIBSON_CAPTURE_REAL_NODE" "$@"
+fi
 if [[ "${3:-}" == capture-text ]]; then
   cat >/dev/null
   printf 'GIBSON_CAPTURE_TEXT_V1\nclean'
@@ -3058,9 +3062,13 @@ diag_config 'printf clean'
 GIBSON_CAPTURE_REAL_NODE="$CAPTURE_REAL_NODE" PATH="$CAPTURE_BAD_BIN:$PATH" \
   diag_expect 1 "partial capture from a failed parser cannot turn green exit 0 into GREEN" 'invalid text capture' --baseline absent-capture-baseline.json
 prior_capture_bytes=$(cat "$DIAG/.gibson-baseline.json")
-out=$(cd "$DIAG" && GIBSON_CAPTURE_REAL_NODE="$CAPTURE_REAL_NODE" PATH="$CAPTURE_BAD_BIN:$PATH" bash "$BASELINE_SH" 2>&1); rc=$?
+# Let the prior-authority read succeed so this reaches the configured lint
+# capture. Requiring its message keeps an earlier refusal from masking a bug.
+rm -f "$DIAG/capture-skip-first"
+out=$(cd "$DIAG" && GIBSON_CAPTURE_SKIP_FIRST="$DIAG/capture-skip-first" \
+  GIBSON_CAPTURE_REAL_NODE="$CAPTURE_REAL_NODE" PATH="$CAPTURE_BAD_BIN:$PATH" bash "$BASELINE_SH" 2>&1); rc=$?
 if [[ "$rc" -ne 0 && "$(cat "$DIAG/.gibson-baseline.json")" == "$prior_capture_bytes" ]] \
-    && echo "$out" | grep 'invalid text capture' >/dev/null; then
+    && echo "$out" | grep 'lint invalid text capture' >/dev/null; then
   ok "failed parser partial stdout cannot replace baseline authority"
 else bad "partial parser failure replaced baseline (rc=$rc): $out"; fi
 
