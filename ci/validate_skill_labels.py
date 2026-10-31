@@ -16,9 +16,16 @@ def frontmatter(text):
     return m.group(1) if m else None
 
 
-def scalar(fm, name):
-    m = re.search(rf"^{name}:[ \t]*(.*)$", fm, re.M)
-    return None if m is None else m.group(1).strip()
+def scalar(fm, name, bad=None):
+    found = re.findall(rf"^{name}:[ \t]*(.*)$", fm, re.M)
+    if len(found) > 1 and bad:
+        bad(f"duplicate '{name}' field")
+    if not found:
+        return None
+    value = found[0].strip()
+    if value and (value[0] in "\"'" or " #" in value) and bad:
+        bad(f"'{name}' must be plain: no quotes or trailing comments")
+    return value
 
 
 def main():
@@ -31,8 +38,9 @@ def main():
     onto = json.load(open(a.ontology))
     cats, tags = set(onto["categories"]), set(onto["tags"])
     problems, seen, count = [], {}, 0
-    for g in a.glob:
-        for path in sorted(glob.glob(os.path.join(a.root, g, "SKILL.md"))):
+    paths = sorted({p for g in a.glob for p in glob.glob(os.path.join(a.root, g, "SKILL.md"))})
+    if True:
+        for path in paths:
             count += 1
             rel = os.path.relpath(path, a.root)
             d = os.path.basename(os.path.dirname(path))
@@ -45,7 +53,7 @@ def main():
                 continue
             if "\t" in fm:
                 bad("tab in frontmatter (AK parser rejects it)")
-            key = scalar(fm, "key")
+            key = scalar(fm, "key", bad)
             if not key:
                 bad("missing key")
             else:
@@ -56,12 +64,12 @@ def main():
                 if key in seen:
                     bad(f"duplicate key '{key}' (also {seen[key]})")
                 seen[key] = rel
-            cat = scalar(fm, "category")
+            cat = scalar(fm, "category", bad)
             if not cat:
                 bad("missing category")
             elif cat not in cats:
                 bad(f"unknown category '{cat}'")
-            raw = scalar(fm, "tags")
+            raw = scalar(fm, "tags", bad)
             if raw is None:
                 bad("missing tags")
             elif not (raw.startswith("[") and raw.endswith("]")):
@@ -73,7 +81,9 @@ def main():
                 if len(set(items)) != len(items):
                     bad("duplicate tag")
                 for t in items:
-                    if t not in tags:
+                    if t[:1] in "\"'":
+                        bad(f"tag {t} must be unquoted")
+                    elif t not in tags:
                         bad(f"unknown tag '{t}'")
     if count == 0:
         problems.append("no SKILL.md found; check --glob")
