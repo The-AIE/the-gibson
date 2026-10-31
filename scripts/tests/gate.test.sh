@@ -3118,5 +3118,39 @@ if grep 'node is required' "$NO_NODE_DIR/stderr" >/dev/null \
   ok "missing node names the dependency and installation remedy on stderr"
 else bad "missing node did not report its stderr installation remedy (rc=$rc): $(cat "$NO_NODE_DIR/stderr")"; fi
 
+# The writer starts with Node available, reads the existing baseline, then
+# generate removes only this fixture's shim before configured-step capture.
+BASELINE_NO_NODE_DIR="$ROOT/baseline-no-node-capture"
+mkdir -p "$BASELINE_NO_NODE_DIR/bin" "$BASELINE_NO_NODE_DIR/work"
+for capture_tool in bash cat dirname env git grep rm sed stat tr wc; do
+  capture_tool_path=$(command -v "$capture_tool")
+  ln -s "$capture_tool_path" "$BASELINE_NO_NODE_DIR/bin/$capture_tool"
+done
+cat > "$BASELINE_NO_NODE_DIR/bin/node" <<'NODE_SHIM'
+#!/usr/bin/env bash
+exec "$GIBSON_BASELINE_REAL_NODE" "$@"
+NODE_SHIM
+chmod +x "$BASELINE_NO_NODE_DIR/bin/node"
+cp "$DIAG/valid-baseline.json" "$BASELINE_NO_NODE_DIR/work/.gibson-baseline.json"
+baseline_before_node_loss=$(cat "$BASELINE_NO_NODE_DIR/work/.gibson-baseline.json")
+out=$(cd "$BASELINE_NO_NODE_DIR/work" && PATH="$BASELINE_NO_NODE_DIR/bin" \
+  GIBSON_BASELINE_REAL_NODE="$CAPTURE_REAL_NODE" \
+  GIBSON_BASELINE_NODE_SHIM="$BASELINE_NO_NODE_DIR/bin/node" \
+  GIBSON_GENERATE='rm -- "$GIBSON_BASELINE_NODE_SHIM"' \
+  GIBSON_TYPECHECK='printf unsafe > should-not-run' \
+  GIBSON_LINT=: GIBSON_TEST=: GIBSON_BUILD=: \
+  "$NO_NODE_BASH" "$BASELINE_SH" 2>"$BASELINE_NO_NODE_DIR/stderr"); rc=$?
+if [[ "$rc" -ne 0 && ! -e "$BASELINE_NO_NODE_DIR/bin/node" \
+    && ! -e "$BASELINE_NO_NODE_DIR/work/should-not-run" \
+    && "$(cat "$BASELINE_NO_NODE_DIR/work/.gibson-baseline.json")" == "$baseline_before_node_loss" ]] \
+    && grep 'typecheck invalid text capture' "$BASELINE_NO_NODE_DIR/stderr" >/dev/null; then
+  ok "writer losing node after startup preserves authority and never runs an unvalidated step"
+else bad "writer node-loss path ran a step, changed authority, or missed step capture (rc=$rc): $(cat "$BASELINE_NO_NODE_DIR/stderr")"; fi
+if grep 'node is required' "$BASELINE_NO_NODE_DIR/stderr" >/dev/null \
+    && grep 'install Node.js' "$BASELINE_NO_NODE_DIR/stderr" >/dev/null \
+    && ! printf '%s' "$out" | grep 'install Node.js' >/dev/null; then
+  ok "writer losing node after startup reports the dependency and remedy on stderr"
+else bad "writer node-loss path omitted its stderr installation remedy (rc=$rc): $(cat "$BASELINE_NO_NODE_DIR/stderr")"; fi
+
 echo "gate.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
