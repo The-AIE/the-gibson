@@ -1,5 +1,8 @@
 ---
 name: principle-prove-it-works
+key: gibson.principle-prove-it-works
+category: Engineering Tools
+tags: [gibson, verification]
 description: "Apply after completing a task, before declaring done. Verify against the real artifact (run the feature, read the actual value, inspect the diff), not a proxy, self-report, or 'it compiles.'"
 disable-model-invocation: true
 ---

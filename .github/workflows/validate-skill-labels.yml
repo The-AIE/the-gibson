@@ -1,0 +1,14 @@
+name: validate-skill-labels
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  labels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: >
+          python3 ci/validate_skill_labels.py --namespace gibson
+          --ontology ci/skill-ontology.json
+          --glob 'skills/*' --glob '.agents/skills/*'
