@@ -135,7 +135,10 @@ diagnostic_tool() { node -e "$DIAGNOSTIC_JS" "$@"; }
 # Parser failure after partial stdout must never become valid capture evidence.
 capture_text() {
   local capture_status
-  command -v node >/dev/null || return 125
+  if ! command -v node >/dev/null; then
+    printf '%s\n' 'gate.sh: ERROR: node is required for validated diagnostic capture; install Node.js and make node available on PATH.' >&2
+    return 125
+  fi
   "$@" 2>&1 | node -e "$DIAGNOSTIC_JS" capture-text
   capture_status=("${PIPESTATUS[@]}")
   printf '\nGIBSON_CAPTURE_STATUS_V1:%s:%s' "${capture_status[0]}" "${capture_status[1]}"

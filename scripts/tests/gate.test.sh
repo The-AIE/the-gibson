@@ -3094,5 +3094,29 @@ JS
 then ok "baseline diagnostic oracle is frozen before helper rewrite";
 else bad "rewritten helper controlled diagnostic evidence (rc=$rc): $out"; fi
 
+# A missing capture dependency must identify the remedy on stderr, while the
+# real gate stays RED and never runs a captured command without byte validation.
+NO_NODE_DIR="$ROOT/no-node-capture"
+NO_NODE_BASH=$(command -v bash)
+mkdir -p "$NO_NODE_DIR/bin" "$NO_NODE_DIR/work"
+for capture_tool in bash cat dirname env git grep sed stat tr wc; do
+  capture_tool_path=$(command -v "$capture_tool")
+  ln -s "$capture_tool_path" "$NO_NODE_DIR/bin/$capture_tool"
+done
+out=$(cd "$NO_NODE_DIR/work" && PATH="$NO_NODE_DIR/bin" \
+  GIBSON_GENERATE=: GIBSON_TYPECHECK='printf unsafe > should-not-run' \
+  GIBSON_LINT=: GIBSON_TEST=: GIBSON_BUILD=: \
+  "$NO_NODE_BASH" "$GATE" --no-baseline-ok --baseline absent.json \
+  2>"$NO_NODE_DIR/stderr"); rc=$?
+if [[ "$rc" -ne 0 ]] && ! printf '%s' "$out" | grep 'GREEN' >/dev/null \
+    && [[ ! -e "$NO_NODE_DIR/work/should-not-run" ]]; then
+  ok "missing node keeps the real gate RED without running unvalidated commands"
+else bad "missing node ran a command or passed (rc=$rc): $out"; fi
+if grep 'node is required' "$NO_NODE_DIR/stderr" >/dev/null \
+    && grep 'install Node.js' "$NO_NODE_DIR/stderr" >/dev/null \
+    && ! printf '%s' "$out" | grep 'install Node.js' >/dev/null; then
+  ok "missing node names the dependency and installation remedy on stderr"
+else bad "missing node did not report its stderr installation remedy (rc=$rc): $(cat "$NO_NODE_DIR/stderr")"; fi
+
 echo "gate.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
