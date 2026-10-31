@@ -1,5 +1,8 @@
 ---
 name: gibson-setup
+key: gibson.gibson-setup
+category: Engineering Tools
+tags: [gibson, setup]
 description: "Wire a repository for autonomous fleet development: install the Gibson guardrail bundle (AGENTS section, CI gates, labels, branch protection, kill switch) and connect the Devin cloud supervisor as merge captain. Consumes gibson-audit's gap list; idempotent. Third stage of the /gibson pipeline; also standalone ('set up this repo for the fleet', 'gibson-ify this repo', 'install the guardrails')."
 ---
 

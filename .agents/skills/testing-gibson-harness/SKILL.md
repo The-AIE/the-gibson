@@ -1,5 +1,8 @@
 ---
 name: testing-gibson-harness
+key: gibson.testing-gibson-harness
+category: Engineering Tools
+tags: [gibson, testing]
 description: How to runtime-test The Gibson's bash harness (loop.sh, second-opinion.sh, devin-supervisor.sh) — scratch repos, vendor-CLI auth reality, PATH shims, mock Devin API, and macOS bash 3.2 portability checks.
 ---
 

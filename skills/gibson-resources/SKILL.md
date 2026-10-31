@@ -1,5 +1,8 @@
 ---
 name: gibson-resources
+key: gibson.gibson-resources
+category: Engineering Tools
+tags: [gibson, fleet, audit]
 description: "Discover which AI runners and infrastructure are actually available right now (Grok/Codex/Claude/Hermes CLIs, Devin API, GitHub auth, bot identities, satellite machines, MCPs) and produce the cost-optimized routing table the Gibson loop will use. Second stage of the /gibson pipeline; also standalone ('what runners do I have', 'fleet inventory', 'check the fleet')."
 ---
 
