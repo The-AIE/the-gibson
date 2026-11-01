@@ -3398,6 +3398,14 @@ red_then_green "G12 requires duplicate required-checks" "m164-req-a.json" '
 red_then_green "G12 requires duplicate approval" "m164-req-b.json" '
   c.humanGates.find(g => g.id === "G12").requires = ["independent-approval-exact-head", "independent-approval-exact-head"];
 ' "E_GATE_REQUIRES"
+# v1 remains a readable format for existing consumers. The legacy spelling is
+# valid schema data, but is drift from this release's canonical one-reviewer policy.
+mut_validate "m622-legacy-g12.json" '
+  c.humanGates.find(g => g.id === "G12").requires = ["E3-exact-head", "required-checks"];
+' --no-digest-check
+[[ "$rc" -ne 0 ]] && ok "legacy G12 is diagnosed as policy drift" || bad "legacy G12 silently passed current policy"
+has "legacy G12 semantic drift code" "$out" "E_GATE_REQUIRES"
+lacks "legacy v1 G12 token remains structurally valid" "$out" "E_SCHEMA_ENUM"
 red_then_green "Tier C mandatory vendor floor returns" "m622-vendor-floor.json" '
   c.reviewIndependence.find(r => r.id === "ri.tier-c").minimumRelationship = "cross-vendor";
 ' "E_RI_TIER_C"

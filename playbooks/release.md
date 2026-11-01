@@ -71,16 +71,17 @@ node <path-to-gibson>/scripts/delivery-receipt.mjs --help
 # exit 0 READY · 1 BLOCKED · 4 ADMIN-CANDIDATE (pre-launch operator decision)
 
 # Pre-merge checklist (read-only)
+MERGE_SHA=$(gh pr view 123 --json headRefOid --jq .headRefOid)
 gh pr view 123 --json title,body,mergeable,reviewDecision,statusCheckRollup,labels
 gh pr checks 123
 
-# Merge (only when checklist green)
-gh pr merge 123 --squash --delete-branch
+# Merge only after verifying the full checklist for MERGE_SHA.
+gh pr merge 123 --squash --delete-branch --match-head-commit "$MERGE_SHA"
 
 # If that fails with a checkout/worktree error, DO NOT force-checkout main here:
 # you are probably inside a fleet worktree pinned to a feature branch, and
 # yanking it out from under a running lane is Law 3 (L-020). Merge server-side:
-gh api repos/{owner}/{repo}/pulls/123/merge -f merge_method=squash
+gh api repos/{owner}/{repo}/pulls/123/merge -f merge_method=squash -f sha="$MERGE_SHA"
 git fetch origin && git log --oneline -1 origin/main   # verify the merge commit
 
 # Verify deploy

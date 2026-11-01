@@ -54,12 +54,16 @@ complete introduced range, including inherited commits, at the current head.
    delta first. A green review job or chat acknowledgement is not approval.
 
 ```bash
-gh pr view <pr> --json headRefOid,baseRefName,commits,files,body
-gh pr diff <pr>
-gh pr checks <pr>
-# Only the independent reviewer, using its own eligible identity:
-gh pr review <pr> --approve --body-file review.md
-# Or --request-changes for concrete unresolved blockers.
+# Record before inspecting the full range; recheck before publishing.
+REVIEWED_SHA=$(gh pr view <pr> --repo owner/repo --json headRefOid --jq .headRefOid)
+gh pr view <pr> --repo owner/repo --json baseRefName,commits,files,body
+gh pr diff <pr> --repo owner/repo
+gh pr checks <pr> --repo owner/repo
+# Only the independent reviewer, using its own eligible identity/token:
+scripts/formal-review.sh --pr <pr> --repo owner/repo --event approve \
+  --commit "$REVIEWED_SHA" --body-file review.md
+# Use --event request-changes for concrete unresolved blockers.
+# commit_id stays pinned if the PR moves; that stale review cannot clear the new head.
 ```
 
 Legacy adapters may use `VERDICT: APPROVE` / `VERDICT: REQUEST_CHANGES` as

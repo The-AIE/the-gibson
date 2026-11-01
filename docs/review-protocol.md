@@ -73,7 +73,12 @@ exception needed instead of silently routing around it.
 
 ## Rollout
 
-This PR changes the repository process and its policy mirrors. It does **not**
+This PR changes the repository process, policy mirrors and supervisor handoff.
+The loop reuses accepted current-head PR evidence instead of dispatching again;
+its default selects one different-vendor reviewer. Pending, rejected, ambiguous
+or unreadable PR evidence blocks handoff without another request. Before a PR
+exists, the existing local-review receipt path remains available. None of these
+handoff decisions authorizes a merge or changes the Mini service. This PR does **not**
 change GitHub protection, retire a workflow, install a controller or send a new
 review. Existing protection stays effective until the separately reviewed
 cutover below is applied. A prose amendment cannot make a pending check green.
@@ -109,6 +114,15 @@ and no-verdict attempts separately. Replacement PRs count once per logical
 delivery. Use these observations to judge whether a safeguard earns its cost;
 PR count, sweep success, and time from CI success to verdict alone are not
 delivery or isolated scheduler-wait measures.
+
+## Manifest compatibility
+
+Schema v1 keeps the legacy `E3-exact-head` enum token alongside
+`independent-approval-exact-head`. Existing v1 documents remain structurally
+valid. The amended canonical policy uses the latter token; an unmigrated core
+manifest is diagnosed as policy drift, not an invalid schema enum. Upgrade the
+core manifest, AGENTS generated views and validator pins together. Historical
+policy/decision records remain readable and are not silently reinterpreted.
 
 ## Decision and related work
 
