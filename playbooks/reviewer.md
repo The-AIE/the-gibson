@@ -54,15 +54,23 @@ complete introduced range, including inherited commits, at the current head.
    delta first. A green review job or chat acknowledgement is not approval.
 
 ```bash
-# Record before inspecting the full range; recheck before publishing.
-REVIEWED_SHA=$(gh pr view <pr> --repo owner/repo --json headRefOid --jq .headRefOid) || exit 1
-gh pr view <pr> --repo owner/repo --json baseRefName,commits,files,body || exit 1
+# Record both ends and the target before inspecting the range; recheck before publishing.
+REVIEWED_STATE=$(gh pr view <pr> --repo owner/repo \
+  --json headRefOid,baseRefOid,baseRefName --jq '[.headRefOid, .baseRefOid, .baseRefName] | @tsv') || exit 1
+IFS=$'\t' read -r REVIEWED_SHA REVIEWED_BASE REVIEWED_TARGET <<< "$REVIEWED_STATE"
+if [[ ! "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ || ! "$REVIEWED_BASE" =~ ^[0-9a-f]{40}$ || -z "$REVIEWED_TARGET" ]]; then
+  echo "Cannot establish a valid review range and target; stop before reviewing." >&2
+  exit 1
+fi
+gh pr view <pr> --repo owner/repo --json commits,files,body,statusCheckRollup || exit 1
 gh pr diff <pr> --repo owner/repo || exit 1
-gh pr checks <pr> --repo owner/repo || exit 1
+# Inspect CI results above. Pending review-evidence is expected until this review
+# is published; release still requires every required check to pass.
 # Only the independent reviewer, using its own eligible identity/token:
-CURRENT_SHA=$(gh pr view <pr> --repo owner/repo --json headRefOid --jq .headRefOid) || exit 1
-if [[ "$CURRENT_SHA" != "$REVIEWED_SHA" ]]; then
-  echo "PR head changed; inspect and review the new delta before publishing." >&2
+CURRENT_STATE=$(gh pr view <pr> --repo owner/repo \
+  --json headRefOid,baseRefOid,baseRefName --jq '[.headRefOid, .baseRefOid, .baseRefName] | @tsv') || exit 1
+if [[ "$CURRENT_STATE" != "$REVIEWED_STATE" ]]; then
+  echo "PR head, base or target changed; inspect and review the new range before publishing." >&2
   exit 1
 fi
 scripts/formal-review.sh --pr <pr> --repo owner/repo --event approve \
