@@ -398,7 +398,10 @@ Confirm issue closed by `Closes #` or close explicitly.
 
 If the Tier C / schema G12 floor applies and the one independent approval at the
 exact head, or the required checks, is missing: the PR is not mergeable yet.
-Request the independent review. Do not queue that gap for Mark.
+Check existing approvals and review attempts first. Wait for pending checks;
+reconcile any running or uncertain review before requesting another. Request a
+new review only when it is needed and permitted by the review protocol and
+remaining allowance. Do not queue a routine review gap for Mark.
 
 If another doc 14 human gate applies (not the Tier C review floor) and the human
 has not approved: **queue for Mark**, move on (do not block unrelated work).

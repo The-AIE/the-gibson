@@ -73,11 +73,26 @@ if [[ "$CURRENT_STATE" != "$REVIEWED_STATE" ]]; then
   echo "PR head, base or target changed; inspect and review the new range before publishing." >&2
   exit 1
 fi
+# Dedicated user-token reviewer (App installation tokens use the path below):
 scripts/formal-review.sh --pr <pr> --repo owner/repo --event approve \
   --commit "$REVIEWED_SHA" --body-file review.md
 # Use --event request-changes for concrete unresolved blockers.
 # commit_id stays pinned if the PR moves; that stale review cannot clear the new head.
 ```
+
+For an **App installation-token reviewer**, use its existing authenticated
+publisher's `POST /repos/{owner}/{repo}/pulls/{pr}/reviews` with `commit_id` set
+to `REVIEWED_SHA`, `event` set to `APPROVE` or `REQUEST_CHANGES`, and `body` set
+to the complete independent review. This endpoint accepts installation tokens;
+the helper above currently requires `/user`, which does not. Verify the
+publisher's configured App/installation, target repository access and reviewer
+independence first; never fall back to the builder's token. Apply the same
+head/base/target recheck immediately before posting. Read back the returned
+review ID and verify its author is the expected App bot, its `commit_id` is the
+reviewed SHA and its native state matches the decision. Unknown identity,
+incomplete coverage or an uncertain publication cannot clear review; reconcile
+the existing request before retrying. This path does not provision credentials
+or authorize the builder to publish the review.
 
 Legacy adapters may use `VERDICT: APPROVE` / `VERDICT: REQUEST_CHANGES` as
 transport vocabulary. These strings are not an additional reviewer or receipt,
