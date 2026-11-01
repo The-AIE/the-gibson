@@ -4,26 +4,26 @@ nav_exclude: true
 role: release
 inputs:
   - approved, all-gates-green PR
-  - E3 cross-vendor verdict at the exact head + required checks green for Tier C / schema (G12 floor, D-015)
+  - one independent approval at the exact head + required checks green for Tier C / schema (G12 floor, D-015)
 outputs:
-  - merge to integration branch
-  - verified deploy (commit SHA + READY)
-  - post-deploy smoke green
-  - cleanup: worktree, branch, claim, issue closed
-  - delivery-control audit → dry-run → human-apply when asked
+  - "merge to integration branch"
+  - "verified deploy (commit SHA + READY)"
+  - "post-deploy smoke green"
+  - "cleanup: worktree, branch, claim, issue closed"
+  - "delivery-control audit → dry-run → human-apply when asked"
 gates:
-  - Closes #N present; contract checkboxes verified
-  - CI green (gate + tests + security hard-fail)
-  - review VERDICT: APPROVE; UX eval pass when applicable
-  - DCO/Signed-off-by survives squash
-  - Tier C / schema → G12 floor met (E3 at the exact head, required checks green)
-  - one schema merge in flight fleet-wide
+  - "Closes #N present; contract checkboxes verified"
+  - "CI green (gate + tests + security hard-fail)"
+  - "one native GitHub APPROVED review at the current head; UX eval pass when applicable"
+  - "DCO/Signed-off-by survives squash"
+  - "Tier C / schema → G12 floor met (independent approval at the exact head, required checks green)"
+  - "one schema merge in flight fleet-wide"
 forbidden:
-  - merging Tier C or schema before the G12 floor is met
-  - more than one schema merge in flight
-  - force-pushing main
-  - rotating secrets (G4)
-  - silent `--apply` without dry-run
+  - "merging Tier C or schema before the G12 floor is met"
+  - "more than one schema merge in flight"
+  - "force-pushing main"
+  - "rotating secrets (G4)"
+  - "silent `--apply` without dry-run"
 sources:
   - docs/03-roles.md
   - docs/02-sdlc-pipeline.md (stages 7–8)
@@ -110,45 +110,32 @@ Canonical: /path/to/target
 
 ### Stage 7 — Merge (ordered checklist)
 
-0. **Delivery control** (when merge = Production ship): audit write path healthy
-   (docs/23). Unprotected prod ref → stop; request harden (human apply).
-0. `release-preflight.sh <pr>` — verdict READY, or an ADMIN-CANDIDATE you have
-   explicitly authorized below. BLOCKED is never merged past.
-1. `Closes #<issue>` present; issue contract checkboxes verified (sensors, not
-   vibes). **Partial ship?** Run with `--partial`: it must close *nothing*.
-2. CI green: gibson-gate, tests, security hard-fail layers. **No merge while
-   required checks are pending or red.**
-3. Review: newest usable timestamped event across PR reviews **and** comments
-   wins (source type does not reorder the stream). Formal review states
-   (`APPROVED` / `CHANGES_REQUESTED`) are modeled as events when they carry a
-   complete ISO-8601 timestamp with a real civil calendar (strict round-trip;
-   impossible dates like `9999-02-31` never normalize into the stream) and
-   always precede body `VERDICT` text on the same review; `DISMISSED` reviews
-   never authorize via body text. Fractional seconds accept **1–9 digits only**
-   (nanosecond precision); **10+ fractional digits are malformed** and never
-   enter the stream (no silent truncate — truncating collapsed distinct
-   instants past the ninth digit). `reviewDecision` is only a fail-closed
-   fallback when no usable event exists and no malformed relevant evidence was
-   discarded — a newer `VERDICT: REQUEST_CHANGES` blocks even if an older
-   formal approval remains. Incomplete/prefix-only timestamps, 10+ fractional
-   digits, impossible calendar dates/times, and authorless `APPROVE` events
-   never clear the gate; equal-time conflicts prefer `REQUEST_CHANGES`. Any
-   comment (or non-dismissed body-VERDICT review) with a recognized terminal
-   `VERDICT` marker whose timestamp is missing, non-string, incomplete, invalid
-   civil time, or >9-digit precision is malformed relevant evidence and
-   hard-blocks before event selection or aggregate fallback — never
-   drop-then-recover via an older valid approval or `reviewDecision=APPROVED`.
-   Ordinary comments without a terminal `VERDICT` are not evidence. When the
-   verdict source binds a commit SHA, it must match the current PR head —
-   stale or absent/null head fails closed. UX eval PASS when user-visible.
-4. DCO / `Signed-off-by` intact through squash strategy.
-5. Tier C / schema → E3 cross-vendor verdict at the exact head + required checks green (G12 floor, D-015). Missing either one → the PR is not mergeable yet; request the cross-vendor review. Do not queue this for Mark.
-6. Schema PRs: no other schema merge in flight; migration file present
-   (schema-guard).
+1. Refresh the complete current head/base and introduced range, claims and
+   acceptance evidence. All criteria must be verified; preserve DCO and vendor
+   provenance across inherited commits and the final squash.
+2. Require actual passing code/security checks at the current head. A skipped
+   check is not proof it ran. Honor unresolved owner and dependency holds.
+3. Read the genuine native APPROVED review from one independent reviewer of
+   this head and full introduced range. No unresolved blocking finding may be
+   ignored. Stale, partial, dismissed or same-author evidence does not clear
+   review; a successful sweep or release-preflight READY is insufficient.
+4. Tier C/schema: the same reviewer covers adversarial cases and the G12
+   approval/check floor. Serialize schema changes and require the migration
+   artifact when applicable; source approval never authorizes a live migration.
+5. Verify automatic deployment effects against any active deployment hold.
+   Merge serially with the expected-head guard only after all applicable gates
+   pass; do not use admin bypass. Verify the resulting target/main SHA and
+   permitted post-main checks before counting a source delivery.
 
-If any item fails → do not merge; report the missing gate.
+Native approval is the normal path. Legacy `VERDICT: APPROVE` /
+`VERDICT: REQUEST_CHANGES` adapters remain compatibility inputs, not a second
+approval requirement or a replacement for unmet native branch protection.
+Follow the staged [rollout](../docs/review-protocol.md#rollout) when the repository
+still requires the old review-evidence check. Never mark that check green by assertion.
 
 ### Stage 8 — Deploy + verify
+
+When deployment is authorized (a source-only merge leaves deployment held):
 
 1. Deployment exists for expected commit SHA.
 2. State reaches **READY** (merge that never deploys = failure).
@@ -183,61 +170,11 @@ merge only if `RELEASE_CMD` is unset.
 
 ### Reading the preflight verdict
 
-**READY** — merge.
-
-**BLOCKED** — the reason is printed. Four of them are worth knowing cold:
-
-- *"GitHub will close #N on merge"* on a `--partial` ship. Prose does not stop the
-  keyword linker: "does not fully resolve #28" closed #28 anyway, four times
-  (L-013). Fix the squash subject/body **and** unlink the issue in the PR's
-  Development sidebar — the sidebar link closes independently of the wording.
-- *"product-red required check"* — a step ran and failed. That is the code. Fix it.
-- *"no formal approval and no VERDICT: line"* — review is fail-closed (Law 5).
-  Never merge past this one.
-- *Newest VERDICT is REQUEST_CHANGES / stale head* — reviews and comments are
-  one timestamped stream; the newest usable event wins regardless of source
-  type and regardless of `reviewDecision`. An older formal
-  `reviewDecision=APPROVED` must not short-circuit a newer comment
-  `VERDICT: REQUEST_CHANGES`. An older comment `VERDICT: APPROVE` must not
-  override a newer review `VERDICT: REQUEST_CHANGES` (PR #57 false-green).
-  Formal `CHANGES_REQUESTED` / `DISMISSED` state precedes contradictory body
-  `VERDICT: APPROVE` text. Timestamps must be a complete ISO-8601 instant with
-  a real civil calendar (not a prefix like `9999-99-99Tbogus`, and not an
-  impossible date like `9999-02-31` that jq would normalize) and at most
-  nanosecond fractional precision (1–9 digits after the decimal; 10+ digits
-  are malformed, never silently truncated into the chrono key); authorless
-  `APPROVE` never counts as independent; equal timestamps prefer
-  `REQUEST_CHANGES`. Malformed relevant evidence — formal
-  `APPROVED`/`CHANGES_REQUESTED` *or* a verdict-bearing comment/review-body
-  whose timestamp is unusable or whose `APPROVE` is authorless — blocks before
-  event selection recovery and before any `reviewDecision` aggregate fallback
-  (no drop-then-recover to an older valid approval or aggregate READY).
-  Ordinary comments without a recognized terminal `VERDICT` are not evidence.
-  When the source carries a commit SHA, a verdict bound to any SHA other than
-  the current head — or when head is absent/null — is fail closed — re-review
-  the tip.
-
-**ADMIN-CANDIDATE** — nothing about the product is wrong, but nothing has
-authorized the merge either. Two causes:
-
-1. **Same-author review** (L-015 / L-021). GitHub refuses self-approval, so a
-   solo loop's `VERDICT: APPROVE` comment is the only review signal it can
-   produce — real as process, but not an independent identity, and branch
-   protection still blocks the merge. Prefer setting `REVIEWER_CMD` to get a
-   cross-vendor reviewer with a different GitHub identity; admin merge is the
-   fallback, not the habit.
-2. **GitHub Actions infrastructure** (L-033). Required checks that fail in
-   seconds with `startup_failure`, no steps, and no runner name — usually
-   concurrently across several open PRs — carry no product signal. Re-run once.
-   If it repeats identically, it is infra.
-
-Either way, admin merge is **pre-launch only, Tier A/B only**, and only after you
-post the checklist the script prints (local gate green on the merge tip, VERDICT
-recorded, security CLEAR, tier, infra evidence quoted). Name the skip in that
-comment. Never report remote CI as green when it was not. Post-launch, run with
-`--launched`: there is no admin path, escalate to the owner instead.
-
-Always re-sync `origin/main` before a merge attempt under a multi-lane fleet.
+`release-preflight.sh` is a diagnostic helper, not an independent reviewer.
+READY alone cannot establish complete current-head review or authorize a
+deployment. ADMIN-CANDIDATE does not authorize bypass. Use the Stage 7 checks
+and actual repository protection; identify the missing evidence rather than
+requesting a duplicate review when a valid unchanged-range approval exists.
 
 ### Cleanup (Law 10)
 
@@ -454,9 +391,9 @@ Confirm issue closed by `Closes #` or close explicitly.
 
 ### Human-gated items
 
-If the Tier C / schema G12 floor applies and the E3 cross-vendor verdict at the
+If the Tier C / schema G12 floor applies and the one independent approval at the
 exact head, or the required checks, is missing: the PR is not mergeable yet.
-Request the cross-vendor review. Do not queue that gap for Mark.
+Request the independent review. Do not queue that gap for Mark.
 
 If another doc 14 human gate applies (not the Tier C review floor) and the human
 has not approved: **queue for Mark**, move on (do not block unrelated work).
@@ -464,10 +401,9 @@ Never force-push main (G3).
 
 ## Done means
 
-- [ ] `release-preflight.sh` verdict recorded on the PR (and the admin checklist
-      posted verbatim if the merge used the ADMIN-CANDIDATE path)
-- [ ] Merged only when checklist complete
-- [ ] Deploy verified READY for expected SHA
-- [ ] Smoke green
+- [ ] Native approval, exact head/range, acceptance and actual required checks recorded
+- [ ] Merged only when checklist complete; target/main SHA and post-main checks verified
+- [ ] If deployment authorized: READY for expected SHA and smoke green
+- [ ] If deployment held: hold preserved; source integration reported separately
 - [ ] Claim / worktree / branch cleaned — `release-claim.sh` exited **0**, not 3
 - [ ] Status reported to AK / digest

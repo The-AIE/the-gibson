@@ -16,7 +16,7 @@ import {
  * bytes are E_TIER_WEAKENING. Keyword scans are hints, not this pin.
  */
 export const CANONICAL_TIER_C_TREATMENT =
-  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful.";
+  "One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful.";
 
 export const CANONICAL_SCHEMA_ID = "gibson.mandatory-read-chain.v1";
 export const CANONICAL_SCHEMA_VERSION = "1.2.0";
@@ -368,7 +368,7 @@ export const CANONICAL_BINDING_FAMILIES = [
     section: "Your role this session",
     patterns: [
       "Forbidden pairs on the same unit of work",
-      "Cross-vendor review is the default when more than one runtime is available",
+      "Cross-vendor review is preferred, not required; independence is mandatory",
     ],
   },
   {
@@ -467,7 +467,7 @@ export const CANONICAL_BINDING_FAMILIES = [
       "| **A** | Routine:",
       "| **B** | Elevated:",
       "| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data.",
-      "**G12** floor (E3 at the exact head + required checks, D-015)",
+      "**G12** floor (approval at the exact head + required checks)",
       "serialize when stateful",
       "Diffs may drift **into** Tier C; they never drift out without a reviewer saying so",
     ],
@@ -481,7 +481,7 @@ export const CANONICAL_BINDING_FAMILIES = [
       "Signed-off-by",
       "exact committed head SHA",
       "`release` verifies, in order",
-      "Tier C / schema → **G12** floor met (D-015).",
+      "Tier C / schema → **G12** floor met; adversarial cases covered by that reviewer.",
     ],
   },
   {

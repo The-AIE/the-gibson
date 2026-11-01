@@ -224,7 +224,7 @@
             "maxItems": 2,
             "items": {
               "type": "string",
-              "enum": ["E3-exact-head", "required-checks"]
+              "enum": ["independent-approval-exact-head", "required-checks"]
             }
           },
           "decision": {
