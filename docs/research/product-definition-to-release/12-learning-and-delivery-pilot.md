@@ -18,7 +18,7 @@ The target is **at least one independently approved, required-check-passing sour
 - Count a merge only when main verification completes inside the window; record earlier merges awaiting verification as pending. Preserve both timestamps. A completion in a later window belongs to that later window.
 - Closed-unmerged, superseded, empty reservation and duplicate PRs are not deliveries. Count a replacement chain once for the accepted change. Report raw merge count separately when it differs.
 - Separate documentation/process work, maintenance and product-capability work. Do not split useful changes artificially or count this plan's publication as a product release.
-- Report the rate with its numerator, denominator, sample size and case mix. No recorded window or no completed verification means the rate is unknown, not zero-effort success. Also show calendar throughput and backlog age; the active-window rate is not a 24-hour service promise.
+- Report the rate with its numerator, denominator, sample size and case mix. A complete recorded hour with zero verified completions is **0/hour** and stays in comparisons; pending or unavailable verification is listed separately and never counted as a completion. A missing or invalid window makes the rate unknown. Also show calendar throughput and backlog age; the active-window rate is not a 24-hour service promise.
 
 Begin with small, already-scoped changes in the captain's current order: #623 first, then #609. Keep at most two delivery items active and integrate one at a time. Preserve existing findings, review allowances, claims and separate holds. A review wait does not automatically open another build lane.
 
