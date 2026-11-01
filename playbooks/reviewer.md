@@ -55,11 +55,16 @@ complete introduced range, including inherited commits, at the current head.
 
 ```bash
 # Record before inspecting the full range; recheck before publishing.
-REVIEWED_SHA=$(gh pr view <pr> --repo owner/repo --json headRefOid --jq .headRefOid)
-gh pr view <pr> --repo owner/repo --json baseRefName,commits,files,body
-gh pr diff <pr> --repo owner/repo
-gh pr checks <pr> --repo owner/repo
+REVIEWED_SHA=$(gh pr view <pr> --repo owner/repo --json headRefOid --jq .headRefOid) || exit 1
+gh pr view <pr> --repo owner/repo --json baseRefName,commits,files,body || exit 1
+gh pr diff <pr> --repo owner/repo || exit 1
+gh pr checks <pr> --repo owner/repo || exit 1
 # Only the independent reviewer, using its own eligible identity/token:
+CURRENT_SHA=$(gh pr view <pr> --repo owner/repo --json headRefOid --jq .headRefOid) || exit 1
+if [[ "$CURRENT_SHA" != "$REVIEWED_SHA" ]]; then
+  echo "PR head changed; inspect and review the new delta before publishing." >&2
+  exit 1
+fi
 scripts/formal-review.sh --pr <pr> --repo owner/repo --event approve \
   --commit "$REVIEWED_SHA" --body-file review.md
 # Use --event request-changes for concrete unresolved blockers.
