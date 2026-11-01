@@ -46,6 +46,8 @@ The delivery ranges sum to **19–37 working days**. The first complete product 
 
 R1's two execution priorities remain the existing #609 repair/review lane and existing review-dispatch implementation. Reuse their current work and retained owners; do not start replacements. Claim-concurrency work is a supporting candidate only after owner/scope/allowance coordination. Diagnostic expiry or non-acquiring renewal alone cannot be called full automatic recovery. Preserve malformed reservations and existing overlap holds.
 
+**November 1 sequencing update:** the owner subsequently put #623's one-reviewer process change first, with #609 behind it; the current captain's queue is authoritative over the October snapshot above and below. The [hourly delivery and learning pilot](12-learning-and-delivery-pilot.md) measures that recovery within existing capacity. It adds no delivery lane, changes no retained ownership or attempt allowance, and does not reopen frozen gate work. Its rate target does not shorten the R2–R5 estimates without observed evidence.
+
 The owner-readable packet in [P1–P4](05-incremental-plan.md) is the first product experiment over existing assets. R2/R3 use it to test the complete description-to-release path. It does not delay recovery while a general product platform is built.
 
 ## Current work sorted into release buckets
