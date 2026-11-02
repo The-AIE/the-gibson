@@ -418,11 +418,11 @@ else
   bad "rename gate missing expected error code"
 fi
 
-# 3) change minimum review relationship (Tier C cross-vendor → independent-approve)
+# 3) change minimum review relationship (Tier C independent approval → different-agent without approval)
 mut_validate "m-ri.json" '
   c.reviewIndependence = c.reviewIndependence.map(r =>
     r.id === "ri.tier-c"
-      ? Object.assign({}, r, { minimumRelationship: "independent-approve", humanGateId: "G12" })
+      ? Object.assign({}, r, { minimumRelationship: "different-agent", humanGateId: "G12" })
       : r
   );
 ' --no-digest-check
@@ -723,11 +723,11 @@ mut_validate "m-ri-a-pref.json" '
 [[ "$rc" -ne 0 ]] && ok "ri.tier-a preferred pin fails closed" || bad "ri.tier-a preferred pin passed"
 has "ri.tier-a preferred pin code" "$out" "E_RI_TIER_A"
 
-# 25) ri.tier-b: preferred two-fresh-context-approve → cross-vendor
+# 25) ri.tier-b: preferred cross-vendor → two-fresh-context-approve
 mut_validate "m-ri-b-pref.json" '
   c.reviewIndependence = c.reviewIndependence.map(r =>
     r.id === "ri.tier-b"
-      ? Object.assign({}, r, { preferredRelationship: "cross-vendor" })
+      ? Object.assign({}, r, { preferredRelationship: "two-fresh-context-approve" })
       : r
   );
 ' --no-digest-check
@@ -789,7 +789,7 @@ mut_validate "m-ri-c-tier.json" '
 [[ "$rc" -ne 0 ]] && ok "ri.tier-c tierId pin fails closed" || bad "ri.tier-c tierId pin passed"
 has "ri.tier-c tierId pin code" "$out" "E_RI_TIER_C"
 
-# 26d) ri.tier-c minimum human-gate is below the E3 floor (D-015)
+# 26d) ri.tier-c minimum human-gate is not independent approval
 mut_validate "m-ri-c-min-human-gate.json" '
   c.reviewIndependence = c.reviewIndependence.map(r =>
     r.id === "ri.tier-c"
@@ -800,34 +800,34 @@ mut_validate "m-ri-c-min-human-gate.json" '
 [[ "$rc" -ne 0 ]] && ok "ri.tier-c human-gate minimum fails closed" || bad "ri.tier-c human-gate minimum passed"
 has "ri.tier-c human-gate minimum code" "$out" "E_RI_TIER_C"
 
-# 26e) ri.tier-c minimum independent-approve is below the E3 floor
-mut_validate "m-ri-c-min-independent.json" '
+# 26e) ri.tier-c minimum different-agent omits approval
+mut_validate "m-ri-c-min-no-approval.json" '
   c.reviewIndependence = c.reviewIndependence.map(r =>
     r.id === "ri.tier-c"
-      ? Object.assign({}, r, { minimumRelationship: "independent-approve" })
+      ? Object.assign({}, r, { minimumRelationship: "different-agent" })
       : r
   );
 ' --no-digest-check
-[[ "$rc" -ne 0 ]] && ok "ri.tier-c independent-approve minimum fails closed" || bad "ri.tier-c independent-approve minimum passed"
-has "ri.tier-c independent-approve minimum code" "$out" "E_RI_TIER_C"
+[[ "$rc" -ne 0 ]] && ok "ri.tier-c no-approval minimum fails closed" || bad "ri.tier-c no-approval minimum passed"
+has "ri.tier-c no-approval minimum code" "$out" "E_RI_TIER_C"
 
-# 26f) ri.tier-c cross-vendor at minimum and preferred is the floor (GREEN)
+# 26f) ri.tier-c independent-approve at minimum, cross-vendor preferred is the floor (GREEN)
 mut_validate "m-ri-c-min-cross-vendor.json" '
   c.reviewIndependence = c.reviewIndependence.map(r =>
     r.id === "ri.tier-c"
       ? Object.assign({}, r, {
-          minimumRelationship: "cross-vendor",
+          minimumRelationship: "independent-approve",
           preferredRelationship: "cross-vendor",
           humanGateId: "G12"
         })
       : r
   );
 ' --no-digest-check
-[[ "$rc" -eq 0 ]] && ok "ri.tier-c cross-vendor floor passes" || bad "ri.tier-c cross-vendor floor failed (rc=$rc)"
-lacks "ri.tier-c cross-vendor floor code" "$out" "E_RI_TIER_C"
+[[ "$rc" -eq 0 ]] && ok "ri.tier-c independent-approval floor passes" || bad "ri.tier-c independent-approval floor failed (rc=$rc)"
+lacks "ri.tier-c independent-approval floor code" "$out" "E_RI_TIER_C"
 
 # 26g) revert the expect pin to human-gate on a temp copy of the validator.
-# The same cross-vendor candidate must go RED. The copy sits in ROOT so its
+# The same independent-approval candidate must go RED. The copy sits in ROOT so its
 # ./lib imports resolve to the suite's already-copied contract modules.
 PIN_TOOL="$ROOT/policy-manifest-tier-c-pin-human-gate.mjs"
 cp "$TOOL" "$PIN_TOOL"
@@ -836,7 +836,7 @@ cp "$TOOL" "$PIN_TOOL"
   const p = process.argv[1];
   const s = fs.readFileSync(p, "utf8");
   const from = [
-    "minimumRelationship: \"cross-vendor\",",
+    "minimumRelationship: \"independent-approve\",",
     "      preferredRelationship: \"cross-vendor\",",
     "      humanGateId: \"G12\",",
   ].join("\n");
@@ -3388,16 +3388,30 @@ red_then_green() {
 }
 red_then_green "activated false" "m164-activated.json" 'c.activated = false;' "E_SCHEMA_CONST"
 red_then_green "status candidate" "m164-status.json" 'c.status = "candidate";' "E_STATUS"
-red_then_green "ri.tier-c independent-approve" "m164-ri.json" '
+red_then_green "ri.tier-c no approval" "m164-ri.json" '
   const ri = c.reviewIndependence.find(x => x.id === "ri.tier-c");
-  ri.minimumRelationship = "independent-approve";
+  ri.minimumRelationship = "different-agent";
 ' "E_RI_TIER_C"
 red_then_green "G12 requires duplicate required-checks" "m164-req-a.json" '
   c.humanGates.find(g => g.id === "G12").requires = ["required-checks", "required-checks"];
 ' "E_GATE_REQUIRES"
-red_then_green "G12 requires duplicate E3" "m164-req-b.json" '
-  c.humanGates.find(g => g.id === "G12").requires = ["E3-exact-head", "E3-exact-head"];
+red_then_green "G12 requires duplicate approval" "m164-req-b.json" '
+  c.humanGates.find(g => g.id === "G12").requires = ["independent-approval-exact-head", "independent-approval-exact-head"];
 ' "E_GATE_REQUIRES"
+# v1 remains a readable format for existing consumers. The legacy spelling is
+# valid schema data, but is drift from this release's canonical one-reviewer policy.
+mut_validate "m622-legacy-g12.json" '
+  c.humanGates.find(g => g.id === "G12").requires = ["E3-exact-head", "required-checks"];
+' --no-digest-check
+[[ "$rc" -ne 0 ]] && ok "legacy G12 is diagnosed as policy drift" || bad "legacy G12 silently passed current policy"
+has "legacy G12 semantic drift code" "$out" "E_GATE_REQUIRES"
+lacks "legacy v1 G12 token remains structurally valid" "$out" "E_SCHEMA_ENUM"
+red_then_green "Tier C mandatory vendor floor returns" "m622-vendor-floor.json" '
+  c.reviewIndependence.find(r => r.id === "ri.tier-c").minimumRelationship = "cross-vendor";
+' "E_RI_TIER_C"
+red_then_green "Tier C mandatory fan-out returns" "m622-fan-out.json" '
+  c.riskTiers.find(t => t.id === "C").evidenceMinimums.reviewDepth = "fan-out";
+' "E_TIER_EVIDENCE_CONTRADICTION"
 red_then_green "Tier C adversarialReview false" "m164-adv.json" '
   c.riskTiers.find(t => t.id === "C").evidenceMinimums.adversarialReview = false;
 ' "E_TIER_EVIDENCE_CONTRADICTION"

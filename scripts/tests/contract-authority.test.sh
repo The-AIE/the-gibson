@@ -286,7 +286,7 @@ switch (process.env.CASE) {
     text = text.replace(/### Style commitments \(owner taste, not a numbered G\)[\s\S]*?(?=### Explicit non-gates)/, "");
     break;
   case "cross-vendor":
-    text = text.replace("Cross-vendor review is the default when more than one runtime is available.\n", "");
+    text = text.replace("Cross-vendor review is preferred, not required; independence is mandatory.\n", "");
     break;
   case "durable-handoff":
     text = text.replace("Handoffs are **files and GitHub objects, never chat memory**.\n", "");
@@ -1935,7 +1935,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
+  "One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful",
   "Optional review; G12 when convenient"
 );
 fs.writeFileSync(p,t);
@@ -2196,7 +2196,7 @@ node -e '
 const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
-const needle="| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. |";
+const needle="| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful. |";
 const extra="| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Optional review; G12 when convenient |";
 if (!t.includes(needle)) throw new Error("canonical C row missing");
 t=t.replace(needle, needle+"\n"+extra);
@@ -3479,7 +3479,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
+  "One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
@@ -3498,7 +3498,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
+  "One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not operationally required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
@@ -3649,7 +3649,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
+  "One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not technically required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
@@ -3669,7 +3669,7 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful",
+  "One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful",
   "Fan-out + adversarial review + **G12** human merge is not always required; serialize when stateful"
 );
 fs.writeFileSync(p,t);
@@ -3746,7 +3746,7 @@ fs.writeFileSync(p, t.replace(s, r));
 
 APPLY_NEEDLE='then **explicit human apply**'
 LINE_NEEDLE='findings cite **file:line**'
-TIER_NEEDLE='Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful'
+TIER_NEEDLE='One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful'
 
 assert_sensor_exact_code \
   "optional slash unrelated cannot-be-skipped" \
@@ -3852,7 +3852,7 @@ assert_sensor_exact_code \
 assert_sensor_exact_code \
   "Tier C wording required-checks cannot-be-skipped" \
   "$TIER_NEEDLE" \
-  "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. Required checks cannot be skipped" \
+  "One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful. Required checks cannot be skipped" \
   "E_TIER_WEAKENING" \
   "tier C wording required-checks-cannot-be-skipped" "tiers"
 
