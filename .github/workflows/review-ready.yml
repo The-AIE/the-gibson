@@ -29,7 +29,7 @@ on:
   pull_request_target:
     types: [ready_for_review]
   # Liveness only (see the Heartbeat step): the event-driven runs mostly skip on purpose
-  # (pushes to main, drafts, forks, an already-signalled head), so sensor-health cannot read
+  # (pushes to main, drafts, forks), so sensor-health cannot read
   # a failed emit off the latest of them. It grades this daily run instead.
   schedule:
     - cron: "17 5 * * *"
@@ -174,27 +174,31 @@ jobs:
           [ "${p_repo}" = "${REPO}" ] || skip "pull request ${pr} head is in ${p_repo}"
           [ "${p_head}" = "${HEAD_SHA}" ] || skip "pull request ${pr} moved to ${p_head}; ${HEAD_SHA} is stale"
 
-          # 5. Idempotent per head.
+          # 5. Reuse the head's success status, but never treat it as a delivery receipt.
+          # A previous dispatch may have failed, or this may be a different eligible PR
+          # sharing the head. Every attempt still passes the run/jobs/PR checks above.
           existing=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/statuses" --paginate \
             --jq '.[] | select(.context == "review-ready" and .state == "success") | .id') \
             || fail "could not read existing statuses at ${HEAD_SHA}"
-          if [ -n "${existing}" ]; then
-            skip "a review-ready status already exists at ${HEAD_SHA} (idempotent: no second status, no second dispatch)"
+          status_result=reused
+          if [ -z "${existing}" ]; then
+            gh api "repos/${REPO}/statuses/${HEAD_SHA}" \
+              -f state=success -f context=review-ready \
+              -f description="claim-isolation and sensors green; ready for independent review" >/dev/null \
+              || fail "could not post the review-ready status at ${HEAD_SHA}"
+            status_result=posted
           fi
 
-          # 6. Emit: the status first (the record), then the dispatch.
+          # 6. At-least-once advisory delivery: a rerun can retry a failed dispatch.
+          # Consumers deduplicate by PR/head and applicable generation, not by timestamp.
           ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh api "repos/${REPO}/statuses/${HEAD_SHA}" \
-            -f state=success -f context=review-ready \
-            -f description="claim-isolation and sensors green; ready for independent review" >/dev/null \
-            || fail "could not post the review-ready status at ${HEAD_SHA}"
           payload=$(jq -nc --arg repo "${REPO}" --argjson pr "${pr}" --arg head "${HEAD_SHA}" \
             --arg base "${base_sha}" --arg ts "${ts}" \
             '{event_type: "review-ready", client_payload: {repo: $repo, pr: $pr, head_sha: $head, base_sha: $base, "tier-unknown": true, ts: $ts}}') \
             || fail "could not build the dispatch payload"
           dispatched=yes
           if ! gh api "repos/${REPO}/dispatches" --input - >/dev/null <<< "${payload}"; then
-            dispatched="no (the status was posted; the dispatch call failed)"
+            dispatched=no
           fi
 
           # 7. Measurement (#562 item 3).
@@ -203,8 +207,11 @@ jobs:
             echo "- head: ${HEAD_SHA} (pull request ${pr}, self-gate run ${run_id}, trigger ${EVENT_NAME})"
             echo "- pr_opened_at: ${p_created}"
             echo "- sensors_green_at: ${sensors_green_at}"
-            echo "- ready_emitted_at: ${ts}"
-            echo "- status posted: yes; repository_dispatch sent: ${dispatched}"
-            echo "- sensors green to ready emitted: $(jq -n --arg a "${sensors_green_at}" --arg b "${ts}" '(($b | fromdateiso8601) - ($a | fromdateiso8601))') s"
+            echo "- advisory_attempted_at: ${ts}"
+            echo "- status: ${status_result}; repository_dispatch sent: ${dispatched}"
+            if [ "${dispatched}" = yes ]; then
+              echo "- ready_emitted_at: ${ts}"
+              echo "- sensors green to ready emitted: $(jq -n --arg a "${sensors_green_at}" --arg b "${ts}" '(($b | fromdateiso8601) - ($a | fromdateiso8601))') s"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
-          case "${dispatched}" in yes) ;; *) fail "repository_dispatch failed after the status was posted" ;; esac
+          case "${dispatched}" in yes) ;; *) fail "repository_dispatch failed (status ${status_result})" ;; esac
