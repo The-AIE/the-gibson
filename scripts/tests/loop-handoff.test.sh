@@ -1116,13 +1116,35 @@ else
   bad "fixture bug: the local refs are not stale"
 fi
 
+# Existing PR approval is head-bound; a new target pin must not launder it into
+# evidence that this base/range was reviewed. Render the real supervisor message.
+HEAD_ONLY_REVIEW="$ROOT/head-only-review.json"
+printf '{"headSha":"%s","state":"success","reason":"pass"}\n' "$EXACT_HEAD" > "$HEAD_ONLY_REVIEW"
 sup_msg=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
-  --base-sha "$EXACT_BASE" --sha "$EXACT_HEAD" --task "diffstat sensor" --dry-run 2>/dev/null)
+  --base-sha "$EXACT_BASE" --sha "$EXACT_HEAD" --review-file "$HEAD_ONLY_REVIEW" \
+  --task "diffstat sensor" --dry-run 2>/dev/null)
 sup_rc=$?
 if [[ "$sup_rc" -eq 0 ]]; then
   ok "the pinned handoff rendered with both exact endpoints"
 else
   bad "the pinned handoff failed (rc=$sup_rc) even though both objects are present"
+fi
+if grep -qF "$(cat "$HEAD_ONLY_REVIEW")" <<<"$sup_msg"; then
+  ok "head-bound evidence is forwarded unchanged"
+else
+  bad "head-bound evidence was lost or rewritten as a new approval"
+fi
+if grep -qF 'current-base/range coverage UNVERIFIED' <<<"$sup_msg" &&
+   grep -qF 'leave the candidate queued and report the missing evidence' <<<"$sup_msg"; then
+  ok "head-only handoff requires range reconciliation and queues unknown coverage"
+else
+  bad "head-only handoff silently claims current-range clearance"
+fi
+if grep -qF 'Reviewed against base commit:' <<<"$sup_msg" ||
+   grep -qF 'the diff that was reviewed' <<<"$sup_msg"; then
+  bad "current target pin was falsely labelled as reviewed-range evidence"
+else
+  ok "current target pin does not attest to a reviewed base"
 fi
 if grep -qF 'REMOTE-HEAD-ONLY.md' <<<"$sup_msg"; then
   ok "the diffstat contains the path committed on the reviewed head $EXACT_HEAD"
@@ -1186,10 +1208,10 @@ if grep -qF 'n/a' <<<"$unavail_msg"; then
 else
   bad "the unavailable diffstat was not reported as n/a"
 fi
-if grep -qF "Reviewed against base commit: \`$ABSENT_BASE\`" <<<"$unavail_msg"; then
-  ok "the reviewed base commit is still named, so the supervisor can rebuild the diff"
+if grep -qF "Target base commit: \`$ABSENT_BASE\`" <<<"$unavail_msg"; then
+  ok "the target base commit is still named, so the supervisor can rebuild the diff"
 else
-  bad "the message dropped the reviewed base commit $ABSENT_BASE"
+  bad "the message dropped the target base commit $ABSENT_BASE"
 fi
 if grep -qF "Branch: \`$BRANCH\`" <<<"$unavail_msg" && grep -qF 'Base: `main`' <<<"$unavail_msg"; then
   ok "the unavailable-diffstat message still names both branches"

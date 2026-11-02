@@ -65,8 +65,8 @@ HANDOFF OPTIONS
   --sha SHA       exact head commit. The remote tip of --branch must exist and
                   still equal it, or the handoff fails (issue #55).
   --base-sha SHA  exact base commit. Requires --sha. When both are given the
-                  diffstat is built from <base-sha>...<sha> — the same two
-                  endpoints that were reviewed — instead of from the branch
+                  diffstat is built from <base-sha>...<sha> — the pinned target
+                  endpoints, not an attestation of review coverage — instead of the branch
                   names, whose local refs may have moved or gone stale. The
                   branch NAMES are still what the supervisor is told to open the
                   PR between.
@@ -830,10 +830,10 @@ case "$CMD" in
 - Expected SHA: \`$SHA\`"
       if [[ -n "$BASE_SHA" && "$DIFFSTAT_EXACT" -eq 1 ]]; then
         SHA_CLAUSE="$SHA_CLAUSE
-- Reviewed against base commit: \`$BASE_SHA\` — the diffstat below is exactly \`$BASE_SHA...$SHA\`, the diff that was reviewed."
+- Target base commit: \`$BASE_SHA\` — the diffstat below is exactly \`$BASE_SHA...$SHA\`; these are the current candidate endpoints, not proof of the range previously reviewed."
       elif [[ -n "$BASE_SHA" ]]; then
         SHA_CLAUSE="$SHA_CLAUSE
-- Reviewed against base commit: \`$BASE_SHA\` — the reviewed diff is \`$BASE_SHA...$SHA\`, but the handing-off clone could not produce that diffstat (see the Diffstat section). Generate it yourself from the remote; do not treat what follows as the reviewed diff."
+- Target base commit: \`$BASE_SHA\` — the candidate range is \`$BASE_SHA...$SHA\`, but the handing-off clone could not produce that diffstat (see the Diffstat section). Generate it yourself from the remote; no reviewed-range coverage is established by this pin."
       fi
       SHA_CLAUSE="$SHA_CLAUSE
 - Before opening or merging the PR, confirm that the tip of \`$BRANCH\` on the remote is still exactly this SHA. If it has moved, reject the handoff and report the mismatch — do not review or merge a different tip.
@@ -855,7 +855,16 @@ $TASK
 \`\`\`
 $DIFFSTAT
 \`\`\`
-$([[ -n "$REVIEWS" ]] && printf '\n## Cross-vendor second opinion\n%s\n' "$REVIEWS")
+## Existing review evidence
+${REVIEWS:-No review evidence was supplied.}
+
+Head-bound PR approval has current-base/range coverage UNVERIFIED. The target
+pins above do not turn it into an exact-range review. Before reusing any supplied
+approval, reconcile the complete introduced range and its integration context
+with what the reviewer actually inspected. If coverage cannot be established,
+leave the candidate queued and report the missing evidence; do not automatically
+dispatch another reviewer or treat this handoff as merge authorization.
+
 ## What to do
 1. Review \`$BRANCH\` against \`$BASE\`: correctness, security, scope, spec fidelity.
    Re-verify the checks rather than trusting the runner's PASS (docs/20 rule 2).

@@ -71,9 +71,11 @@ node <path-to-gibson>/scripts/delivery-receipt.mjs --help
 # exit 0 READY · 1 BLOCKED · 4 ADMIN-CANDIDATE (pre-launch operator decision)
 
 # Pre-merge checklist (read-only)
-MERGE_SHA=$(gh pr view 123 --json headRefOid --jq .headRefOid) || exit 1
-if [[ ! "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "Cannot establish a valid PR head; stop before merging." >&2
+MERGE_STATE=$(gh pr view 123 --json headRefOid,baseRefName \
+  --jq '[.headRefOid, .baseRefName] | @tsv') || exit 1
+IFS=$'\t' read -r MERGE_SHA BASE_REF <<< "$MERGE_STATE"
+if [[ ! "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || ! git check-ref-format "refs/heads/$BASE_REF"; then
+  echo "Cannot establish a valid PR head and base branch; stop before merging." >&2
   exit 1
 fi
 gh pr view 123 --json title,body,mergeable,reviewDecision,statusCheckRollup,labels || exit 1
@@ -86,7 +88,17 @@ gh pr merge 123 --squash --delete-branch --match-head-commit "$MERGE_SHA"
 # you are probably inside a fleet worktree pinned to a feature branch, and
 # yanking it out from under a running lane is Law 3 (L-020). Merge server-side:
 gh api --method PUT repos/{owner}/{repo}/pulls/123/merge -f merge_method=squash -f sha="$MERGE_SHA"
-git fetch origin && git log --oneline -1 origin/main   # verify the merge commit
+# Verify the actual merge commit on this PR's target, including non-main targets.
+LANDED_STATE=$(gh pr view 123 --json state,baseRefName,mergeCommit \
+  --jq '[.state, .baseRefName, .mergeCommit.oid] | @tsv') || exit 1
+IFS=$'\t' read -r PR_STATE LANDED_BASE LANDED_SHA <<< "$LANDED_STATE"
+if [[ "$PR_STATE" != "MERGED" || "$LANDED_BASE" != "$BASE_REF" || ! "$LANDED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Cannot verify the PR's merge on its expected target; stop." >&2
+  exit 1
+fi
+git fetch origin "refs/heads/$BASE_REF" || exit 1
+git merge-base --is-ancestor "$LANDED_SHA" FETCH_HEAD || exit 1
+git show --no-patch --oneline "$LANDED_SHA"
 
 # Verify deploy
 # (Vercel auto-deploy; then)

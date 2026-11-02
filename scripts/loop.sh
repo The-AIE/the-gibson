@@ -2453,13 +2453,15 @@ reuse_pr_review() {
     return 1
   fi
   # Forward the actual evaluator result, never an unrelated/stale local review.
-  # This snapshot is not a local-review receipt or a new approval.
+  # It binds the head, not the base at review time. The supervisor must reconcile
+  # current-range coverage; this snapshot is not an exact-range local receipt,
+  # a new approval, or merge authorization.
   HANDOFF_REVIEW_FILE="$STATE_DIR/pr-review-evidence.json"
   if ! printf '%s\n' "$evidence" > "$HANDOFF_REVIEW_FILE"; then
     block "could not save existing PR #$pr review evidence for the supervisor"
     return 1
   fi
-  info "accepted independent review already recorded on PR #$pr @ $sha — reusing it without dispatch"
+  info "head-bound independent review recorded on PR #$pr @ $sha — forwarding for range reconciliation without dispatch"
   return 0
 }
 
@@ -2669,13 +2671,13 @@ supervisor_handoff() {
   [[ -z "$issue" ]] || task="Issue: $issue."
   [[ -z "$next" ]] || task="${task:+$task }Next action: $next"
   [[ -n "$task" ]] || task="See the branch diff; loop-state carried no task description."
-  # The pre-handoff review, not the escalation artifact: the supervisor must be
-  # shown the review of the exact diff it is being handed, which is the one the
-  # receipt above binds.
+  # The pre-handoff review or existing PR evidence, not the escalation artifact.
+  # A local receipt binds both endpoints; PR evidence may bind only the head.
+  # The supervisor message requires range reconciliation before reuse.
   local review="$HANDOFF_REVIEW_FILE"
   # The supervisor gets the human branch NAMES — it opens a PR from one branch
   # into another, not from one commit into another — AND both exact SHAs, so the
-  # diffstat it is shown is built from the same two endpoints the reviewer saw.
+  # diffstat it is shown describes the current candidate endpoints.
   # Passing only the names would let a stale local ref describe a different diff
   # than the one that was reviewed. Both objects were fetched and verified by
   # resolve_base_pin/resolve_handoff_sha above, so the exact-SHA diff is readable.
