@@ -162,8 +162,10 @@ When deployment is authorized (a source-only merge leaves deployment held):
    debug live in prod.
 
 **Docs-only / no product surface (Tier A docs or specs, no Vercel root change):**
-skip the READY deploy wait. Smoke is content verification on `origin/main`
-after the merge commit lands: `git fetch origin main` then `git show` / grep
+skip the READY deploy wait. Use Stage 7's verified target and merge commit:
+`git fetch origin "refs/heads/$BASE_REF"` must succeed, and
+`git merge-base --is-ancestor "$LANDED_SHA" FETCH_HEAD` must pass before
+checking content with `git show "$LANDED_SHA:<path>"` / grep for
 the contract tokens the PR claimed (runbook headings, README index entry,
 Released marker, etc.). Do not wait on marketing or MCP deploys for a pure
 `docs/**` / `specs/**` ship. Product-surface PRs still follow steps 1–5 above

@@ -448,7 +448,16 @@ alive() {
 
 merge_clause() {
   if [[ "$MERGE" -eq 1 ]]; then
-    echo "merge it once every required check is green (never before — docs/20 rule 4)."
+    cat <<'EOF'
+merge only after reading a genuine native GitHub APPROVED review of the current head commit
+from a reviewer independent of every author of the introduced code. Verify the review's
+commit and actor, complete current-range coverage, resolved actionable findings and all
+required checks actually passing. Comment receipts and evaluator success are not native approval.
+If you change the code, the new head needs independent approval; do not approve your own fix.
+If approval is missing, stale or incomplete, leave the PR unmerged and report the blocker
+without automatically dispatching another review. Honor owner, deployment and migration holds,
+then merge with an expected-head guard and verify the actual target and merge commit.
+EOF
   else
     echo "leave it green and ready; a human owns the merge (AGENTS.md Law 7)."
   fi
@@ -858,9 +867,9 @@ $DIFFSTAT
 ## Existing review evidence
 ${REVIEWS:-No review evidence was supplied.}
 
-Head-bound PR approval has current-base/range coverage UNVERIFIED. The target
+Head-bound review evidence has current-base/range coverage UNVERIFIED. The target
 pins above do not turn it into an exact-range review. Before reusing any supplied
-approval, reconcile the complete introduced range and its integration context
+review evidence, reconcile the complete introduced range and its integration context
 with what the reviewer actually inspected. If coverage cannot be established,
 leave the candidate queued and report the missing evidence; do not automatically
 dispatch another reviewer or treat this handoff as merge authorization.

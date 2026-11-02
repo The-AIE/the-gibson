@@ -78,11 +78,13 @@ The loop reuses accepted current-head PR evidence instead of dispatching again;
 its default selects one different-vendor reviewer. Pending, rejected, ambiguous
 or unreadable PR evidence blocks handoff without another request. Before a PR
 exists, the existing local-review receipt path remains available. None of these
-handoff decisions authorizes a merge or changes the Mini service. A reused PR
-approval is head-bound evidence; current-base/range coverage is unverified until
+handoff decisions authorizes a merge or changes the Mini service. Reused PR
+evidence is head-bound; current-base/range coverage is unverified until
 the supervisor reconciles it with the range actually inspected. Target pins and
 a generated diffstat cannot establish that review coverage. Unknown coverage
-stays queued without automatic reviewer dispatch. This PR does **not**
+stays queued without automatic reviewer dispatch. The optional `--merge`
+instructions require a native independent approval of the current change;
+comment receipts and evaluator success cannot substitute for it. This PR does **not**
 change GitHub protection, retire a workflow, install a controller or send a new
 review. Existing protection stays effective until the separately reviewed
 cutover below is applied. A prose amendment cannot make a pending check green.

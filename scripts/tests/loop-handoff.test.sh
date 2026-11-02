@@ -1140,6 +1140,34 @@ if grep -qF 'current-base/range coverage UNVERIFIED' <<<"$sup_msg" &&
 else
   bad "head-only handoff silently claims current-range clearance"
 fi
+if grep -qF 'Head-bound review evidence' <<<"$sup_msg" &&
+   ! grep -qF 'Head-bound PR approval' <<<"$sup_msg"; then
+  ok "a passing evidence snapshot is not relabelled as native approval"
+else
+  bad "the handoff presents generic evidence as native approval"
+fi
+# --merge changes the receiver's instructions; this script does not perform a
+# GitHub merge itself. Exercise its real rendered message, without contacting
+# Devin or GitHub, and require native approval even for a passing comment receipt.
+merge_msg=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+  --base-sha "$EXACT_BASE" --sha "$EXACT_HEAD" --review-file "$HEAD_ONLY_REVIEW" \
+  --task "native approval sensor" --merge --dry-run 2>/dev/null)
+merge_rc=$?
+if [[ "$merge_rc" -eq 0 ]] &&
+   grep -qF 'native GitHub APPROVED review' <<<"$merge_msg" &&
+   grep -qF 'current head commit' <<<"$merge_msg" &&
+   grep -qF 'independent of every author' <<<"$merge_msg"; then
+  ok "merge-enabled handoff requires native approval of the current change by an independent actor"
+else
+  bad "merge-enabled handoff can treat green checks alone as authority"
+fi
+if grep -qF 'Comment receipts and evaluator success are not native approval' <<<"$merge_msg" &&
+   grep -qF 'leave the PR unmerged' <<<"$merge_msg" &&
+   grep -qF 'expected-head guard' <<<"$merge_msg"; then
+  ok "merge-enabled handoff rejects comment-only clearance and retains the expected-head guard"
+else
+  bad "merge-enabled handoff omits evidence refusal or the final head guard"
+fi
 if grep -qF 'Reviewed against base commit:' <<<"$sup_msg" ||
    grep -qF 'the diff that was reviewed' <<<"$sup_msg"; then
   bad "current target pin was falsely labelled as reviewed-range evidence"
