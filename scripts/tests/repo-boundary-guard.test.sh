@@ -1127,6 +1127,66 @@ rm -f "$FAKE_RB" "$RB_ATTEMPT_LOG" "$ROOT/.agents/gate.json" "$ROOT/.gibson-gate
 git -C "$ROOT" reset -q 2>/dev/null || true
 git -C "$ROOT" checkout -q -- README.md 2>/dev/null || true
 
+# --- linked worktree of the target is inside the boundary (#620) ------------
+# `git rev-parse --show-toplevel` in a linked worktree is that worktree, not
+# the main checkout. Same --git-common-dir means the same repository. A
+# worktree of a different repository stays outside. Control-plane staging
+# still exits 86 after the boundary check passes.
+WT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-repo-guard-wt.XXXXXX")
+OTHER_WT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-repo-guard-other-wt.XXXXXX")
+trap 'rm -rf "$ROOT" "$ALIAS_DIR" "$OTHER" "$UNBORN" "$WT" "$OTHER_WT"' EXIT
+rmdir "$WT" "$OTHER_WT"
+git -C "$ROOT" worktree add -q "$WT" -b guard-wt
+git -C "$OTHER" worktree add -q "$OTHER_WT" -b guard-other-wt
+
+run_guard_in "$WT" "$ROOT" status >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "linked worktree status is inside the target boundary (exit $rc)"
+else
+  bad "linked worktree status (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+
+mkdir -p "$WT/.agents"
+printf 'forbidden-wt\n' > "$WT/.agents/gate.json"
+run_guard_in "$WT" "$ROOT" add .agents/gate.json >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "control-plane" "$ROOT/err"; then
+  ok "linked worktree control-plane add still rejected (exit $rc)"
+else
+  bad "linked worktree control-plane add (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+staged=$(git -C "$WT" diff --cached --name-only)
+if [[ -z "$staged" ]]; then
+  ok "linked worktree control-plane staging rolled back"
+else
+  bad "linked worktree control-plane staging rolled back (still staged: $staged)"
+fi
+
+run_guard_in "$OTHER_WT" "$ROOT" status >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "outside target repo" "$ROOT/err"; then
+  ok "worktree of a different repo rejected (exit $rc)"
+else
+  bad "worktree of a different repo (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+
+# Ambient GIT_COMMON_DIR must not turn a foreign worktree into the target.
+(
+  cd "$OTHER_WT" &&
+    GIT_COMMON_DIR="$ROOT_PHYS/.git" \
+    GIBSON_REAL_GIT="$(command -v git)" \
+    GIBSON_TARGET_REPO="$ROOT" \
+    GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+    "$GUARD" status
+) >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "outside target repo" "$ROOT/err"; then
+  ok "foreign worktree with spoofed GIT_COMMON_DIR rejected (exit $rc)"
+else
+  bad "foreign worktree with spoofed GIT_COMMON_DIR (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+
 if [[ "$FAIL" -eq 0 ]]; then
   echo "$PASS passed, $FAIL failed, $SKIP skipped"
   exit 0

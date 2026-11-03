@@ -43,6 +43,43 @@ resolve_current_root() {
   physical_dir "$git_root"
 }
 
+# Physical path of the repository's shared git directory. A linked worktree
+# shares it with the main checkout; another repository, including one of its
+# worktrees, does not. Identity is read from the directory itself: ambient
+# GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR must not make a foreign cwd look
+# linked. Relative answers (".git") resolve from the start directory. Fail
+# closed when git cannot name a directory.
+physical_common_dir() {
+  local start="$1" raw
+  [[ -n "$start" && -d "$start" ]] || return 1
+  # --path-format=absolute (Git 2.31+) avoids cwd-relative answers. Older git
+  # rejects the flag; fall back and resolve a relative ".git" from start.
+  raw=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+    "$REAL_GIT" -C "$start" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [[ -z "$raw" || "$raw" != /* ]]; then
+    raw=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+      "$REAL_GIT" -C "$start" rev-parse --git-common-dir 2>/dev/null) || return 1
+  fi
+  [[ -n "$raw" ]] || return 1
+  case "$raw" in
+    /*) ;;
+    *)
+      raw=$(CDPATH='' cd -- "$start" && CDPATH='' cd -- "$raw" && pwd -P) || return 1
+      printf '%s\n' "$raw"
+      return 0
+      ;;
+  esac
+  physical_dir "$raw"
+}
+
+# True when both directories belong to one repository.
+same_git_repository() {
+  local a b
+  a=$(physical_common_dir "$1") || return 1
+  b=$(physical_common_dir "$2") || return 1
+  [[ -n "$a" && "$a" == "$b" ]]
+}
+
 fail() {
   echo "gibson repo-boundary guard: $*" >&2
   exit 86
@@ -53,8 +90,15 @@ target_root="$(resolve_target_root || true)"
   fail "configured target repo could not be resolved: '$TARGET_REPO'"
 
 current_root="$(resolve_current_root || true)"
-[[ -n "$current_root" && "$current_root" == "$target_root" ]] ||
-  fail "git command ran outside target repo: expected '$TARGET_REPO' (resolved '${target_root:-unresolved}'), observed '${current_root:-unresolved}'"
+# A linked worktree's toplevel is its own directory, not the main checkout.
+# Laws 2 and 3 require builder git to run there. Same common git dir is the
+# same repository; a different common dir (sibling, submodule, other worktree)
+# still fails closed.
+if [[ -z "$current_root" || "$current_root" != "$target_root" ]]; then
+  if ! same_git_repository "$PWD" "$target_root"; then
+    fail "git command ran outside target repo: expected '$TARGET_REPO' (resolved '${target_root:-unresolved}'), observed '${current_root:-unresolved}'"
+  fi
+fi
 
 protected_path() {
   case "$1" in
