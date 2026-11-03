@@ -9,6 +9,20 @@ REAL_GIT="${GIBSON_REAL_GIT:?}"
 TARGET_REPO="${GIBSON_TARGET_REPO:?}"
 EXPECTED_SLUG="${GIBSON_EXPECTED_REPO_SLUG:?}"
 
+# Drop caller repository overrides before any real git. A linked worktree of
+# the target is inside the boundary; add and commit would otherwise keep
+# GIT_DIR and advance the other repository. Unsetting alone would retarget
+# that add onto this worktree (exit 0). When an override names a different
+# repository, refuse with 86. Cleared again on every real_git call.
+_caller_git_dir=${GIT_DIR-}
+_caller_git_work_tree=${GIT_WORK_TREE-}
+_caller_git_common_dir=${GIT_COMMON_DIR-}
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
+
+real_git() {
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR "${REAL_GIT}" "$@"
+}
+
 # Physical path of an existing directory (macOS /var vs /private/var, symlinks).
 # Stock Bash 3.2 / macOS: no GNU realpath or readlink -f.
 physical_dir() {
@@ -18,7 +32,7 @@ physical_dir() {
 }
 
 repo_root() {
-  "$REAL_GIT" -C "$1" rev-parse --show-toplevel 2>/dev/null
+  real_git -C "$1" rev-parse --show-toplevel 2>/dev/null
 }
 
 # Resolve configured target to a physical git repository root. Fail closed if
@@ -54,11 +68,9 @@ physical_common_dir() {
   [[ -n "$start" && -d "$start" ]] || return 1
   # --path-format=absolute (Git 2.31+) avoids cwd-relative answers. Older git
   # rejects the flag; fall back and resolve a relative ".git" from start.
-  raw=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
-    "$REAL_GIT" -C "$start" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  raw=$(real_git -C "$start" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [[ -z "$raw" || "$raw" != /* ]]; then
-    raw=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
-      "$REAL_GIT" -C "$start" rev-parse --git-common-dir 2>/dev/null) || return 1
+    raw=$(real_git -C "$start" rev-parse --git-common-dir 2>/dev/null) || return 1
   fi
   [[ -n "$raw" ]] || return 1
   case "$raw" in
@@ -72,6 +84,22 @@ physical_common_dir() {
   physical_dir "$raw"
 }
 
+# Physical common dir named by a git directory path (--git-dir, not the
+# caller's environment). Empty or unreadable paths fail closed.
+common_dir_from_git_dir() {
+  local raw
+  [[ -n "$1" ]] || return 1
+  raw=$(real_git --git-dir="$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [[ -z "$raw" || "$raw" != /* ]]; then
+    raw=$(real_git --git-dir="$1" rev-parse --git-common-dir 2>/dev/null || true)
+  fi
+  [[ -n "$raw" ]] || return 1
+  case "$raw" in
+    /*) physical_dir "$raw" ;;
+    *) (CDPATH='' cd -- "$PWD" && CDPATH='' cd -- "$raw" && pwd -P) ;;
+  esac
+}
+
 # True when both directories belong to one repository.
 same_git_repository() {
   local a b
@@ -83,6 +111,33 @@ same_git_repository() {
 fail() {
   echo "gibson repo-boundary guard: $*" >&2
   exit 86
+}
+
+# Exit 86 when a captured override names a different repository. Same-repo
+# overrides are already unset, so the later command still uses this checkout.
+refuse_foreign_git_env() {
+  local target_common caller_common
+  [[ -n "${_caller_git_dir}" || -n "${_caller_git_work_tree}" || -n "${_caller_git_common_dir}" ]] || return 0
+  target_common=$(physical_common_dir "$PWD") ||
+    fail "git environment override set but this repository could not be resolved"
+  if [[ -n "${_caller_git_dir}" ]]; then
+    caller_common=$(common_dir_from_git_dir "${_caller_git_dir}") ||
+      fail "GIT_DIR names a different repository"
+    [[ "$caller_common" == "$target_common" ]] ||
+      fail "GIT_DIR names a different repository"
+  fi
+  if [[ -n "${_caller_git_work_tree}" ]]; then
+    caller_common=$(physical_common_dir "${_caller_git_work_tree}") ||
+      fail "GIT_WORK_TREE names a different repository"
+    [[ "$caller_common" == "$target_common" ]] ||
+      fail "GIT_WORK_TREE names a different repository"
+  fi
+  if [[ -n "${_caller_git_common_dir}" ]]; then
+    caller_common=$(physical_dir "${_caller_git_common_dir}") ||
+      fail "GIT_COMMON_DIR names a different repository"
+    [[ "$caller_common" == "$target_common" ]] ||
+      fail "GIT_COMMON_DIR names a different repository"
+  fi
 }
 
 target_root="$(resolve_target_root || true)"
@@ -99,6 +154,7 @@ if [[ -z "$current_root" || "$current_root" != "$target_root" ]]; then
     fail "git command ran outside target repo: expected '$TARGET_REPO' (resolved '${target_root:-unresolved}'), observed '${current_root:-unresolved}'"
   fi
 fi
+refuse_foreign_git_env
 
 protected_path() {
   case "$1" in
@@ -130,7 +186,7 @@ scan_staged_control_plane() {
   }
   # Capture status explicitly; do not parse until git succeeds. Bound stderr to
   # our one-line diagnostic (do not dump unbounded git output).
-  "$REAL_GIT" -C "$current_root" diff --no-relative --cached --name-only -z \
+  real_git -C "$current_root" diff --no-relative --cached --name-only -z \
     >"$tmp" 2>/dev/null || list_rc=$?
   if [[ "$list_rc" -ne 0 ]]; then
     rm -f -- "$tmp"
@@ -245,7 +301,7 @@ check_unstaged_protected_tracked() {
     echo "gibson repo-boundary guard: cannot create temp file for unstaged path enumeration" >&2
     return 1
   }
-  "$REAL_GIT" -C "$current_root" diff --no-relative --name-only -z \
+  real_git -C "$current_root" diff --no-relative --name-only -z \
     >"$tmp" 2>/dev/null || list_rc=$?
   if [[ "$list_rc" -ne 0 ]]; then
     rm -f -- "$tmp"
@@ -281,14 +337,20 @@ rollback_protected_staged() {
   # One attempt per offender with :(literal) so glob/pathspec-magic characters
   # in a protected filename never match another index path (Bash 3.2-safe).
   for path in "${_protected_staged[@]}"; do
-    if ! "$REAL_GIT" -C "$current_root" reset -q -- ":(literal)${path}" 2>/dev/null; then
+    # "$REAL_GIT" directly, not real_git: the literal-pathspec sensor evals
+    # this function alone and only exports REAL_GIT. Still drop the caller's
+    # repository overrides before the call.
+    if ! env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+         "$REAL_GIT" -C "$current_root" reset -q -- ":(literal)${path}" 2>/dev/null; then
       # Index-only fallback; --ignore-unmatch keeps a missing entry non-fatal.
-      "$REAL_GIT" -C "$current_root" rm -q --cached --ignore-unmatch -- \
+      env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+        "$REAL_GIT" -C "$current_root" rm -q --cached --ignore-unmatch -- \
         ":(literal)${path}" 2>/dev/null || true
     fi
     # still != 0: staged difference remains (1) or git could not check (e.g. 128).
     still=0
-    "$REAL_GIT" -C "$current_root" diff --cached --quiet -- ":(literal)${path}" \
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+      "$REAL_GIT" -C "$current_root" diff --cached --quiet -- ":(literal)${path}" \
       2>/dev/null || still=$?
     if [[ "$still" -ne 0 ]]; then
       echo "gibson repo-boundary guard: could not unstage '$path'" >&2
@@ -299,11 +361,11 @@ rollback_protected_staged() {
 
 # Run real `git add`, always scan the index afterward (including after a
 # nonzero/partial add), selective-rollback protected entries → exit 86, else
-# propagate the real add status. Under set -e a bare `"$REAL_GIT" "$@"` would
+# propagate the real add status. Under set -e a bare `real_git "$@"` would
 # abort before the scan on failure.
 guarded_git_add() {
   local add_rc=0
-  "$REAL_GIT" "$@" || add_rc=$?
+  real_git "$@" || add_rc=$?
   if ! scan_staged_control_plane; then
     rollback_protected_staged
     exit 86
@@ -320,7 +382,7 @@ branch_from_push_args() {
       *:refs/heads/*) printf '%s\n' "${arg#*:refs/heads/}"; return 0 ;;
     esac
   done
-  "$REAL_GIT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
+  real_git symbolic-ref --quiet --short HEAD 2>/dev/null || true
 }
 
 check_push() {
@@ -338,7 +400,7 @@ check_push() {
         ;;
     esac
   done
-  remote_url=$("$REAL_GIT" config --get "remote.${remote}.url" 2>/dev/null || true)
+  remote_url=$(real_git config --get "remote.${remote}.url" 2>/dev/null || true)
   [[ -n "$remote_url" ]] || fail "push remote '$remote' has no configured URL"
   remote_slug=$(origin_slug_from_url "$remote_url")
   [[ "$remote_slug" == "$EXPECTED_SLUG" ]] ||
@@ -346,9 +408,9 @@ check_push() {
   branch="$(branch_from_push_args "$@")"
   [[ -n "$branch" && "$branch" != -* && "$branch" != */*:* ]] ||
     fail "could not determine pushed branch for remote '$remote'"
-  "$REAL_GIT" "$@" || return $?
-  remote_tip=$("$REAL_GIT" ls-remote "$remote" "refs/heads/$branch" | awk 'NR == 1 { print $1 }')
-  local_tip=$("$REAL_GIT" rev-parse "$branch" 2>/dev/null || "$REAL_GIT" rev-parse HEAD)
+  real_git "$@" || return $?
+  remote_tip=$(real_git ls-remote "$remote" "refs/heads/$branch" | awk 'NR == 1 { print $1 }')
+  local_tip=$(real_git rev-parse "$branch" 2>/dev/null || real_git rev-parse HEAD)
   [[ -n "$remote_tip" && "$remote_tip" == "$local_tip" ]] ||
     fail "pushed branch '$branch' does not point to local head on expected origin"
 }
@@ -383,7 +445,7 @@ case "${1-}" in
       if commit_form_includes_worktree "$@"; then
         check_unstaged_protected_tracked || exit 86
       fi
-      "$REAL_GIT" "$@"
+      real_git "$@"
     else
       # Real add first (status captured), then always scan; selective literal
       # rollback of protected paths → 86, else propagate real add status.
@@ -396,6 +458,6 @@ case "${1-}" in
     check_push "${@:2}"
     ;;
   *)
-    exec "$REAL_GIT" "$@"
+    exec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR "${REAL_GIT}" "$@"
     ;;
 esac

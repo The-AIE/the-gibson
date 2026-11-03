@@ -1187,6 +1187,121 @@ else
   bad "foreign worktree with spoofed GIT_COMMON_DIR (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
 fi
 
+# Foreign GIT_DIR must not retarget add/commit onto another repository.
+# From a linked worktree of the target (inside the boundary) and from the
+# main checkout, the override is refused with 86 before any mutating git.
+# Clearing the variables alone would retarget the add onto this checkout
+# (exit 0). The other repo's index and HEAD stay unchanged.
+VICTIM=$(mktemp -d "${TMPDIR:-/tmp}/gibson-repo-guard-victim.XXXXXX")
+trap 'rm -rf "$ROOT" "$ALIAS_DIR" "$OTHER" "$UNBORN" "$WT" "$OTHER_WT" "$VICTIM"' EXIT
+git -C "$VICTIM" init -q -b main
+git -C "$VICTIM" config user.email test@gibson.invalid
+git -C "$VICTIM" config user.name gibson-test
+printf 'victim\n' > "$VICTIM/README.md"
+git -C "$VICTIM" add README.md
+git -C "$VICTIM" commit -qm victim-base
+printf 'escaped\n' > "$WT/ESCAPED.txt"
+victim_head=$(git -C "$VICTIM" rev-parse HEAD)
+victim_index=$(git -C "$VICTIM" ls-files -s)
+wt_head=$(git -C "$WT" rev-parse HEAD)
+wt_index=$(git -C "$WT" ls-files -s)
+
+wt_git_dir=$(git -C "$WT" rev-parse --absolute-git-dir)
+(
+  cd "$WT" &&
+    GIT_DIR="$wt_git_dir" \
+    GIBSON_REAL_GIT="$(command -v git)" \
+    GIBSON_TARGET_REPO="$ROOT" \
+    GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+    "$GUARD" status
+) >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "linked worktree with same-repo GIT_DIR still inside the boundary (exit $rc)"
+else
+  bad "linked worktree with same-repo GIT_DIR (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+
+(
+  cd "$WT" &&
+    GIT_DIR="$VICTIM/.git" \
+    GIBSON_REAL_GIT="$(command -v git)" \
+    GIBSON_TARGET_REPO="$ROOT" \
+    GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+    "$GUARD" add ESCAPED.txt
+) >/dev/null 2>"$ROOT/err"
+rc=$?
+victim_head_after=$(git -C "$VICTIM" rev-parse HEAD)
+victim_index_after=$(git -C "$VICTIM" ls-files -s)
+wt_head_after=$(git -C "$WT" rev-parse HEAD)
+wt_index_after=$(git -C "$WT" ls-files -s)
+if [[ "$rc" -eq 86 && "$victim_head_after" == "$victim_head" && "$victim_index_after" == "$victim_index" && "$wt_head_after" == "$wt_head" && "$wt_index_after" == "$wt_index" ]] &&
+   grep -q "GIT_DIR names a different repository" "$ROOT/err"; then
+  ok "linked worktree with foreign GIT_DIR: add exits 86 and the other repo is unchanged"
+else
+  bad "linked worktree with foreign GIT_DIR add (rc=$rc victim_head $victim_head->$victim_head_after wt_head $wt_head->$wt_head_after err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+
+(
+  cd "$WT" &&
+    GIT_DIR="$VICTIM/.git" \
+    GIBSON_REAL_GIT="$(command -v git)" \
+    GIBSON_TARGET_REPO="$ROOT" \
+    GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+    "$GUARD" rev-parse HEAD
+) >"$ROOT/out" 2>"$ROOT/err"
+rc=$?
+printed=$(tr -d '[:space:]' <"$ROOT/out")
+victim_head_after=$(git -C "$VICTIM" rev-parse HEAD)
+victim_index_after=$(git -C "$VICTIM" ls-files -s)
+if [[ "$rc" -eq 86 && "$printed" != "$victim_head" && "$victim_head_after" == "$victim_head" && "$victim_index_after" == "$victim_index" ]] &&
+   grep -q "GIT_DIR names a different repository" "$ROOT/err"; then
+  ok "linked worktree with foreign GIT_DIR: rev-parse exits 86 and does not print the other HEAD"
+else
+  bad "linked worktree with foreign GIT_DIR rev-parse (rc=$rc printed=$printed err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+
+(
+  cd "$WT" &&
+    GIT_DIR="$VICTIM/.git" \
+    GIBSON_REAL_GIT="$(command -v git)" \
+    GIBSON_TARGET_REPO="$ROOT" \
+    GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+    "$GUARD" commit --allow-empty -m escaped
+) >/dev/null 2>"$ROOT/err"
+rc=$?
+victim_head_after=$(git -C "$VICTIM" rev-parse HEAD)
+victim_index_after=$(git -C "$VICTIM" ls-files -s)
+wt_head_after=$(git -C "$WT" rev-parse HEAD)
+if [[ "$rc" -eq 86 && "$victim_head_after" == "$victim_head" && "$victim_index_after" == "$victim_index" && "$wt_head_after" == "$wt_head" ]] &&
+   grep -q "GIT_DIR names a different repository" "$ROOT/err"; then
+  ok "linked worktree with foreign GIT_DIR: commit exits 86 and the other HEAD stays"
+else
+  bad "linked worktree with foreign GIT_DIR commit (rc=$rc victim_head $victim_head->$victim_head_after err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+
+root_head=$(git -C "$ROOT" rev-parse HEAD)
+root_index=$(git -C "$ROOT" ls-files -s)
+(
+  cd "$ROOT" &&
+    GIT_DIR="$VICTIM/.git" \
+    GIBSON_REAL_GIT="$(command -v git)" \
+    GIBSON_TARGET_REPO="$ROOT" \
+    GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+    "$GUARD" add README.md
+) >/dev/null 2>"$ROOT/err"
+rc=$?
+victim_head_after=$(git -C "$VICTIM" rev-parse HEAD)
+victim_index_after=$(git -C "$VICTIM" ls-files -s)
+root_head_after=$(git -C "$ROOT" rev-parse HEAD)
+root_index_after=$(git -C "$ROOT" ls-files -s)
+if [[ "$rc" -eq 86 && "$victim_head_after" == "$victim_head" && "$victim_index_after" == "$victim_index" && "$root_head_after" == "$root_head" && "$root_index_after" == "$root_index" ]] &&
+   grep -q "GIT_DIR names a different repository" "$ROOT/err"; then
+  ok "main checkout with foreign GIT_DIR: add exits 86 and the other repo is unchanged"
+else
+  bad "main checkout with foreign GIT_DIR add (rc=$rc victim_head $victim_head->$victim_head_after err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+
 if [[ "$FAIL" -eq 0 ]]; then
   echo "$PASS passed, $FAIL failed, $SKIP skipped"
   exit 0
