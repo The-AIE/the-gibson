@@ -13,9 +13,9 @@ Claude Code uses `~/.claude/skills`; Hermes uses `$HERMES_HOME/skills` (default 
 ```bash
 SKILLS_DIR="${SKILLS_DIR:-$HOME/.claude/skills}"   # Hermes: SKILLS_DIR="${HERMES_HOME:-$HOME/.hermes}/skills"
 tmp="$(mktemp -d)"
-git clone https://github.com/accoil/product-tracking-skills "$tmp/pts"
-git -C "$tmp/pts" checkout 91ae6a6267804e83a792b477f348d00c51d1a6cf
-mkdir -p "$SKILLS_DIR"
+git clone https://github.com/accoil/product-tracking-skills "$tmp/pts" &&
+git -C "$tmp/pts" checkout --detach 91ae6a6267804e83a792b477f348d00c51d1a6cf &&
+mkdir -p "$SKILLS_DIR" &&
 cp -R "$tmp/pts/skills/." "$SKILLS_DIR/"
 ```
 
