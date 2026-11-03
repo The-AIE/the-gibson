@@ -29,3 +29,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+Third-party product management skills (vendored 2026-11-03 for the StevieJ product-manager agent):
+.agents/skills/{write-spec,roadmap-update,stakeholder-update,metrics-review,sprint-planning,competitive-brief,synthesize-research,product-brainstorming}
+are from anthropics/knowledge-work-plugins (https://github.com/anthropics/knowledge-work-plugins/tree/main/product-management),
+used under the Apache License, Version 2.0 (full text: LICENSE at the repository root). Each folder's UPSTREAM.md records the
+pinned commit and the one change made (CONNECTORS.md copied into references/ and its link repointed).
