@@ -5,6 +5,6 @@
 - License: Apache-2.0 (full text: LICENSE at the repo root; this repo is Apache-2.0)
 - Copyright: Anthropic (authors of knowledge-work-plugins)
 - Vendored: 2026-11-03
-- Changes from upstream: none (verbatim copy).
+- Changes from upstream: Copied the plugin-level CONNECTORS.md into references/ (this skill's SKILL.md has no link to it, so SKILL.md is unchanged).
 
 To update: re-copy the folder from the source at a newer commit, re-apply the changes above, and bump the pinned commit here.
