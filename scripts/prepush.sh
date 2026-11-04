@@ -17,7 +17,11 @@ WHAT IT DOES
   login — FAIL on a declared lane, WARN/report-only on an undeclared checkout,
   where an owner commit resolves through independent review; SKIPPED with zero
   gh calls when origin is not the GH_HOST repository, since review-evidence is
-  GitHub-only), and the test suites
+  GitHub-only), the collision guards of scripts/scope-recheck.mjs (#568: changed
+  files vs the PR's Claim scope, a changed file in a lower-numbered live claim,
+  a docs/NN- number used twice across main and open PRs, a workflow with no
+  sensor-health policy; the three GitHub-reading ones are SKIPPED before the
+  branch has a claim PR), and the test suites
   your diff touches (a changed scripts/tests/X.test.sh, or scripts/X.{sh,mjs}
   with a scripts/tests/X.test.sh beside it; at most 6, each capped at 25s via
   PREPUSH_TEST_TIMEOUT, all together within PREPUSH_BUDGET seconds, default 55;
@@ -96,6 +100,9 @@ changed_files() {
 }
 CHANGED=$(changed_files)
 
+# scope_recheck MODE [args...] — the changed files go in on stdin, one definition of "changed".
+scope_recheck() { printf '%s\n' "$CHANGED" | node scripts/scope-recheck.mjs "$@"; }
+
 echo "prepush: base=$BASE changed=$(printf '%s\n' "$CHANGED" | grep -c . || true)"
 
 if command -v node >/dev/null 2>&1; then
@@ -106,6 +113,16 @@ fi
 run_probe mjs-unknown-flag cp_mjs_unknown_flag
 run_probe recipe-hash cp_recipe_hash_all
 run_probe agent-vendor cp_agent_vendor_walk "$BASE"
+
+# Collision guards (#568). A failed GitHub read is NOT RUN, never a pass.
+if command -v node >/dev/null 2>&1 && [[ -f scripts/scope-recheck.mjs ]]; then
+  run_probe claim-scope scope_recheck scope
+  run_probe docs-numbers scope_recheck docs-numbers --mine --base "$BASE"
+  run_probe workflows-registered scope_recheck workflows
+else
+  echo "  NOT RUN  claim-scope, docs-numbers, workflows-registered (node or scripts/scope-recheck.mjs missing)"
+  note_fail scope-recheck
+fi
 
 SH_CHANGED=()
 while IFS= read -r f; do
