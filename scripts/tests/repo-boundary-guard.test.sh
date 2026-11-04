@@ -1472,6 +1472,362 @@ git -C "$ROOT" reset -q HEAD 2>/dev/null || true
 git -C "$ROOT" checkout -q HEAD -- .agents/gate.json 2>/dev/null || true
 rm -f "$OTHER/ESCAPED.txt" "$ROOT/other-link"
 
+# --- storage overrides must not redirect index or object writes (#627) ------
+# GIT_INDEX_FILE and GIT_OBJECT_DIRECTORY on the published guard wrote the
+# victim from the target checkout, and from a linked worktree once that
+# worktree was inside the boundary. GIT_ALTERNATE_OBJECT_DIRECTORIES did not
+# by itself add a victim object in the release witness; it is still refused
+# so lookup cannot follow another store. Own index and own object directory
+# stay allowed. Refusal leaves both repositories' HEADs, the victim index,
+# and the victim object files unchanged, and does not stage into this checkout.
+
+if ! VICTIM_GITDIR=$(git -C "$VICTIM" rev-parse --absolute-git-dir); then
+  bad "storage setup: victim git dir unreadable"
+  VICTIM_GITDIR=""
+fi
+VICTIM_INDEX="$VICTIM_GITDIR/index"
+if ! VICTIM_OBJECTS=$(git -C "$VICTIM" rev-parse --path-format=absolute --git-path objects); then
+  bad "storage setup: victim objects unreadable"
+  VICTIM_OBJECTS=""
+fi
+if ! ROOT_INDEX=$(git -C "$ROOT" rev-parse --path-format=absolute --git-path index); then
+  bad "storage setup: root index path unreadable"
+  ROOT_INDEX=""
+fi
+if ! ROOT_OBJECTS=$(git -C "$ROOT" rev-parse --path-format=absolute --git-path objects); then
+  bad "storage setup: root objects path unreadable"
+  ROOT_OBJECTS=""
+fi
+if ! WT_INDEX=$(git -C "$WT" rev-parse --path-format=absolute --git-path index); then
+  bad "storage setup: worktree index path unreadable"
+  WT_INDEX=""
+fi
+if ! WT_OBJECTS=$(git -C "$WT" rev-parse --path-format=absolute --git-path objects); then
+  bad "storage setup: worktree objects path unreadable"
+  WT_OBJECTS=""
+fi
+if [[ -n "$ROOT_OBJECTS" && "$WT_OBJECTS" == "$ROOT_OBJECTS" ]]; then
+  ok "linked worktree shares the target object directory"
+else
+  bad "linked worktree object directory (root=$ROOT_OBJECTS wt=$WT_OBJECTS)"
+fi
+
+storage_digest() {
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  shasum -a 256 -- "$f"
+}
+
+storage_objects() {
+  local objects="$1"
+  [[ -d "$objects" ]] || return 1
+  find "$objects" -type f ! -name '*.lock' -print | sort
+}
+
+storage_head() {
+  git -C "$1" rev-parse HEAD
+}
+
+# 0 when stdout is empty, 1 when it has bytes, 2 when it cannot be read.
+storage_stdout_empty() {
+  [[ -f "$ROOT/out" ]] || return 2
+  [[ ! -s "$ROOT/out" ]]
+}
+
+# Refuse one storage override. mode selects the environment. Arguments after
+# mode are the guard command. Git failures while reading before/after state
+# are failures, not "unchanged".
+storage_refuse() {
+  local label="$1" cwd="$2" mode="$3"
+  shift 3
+  local rc vh vi vo rh ri wh wi vh2 vi2 vo2 rh2 ri2 wh2 wi2 phrase
+  if ! vh=$(storage_head "$VICTIM"); then
+    bad "$label: victim HEAD unreadable before"
+    return
+  fi
+  if ! rh=$(storage_head "$ROOT"); then
+    bad "$label: target HEAD unreadable before"
+    return
+  fi
+  if ! wh=$(storage_head "$WT"); then
+    bad "$label: worktree HEAD unreadable before"
+    return
+  fi
+  if ! vi=$(storage_digest "$VICTIM_INDEX"); then
+    bad "$label: victim index unreadable before"
+    return
+  fi
+  if ! ri=$(storage_digest "$ROOT_INDEX"); then
+    bad "$label: target index unreadable before"
+    return
+  fi
+  if ! wi=$(storage_digest "$WT_INDEX"); then
+    bad "$label: worktree index unreadable before"
+    return
+  fi
+  if ! vo=$(storage_objects "$VICTIM_OBJECTS"); then
+    bad "$label: victim objects unreadable before"
+    return
+  fi
+  (
+    cd "$cwd" || exit 97
+    unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR \
+      GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+    case "$mode" in
+      foreign-index) GIT_INDEX_FILE="$VICTIM_INDEX" ;;
+      foreign-objects) GIT_OBJECT_DIRECTORY="$VICTIM_OBJECTS" ;;
+      foreign-alternates) GIT_ALTERNATE_OBJECT_DIRECTORIES="$VICTIM_OBJECTS" ;;
+      foreign-all)
+        GIT_INDEX_FILE="$VICTIM_INDEX"
+        GIT_OBJECT_DIRECTORY="$VICTIM_OBJECTS"
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="$VICTIM_OBJECTS"
+        ;;
+      own-plus-foreign-alternates)
+        if [[ "$cwd" == "$WT" ]]; then
+          GIT_INDEX_FILE="$WT_INDEX"
+          GIT_OBJECT_DIRECTORY="$WT_OBJECTS"
+        else
+          GIT_INDEX_FILE="$ROOT_INDEX"
+          GIT_OBJECT_DIRECTORY="$ROOT_OBJECTS"
+        fi
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="$VICTIM_OBJECTS"
+        ;;
+      quoted-alternates)
+        GIT_ALTERNATE_OBJECT_DIRECTORIES=$(printf '"%s"' "$VICTIM_OBJECTS")
+        ;;
+      escaped-alternates)
+        GIT_ALTERNATE_OBJECT_DIRECTORIES=$(printf '%s\extra' "$VICTIM_OBJECTS")
+        ;;
+      cross-checkout-index) GIT_INDEX_FILE="$ROOT_INDEX" ;;
+      foreign-dir-and-index)
+        GIT_DIR="$VICTIM/.git"
+        GIT_INDEX_FILE="$VICTIM_INDEX"
+        ;;
+      *)
+        exit 98
+        ;;
+    esac
+    # Only the overrides this case set are exported. An empty assignment would
+    # be a set value and is a different guard input from an unset variable.
+    [[ "${GIT_DIR+x}" == x ]] && export GIT_DIR
+    [[ "${GIT_INDEX_FILE+x}" == x ]] && export GIT_INDEX_FILE
+    [[ "${GIT_OBJECT_DIRECTORY+x}" == x ]] && export GIT_OBJECT_DIRECTORY
+    [[ "${GIT_ALTERNATE_OBJECT_DIRECTORIES+x}" == x ]] && export GIT_ALTERNATE_OBJECT_DIRECTORIES
+    GIBSON_REAL_GIT="$(command -v git)" \
+      GIBSON_TARGET_REPO="$ROOT" \
+      GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+      "$GUARD" "$@"
+  ) >"$ROOT/out" 2>"$ROOT/err"
+  rc=$?
+  phrase=""
+  case "$mode" in
+    foreign-index) phrase="GIT_INDEX_FILE names a different index" ;;
+    foreign-objects) phrase="GIT_OBJECT_DIRECTORY names a different object store" ;;
+    foreign-alternates|own-plus-foreign-alternates|quoted-alternates|escaped-alternates)
+      phrase="GIT_ALTERNATE_OBJECT_DIRECTORIES names a different object store"
+      ;;
+    cross-checkout-index) phrase="GIT_INDEX_FILE names a different index" ;;
+    foreign-dir-and-index) phrase="GIT_DIR names a different repository" ;;
+  esac
+  if ! vh2=$(storage_head "$VICTIM"); then
+    bad "$label: victim HEAD unreadable after"
+    return
+  fi
+  if ! rh2=$(storage_head "$ROOT"); then
+    bad "$label: target HEAD unreadable after"
+    return
+  fi
+  if ! wh2=$(storage_head "$WT"); then
+    bad "$label: worktree HEAD unreadable after"
+    return
+  fi
+  if ! vi2=$(storage_digest "$VICTIM_INDEX"); then
+    bad "$label: victim index unreadable after"
+    return
+  fi
+  if ! ri2=$(storage_digest "$ROOT_INDEX"); then
+    bad "$label: target index unreadable after"
+    return
+  fi
+  if ! wi2=$(storage_digest "$WT_INDEX"); then
+    bad "$label: worktree index unreadable after"
+    return
+  fi
+  if ! vo2=$(storage_objects "$VICTIM_OBJECTS"); then
+    bad "$label: victim objects unreadable after"
+    return
+  fi
+  storage_stdout_empty
+  local empty_rc=$?
+  if [[ "$rc" -eq 86 && "$empty_rc" -eq 0 && "$vh2" == "$vh" && "$rh2" == "$rh" && "$wh2" == "$wh" && "$vi2" == "$vi" && "$ri2" == "$ri" && "$wi2" == "$wi" && "$vo2" == "$vo" ]] &&
+     grep -q "$phrase" "$ROOT/err"; then
+    ok "$label"
+  else
+    bad "$label (rc=$rc stdout_empty=$empty_rc victim_head $vh->$vh2 root_head $rh->$rh2 wt_head $wh->$wh2 index_changed=$([[ "$vi2" == "$vi" && "$ri2" == "$ri" && "$wi2" == "$wi" ]] && echo no || echo yes) objects_changed=$([[ "$vo2" == "$vo" ]] && echo no || echo yes) err=$(tr '\n' ' ' <"$ROOT/err"))"
+  fi
+}
+
+printf 'storage-escaped\n' > "$ROOT/STORAGE.txt"
+printf 'storage-escaped-wt\n' > "$WT/STORAGE.txt"
+storage_refuse "checkout foreign GIT_INDEX_FILE add" "$ROOT" foreign-index add STORAGE.txt
+storage_refuse "checkout foreign GIT_OBJECT_DIRECTORY add" "$ROOT" foreign-objects add STORAGE.txt
+storage_refuse "checkout foreign GIT_ALTERNATE_OBJECT_DIRECTORIES add" "$ROOT" foreign-alternates add STORAGE.txt
+storage_refuse "checkout combined foreign storage add" "$ROOT" foreign-all add STORAGE.txt
+storage_refuse "checkout own storage plus foreign alternates add" "$ROOT" own-plus-foreign-alternates add STORAGE.txt
+storage_refuse "checkout quoted alternate add" "$ROOT" quoted-alternates add STORAGE.txt
+storage_refuse "checkout escaped alternate add" "$ROOT" escaped-alternates add STORAGE.txt
+storage_refuse "checkout foreign GIT_DIR still wins over foreign index" "$ROOT" foreign-dir-and-index add STORAGE.txt
+storage_refuse "checkout foreign GIT_INDEX_FILE status" "$ROOT" foreign-index status --porcelain
+storage_refuse "checkout foreign GIT_OBJECT_DIRECTORY rev-parse" "$ROOT" foreign-objects rev-parse HEAD
+storage_refuse "linked worktree foreign GIT_INDEX_FILE add" "$WT" foreign-index add STORAGE.txt
+storage_refuse "linked worktree foreign GIT_OBJECT_DIRECTORY add" "$WT" foreign-objects add STORAGE.txt
+storage_refuse "linked worktree foreign GIT_ALTERNATE_OBJECT_DIRECTORIES add" "$WT" foreign-alternates add STORAGE.txt
+storage_refuse "linked worktree combined foreign storage add" "$WT" foreign-all add STORAGE.txt
+storage_refuse "linked worktree own storage plus foreign alternates add" "$WT" own-plus-foreign-alternates add STORAGE.txt
+storage_refuse "linked worktree foreign GIT_INDEX_FILE status" "$WT" foreign-index status --porcelain
+storage_refuse "linked worktree cross-checkout index add" "$WT" cross-checkout-index add STORAGE.txt
+cached_exact_name_status "$VICTIM" "STORAGE.txt"
+name_rc=$?
+if [[ "$name_rc" -eq 1 ]]; then
+  ok "victim index does not list STORAGE.txt after storage refusals"
+elif [[ "$name_rc" -eq 2 ]]; then
+  bad "victim diff --cached failed while checking STORAGE.txt absence"
+else
+  bad "victim index lists STORAGE.txt after storage refusals"
+fi
+cached_exact_name_status "$ROOT" "STORAGE.txt"
+name_rc=$?
+if [[ "$name_rc" -eq 1 ]]; then
+  ok "target index does not list STORAGE.txt after storage refusals"
+elif [[ "$name_rc" -eq 2 ]]; then
+  bad "target diff --cached failed while checking STORAGE.txt absence"
+else
+  bad "target index lists STORAGE.txt after storage refusals"
+fi
+cached_exact_name_status "$WT" "STORAGE.txt"
+name_rc=$?
+if [[ "$name_rc" -eq 1 ]]; then
+  ok "worktree index does not list STORAGE.txt after storage refusals"
+elif [[ "$name_rc" -eq 2 ]]; then
+  bad "worktree diff --cached failed while checking STORAGE.txt absence"
+else
+  bad "worktree index lists STORAGE.txt after storage refusals"
+fi
+
+# Own index, including the macOS /var logical alias of the same file, still
+# stages in this checkout and does not touch the victim.
+LOGICAL_ROOT_INDEX="$ROOT_INDEX"
+case "$ROOT_INDEX" in
+  /private/var/*) LOGICAL_ROOT_INDEX="/var/${ROOT_INDEX#/private/var/}" ;;
+esac
+victim_head_before=$(storage_head "$VICTIM") || victim_head_before=""
+root_head_before=$(storage_head "$ROOT") || root_head_before=""
+victim_index_before=$(storage_digest "$VICTIM_INDEX") || victim_index_before=""
+(
+  cd "$ROOT" &&
+    GIT_INDEX_FILE="$LOGICAL_ROOT_INDEX" \
+    GIBSON_REAL_GIT="$(command -v git)" \
+    GIBSON_TARGET_REPO="$ROOT" \
+    GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+    "$GUARD" add -- STORAGE.txt
+) >"$ROOT/out" 2>"$ROOT/err"
+rc=$?
+cached_exact_name_status "$ROOT" "STORAGE.txt"
+name_rc=$?
+victim_head_after=$(storage_head "$VICTIM") || victim_head_after="unreadable"
+victim_index_after=$(storage_digest "$VICTIM_INDEX") || victim_index_after="unreadable"
+root_head_after=$(storage_head "$ROOT") || root_head_after="unreadable"
+if [[ "$rc" -eq 0 && "$name_rc" -eq 0 && -n "$victim_head_before" && "$victim_head_after" == "$victim_head_before" && "$victim_index_after" == "$victim_index_before" && "$root_head_after" == "$root_head_before" ]]; then
+  ok "logical own GIT_INDEX_FILE still stages in the target (exit $rc)"
+else
+  bad "logical own GIT_INDEX_FILE (rc=$rc name_rc=$name_rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+git -C "$ROOT" reset -q -- STORAGE.txt 2>/dev/null || true
+
+wt_head_before=$(storage_head "$WT") || wt_head_before=""
+(
+  cd "$WT" &&
+    GIT_INDEX_FILE="$WT_INDEX" \
+    GIT_OBJECT_DIRECTORY="$WT_OBJECTS" \
+    GIBSON_REAL_GIT="$(command -v git)" \
+    GIBSON_TARGET_REPO="$ROOT" \
+    GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+    "$GUARD" add -- STORAGE.txt
+) >"$ROOT/out" 2>"$ROOT/err"
+rc=$?
+cached_exact_name_status "$WT" "STORAGE.txt"
+name_rc=$?
+wt_head_after=$(storage_head "$WT") || wt_head_after="unreadable"
+victim_head_after=$(storage_head "$VICTIM") || victim_head_after="unreadable"
+victim_index_after=$(storage_digest "$VICTIM_INDEX") || victim_index_after="unreadable"
+if [[ "$rc" -eq 0 && "$name_rc" -eq 0 && -n "$wt_head_before" && "$wt_head_after" == "$wt_head_before" && "$victim_head_after" == "$victim_head_before" && "$victim_index_after" == "$victim_index_before" ]]; then
+  ok "linked worktree own index and object directory still stage (exit $rc)"
+else
+  bad "linked worktree own storage (rc=$rc name_rc=$name_rc wt_head $wh->$wt_head_after err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+git -C "$WT" reset -q -- STORAGE.txt 2>/dev/null || true
+
+# Default dispatch with an empty alternate list matches a repo that has no
+# alternates file. Status must still run in this checkout.
+(
+  cd "$ROOT" &&
+    GIT_ALTERNATE_OBJECT_DIRECTORIES="" \
+    GIBSON_REAL_GIT="$(command -v git)" \
+    GIBSON_TARGET_REPO="$ROOT" \
+    GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+    "$GUARD" status --porcelain
+) >"$ROOT/out" 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 0 ]] && ! grep -q "GIT_ALTERNATE_OBJECT_DIRECTORIES" "$ROOT/err"; then
+  ok "empty alternate list still dispatches status (exit $rc)"
+else
+  bad "empty alternate list status (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+
+# Independently evaluated rollback must ignore a foreign index and object
+# store: unstage the target path, leave the victim byte-for-byte.
+printf 'storage-rollback-protected\n' > "$ROOT/.agents/gate.json"
+if ! git -C "$ROOT" add -- .agents/gate.json; then
+  bad "storage rollback: could not stage protected path with real git"
+else
+  cached_exact_name_status "$ROOT" ".agents/gate.json"
+  name_rc=$?
+  if [[ "$name_rc" -ne 0 ]]; then
+    bad "storage rollback: protected path was not staged before helper (name_rc=$name_rc)"
+  fi
+fi
+# shellcheck disable=SC2034
+REAL_GIT=$(command -v git)
+# shellcheck disable=SC2034
+current_root="$ROOT_PHYS"
+_protected_staged=(".agents/gate.json")
+eval "$(sed -n '/^rollback_protected_staged()/,/^}/p' "$GUARD")"
+victim_head_before=$(storage_head "$VICTIM") || victim_head_before=""
+root_head_before=$(storage_head "$ROOT") || root_head_before=""
+victim_index_before=$(storage_digest "$VICTIM_INDEX") || victim_index_before=""
+victim_objects_before=$(storage_objects "$VICTIM_OBJECTS") || victim_objects_before=""
+(
+  GIT_INDEX_FILE="$VICTIM_INDEX" \
+    GIT_OBJECT_DIRECTORY="$VICTIM_OBJECTS" \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES="$VICTIM_OBJECTS" \
+    rollback_protected_staged
+)
+cached_exact_name_status "$ROOT" ".agents/gate.json"
+name_rc=$?
+victim_head_after=$(storage_head "$VICTIM") || victim_head_after="unreadable"
+root_head_after=$(storage_head "$ROOT") || root_head_after="unreadable"
+victim_index_after=$(storage_digest "$VICTIM_INDEX") || victim_index_after="unreadable"
+victim_objects_after=$(storage_objects "$VICTIM_OBJECTS") || victim_objects_after="unreadable"
+cached_exact_name_status "$VICTIM" ".agents/gate.json"
+victim_name_rc=$?
+if [[ "$name_rc" -eq 1 && "$victim_name_rc" -eq 1 && -n "$victim_head_before" && "$victim_head_after" == "$victim_head_before" && "$root_head_after" == "$root_head_before" && "$victim_index_after" == "$victim_index_before" && "$victim_objects_after" == "$victim_objects_before" ]]; then
+  ok "rollback helper ignores foreign storage overrides and unstages the target"
+else
+  bad "storage rollback helper (name_rc=$name_rc victim_name_rc=$victim_name_rc victim_head $victim_head_before->$victim_head_after root_head $root_head_before->$root_head_after)"
+fi
+git -C "$ROOT" checkout -q HEAD -- .agents/gate.json 2>/dev/null || true
+rm -f "$ROOT/STORAGE.txt" "$WT/STORAGE.txt"
+
 if [[ "$FAIL" -eq 0 ]]; then
   echo "$PASS passed, $FAIL failed, $SKIP skipped"
   exit 0

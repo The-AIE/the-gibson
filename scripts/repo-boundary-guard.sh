@@ -9,18 +9,43 @@ REAL_GIT="${GIBSON_REAL_GIT:?}"
 TARGET_REPO="${GIBSON_TARGET_REPO:?}"
 EXPECTED_SLUG="${GIBSON_EXPECTED_REPO_SLUG:?}"
 
-# Drop caller repository overrides before any real git. A linked worktree of
-# the target is inside the boundary; add and commit would otherwise keep
-# GIT_DIR and advance the other repository. Unsetting alone would retarget
-# that add onto this worktree (exit 0). When an override names a different
-# repository, refuse with 86. Cleared again on every real_git call.
+# Drop caller repository-location and storage overrides before any real git.
+# A linked worktree of the target is inside the boundary. Leaving GIT_DIR,
+# GIT_INDEX_FILE, or GIT_OBJECT_DIRECTORY set lets add and commit write the
+# other repository; GIT_ALTERNATE_OBJECT_DIRECTORIES redirects object lookup.
+# Unsetting alone would retarget the refused command onto this checkout
+# (exit 0). When an override is foreign or unsupported, refuse with 86.
+# Cleared again on every real git call. The rollback helper repeats the
+# same clear: tests eval that function by itself.
 _caller_git_dir=${GIT_DIR-}
 _caller_git_work_tree=${GIT_WORK_TREE-}
 _caller_git_common_dir=${GIT_COMMON_DIR-}
-unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
+_caller_git_index_file_set=0
+_caller_git_index_file=
+_caller_git_object_directory_set=0
+_caller_git_object_directory=
+_caller_git_alternate_object_directories_set=0
+_caller_git_alternate_object_directories=
+if [[ "${GIT_INDEX_FILE+x}" == x ]]; then
+  _caller_git_index_file_set=1
+  _caller_git_index_file=$GIT_INDEX_FILE
+fi
+if [[ "${GIT_OBJECT_DIRECTORY+x}" == x ]]; then
+  _caller_git_object_directory_set=1
+  _caller_git_object_directory=$GIT_OBJECT_DIRECTORY
+fi
+if [[ "${GIT_ALTERNATE_OBJECT_DIRECTORIES+x}" == x ]]; then
+  _caller_git_alternate_object_directories_set=1
+  _caller_git_alternate_object_directories=$GIT_ALTERNATE_OBJECT_DIRECTORIES
+fi
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR \
+  GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 real_git() {
-  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR "${REAL_GIT}" "$@"
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+    -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+    -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    "${REAL_GIT}" "$@"
 }
 
 # Physical path of an existing directory (macOS /var vs /private/var, symlinks).
@@ -29,6 +54,39 @@ physical_dir() {
   local path="$1"
   [[ -n "$path" && -d "$path" ]] || return 1
   (CDPATH='' cd -- "$path" && pwd -P) 2>/dev/null || return 1
+}
+
+# Physical path of a file or directory. Relative paths resolve from $PWD.
+# A missing index file is still named when its parent directory exists, so a
+# not-yet-created index can be compared. Fail closed when the parent cannot.
+physical_path() {
+  local path="$1" dir base
+  [[ -n "$path" ]] || return 1
+  case "$path" in
+    /*) ;;
+    *) path="$PWD/$path" ;;
+  esac
+  if [[ -d "$path" ]]; then
+    physical_dir "$path"
+    return
+  fi
+  dir=$(dirname -- "$path")
+  base=$(basename -- "$path")
+  [[ -n "$base" && "$base" != "." && "$base" != ".." ]] || return 1
+  dir=$(physical_dir "$dir") || return 1
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+# Storage path this checkout uses once location and storage overrides are
+# unset (index file, or the shared objects directory).
+checkout_storage_path() {
+  local name="$1" raw
+  raw=$(real_git -C "$PWD" rev-parse --path-format=absolute --git-path "$name" 2>/dev/null || true)
+  if [[ -z "$raw" || "$raw" != /* ]]; then
+    raw=$(real_git -C "$PWD" rev-parse --git-path "$name" 2>/dev/null) || return 1
+  fi
+  [[ -n "$raw" ]] || return 1
+  physical_path "$raw"
 }
 
 repo_root() {
@@ -140,6 +198,79 @@ refuse_foreign_git_env() {
   fi
 }
 
+# Physical alternate directories already configured for this checkout, one per
+# line. A missing objects/info/alternates file means there are none. Quoted
+# or escaped entries are unsupported and fail closed.
+configured_alternate_dirs() {
+  local objects altfile line path
+  objects=$(checkout_storage_path objects) || return 1
+  altfile="$objects/info/alternates"
+  [[ -f "$altfile" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      *\"*|*\\*) return 1 ;;
+      /*) path="$line" ;;
+      *) path="$objects/$line" ;;
+    esac
+    physical_dir "$path" || return 1
+  done <"$altfile"
+}
+
+# Colon-separated GIT_ALTERNATE_OBJECT_DIRECTORIES. Quoted and escaped values
+# are unsupported. An empty component fails closed.
+caller_alternate_dirs() {
+  local raw="$1" rest part
+  case "$raw" in
+    *\"*|*\\*) return 1 ;;
+  esac
+  [[ -n "$raw" ]] || return 0
+  rest="$raw"
+  while [[ -n "$rest" ]]; do
+    part="${rest%%:*}"
+    if [[ "$rest" == *:* ]]; then
+      rest="${rest#*:}"
+    else
+      rest=""
+    fi
+    [[ -n "$part" ]] || return 1
+    physical_dir "$part" || return 1
+  done
+}
+
+# Exit 86 when a storage override would redirect this checkout. The variables
+# are already unset, so identity checks did not follow them. A value that is
+# exactly this checkout's own index or object directory is not a redirect.
+# Any other index, object directory, or alternate list is foreign or
+# unsupported: refuse before add, commit, scan, rollback, or dispatch.
+refuse_foreign_storage_env() {
+  local expected caller expected_alts caller_alts
+  if [[ "${_caller_git_index_file_set}" -eq 1 ]]; then
+    expected=$(checkout_storage_path index) ||
+      fail "GIT_INDEX_FILE set but this repository index could not be resolved"
+    caller=$(physical_path "${_caller_git_index_file}") ||
+      fail "GIT_INDEX_FILE names a different index"
+    [[ "$caller" == "$expected" ]] ||
+      fail "GIT_INDEX_FILE names a different index"
+  fi
+  if [[ "${_caller_git_object_directory_set}" -eq 1 ]]; then
+    expected=$(checkout_storage_path objects) ||
+      fail "GIT_OBJECT_DIRECTORY set but this repository object store could not be resolved"
+    caller=$(physical_path "${_caller_git_object_directory}") ||
+      fail "GIT_OBJECT_DIRECTORY names a different object store"
+    [[ "$caller" == "$expected" ]] ||
+      fail "GIT_OBJECT_DIRECTORY names a different object store"
+  fi
+  if [[ "${_caller_git_alternate_object_directories_set}" -eq 1 ]]; then
+    expected_alts=$(configured_alternate_dirs | sort) ||
+      fail "GIT_ALTERNATE_OBJECT_DIRECTORIES set but this repository alternates could not be resolved"
+    caller_alts=$(caller_alternate_dirs "${_caller_git_alternate_object_directories}" | sort) ||
+      fail "GIT_ALTERNATE_OBJECT_DIRECTORIES names a different object store"
+    [[ "$caller_alts" == "$expected_alts" ]] ||
+      fail "GIT_ALTERNATE_OBJECT_DIRECTORIES names a different object store"
+  fi
+}
+
 target_root="$(resolve_target_root || true)"
 [[ -n "$target_root" ]] ||
   fail "configured target repo could not be resolved: '$TARGET_REPO'"
@@ -155,6 +286,7 @@ if [[ -z "$current_root" || "$current_root" != "$target_root" ]]; then
   fi
 fi
 refuse_foreign_git_env
+refuse_foreign_storage_env
 
 protected_path() {
   case "$1" in
@@ -339,17 +471,23 @@ rollback_protected_staged() {
   for path in "${_protected_staged[@]}"; do
     # "$REAL_GIT" directly, not real_git: the literal-pathspec sensor evals
     # this function alone and only exports REAL_GIT. Still drop the caller's
-    # repository overrides before the call.
+    # repository-location and storage overrides before the call.
     if ! env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+         -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+         -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
          "$REAL_GIT" -C "$current_root" reset -q -- ":(literal)${path}" 2>/dev/null; then
       # Index-only fallback; --ignore-unmatch keeps a missing entry non-fatal.
       env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+        -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+        -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
         "$REAL_GIT" -C "$current_root" rm -q --cached --ignore-unmatch -- \
         ":(literal)${path}" 2>/dev/null || true
     fi
     # still != 0: staged difference remains (1) or git could not check (e.g. 128).
     still=0
     env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+      -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+      -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
       "$REAL_GIT" -C "$current_root" diff --cached --quiet -- ":(literal)${path}" \
       2>/dev/null || still=$?
     if [[ "$still" -ne 0 ]]; then
@@ -468,6 +606,9 @@ case "${1-}" in
     check_push "${@:2}"
     ;;
   *)
-    exec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR "${REAL_GIT}" "$@"
+    exec env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+      -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+      -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+      "${REAL_GIT}" "$@"
     ;;
 esac
