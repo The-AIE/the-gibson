@@ -436,7 +436,17 @@ origin_slug_from_url() {
   printf '%s/%s\n' "$owner" "$name"
 }
 
+# Dispatch reads only the first argument. A leading global option
+# (`-C <path>`, `--git-dir`, `--work-tree`, `-c`, `--bare`, `--`, and any
+# other form) used to fall through to real git, so the add and commit checks
+# never ran. The cwd check does not see that destination: a foreign path was
+# written, and a path inside this repository still staged control-plane files.
+# Refuse every leading global option before real git. A command whose first
+# argument is the subcommand is unchanged.
 case "${1-}" in
+  -*)
+    fail "leading git global option '${1-}' is not allowed; pass the subcommand first"
+    ;;
   add|commit)
     if [[ "$1" == "commit" ]]; then
       check_staged_control_plane || exit 86

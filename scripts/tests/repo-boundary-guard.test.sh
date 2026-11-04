@@ -1302,6 +1302,176 @@ else
   bad "main checkout with foreign GIT_DIR add (rc=$rc victim_head $victim_head->$victim_head_after err=$(tr '\n' ' ' <"$ROOT/err"))"
 fi
 
+# --- leading global options must not skip add/commit guards (#627) ----------
+# Dispatch used to read only $1. From inside the target, `git -C <other> add`
+# staged into that repository, and `git -C <target> add .agents/gate.json`
+# staged the control-plane file. Both returned 0. Commit with a leading -C
+# likewise skipped the staged-file check. Every leading global option now
+# exits 86 before real git. Subcommand-first commands stay allowed.
+
+capture_guard_state() {
+  G_ROOT_HEAD=$(git -C "$ROOT" rev-parse HEAD)
+  G_ROOT_INDEX=$(git -C "$ROOT" ls-files -s)
+  G_OTHER_HEAD=$(git -C "$OTHER" rev-parse HEAD)
+  G_OTHER_INDEX=$(git -C "$OTHER" ls-files -s)
+  G_WT_HEAD=$(git -C "$WT" rev-parse HEAD)
+  G_WT_INDEX=$(git -C "$WT" ls-files -s)
+}
+
+restore_guard_state() {
+  git -C "$ROOT" reset -q "$G_ROOT_HEAD" 2>/dev/null || true
+  git -C "$OTHER" reset -q "$G_OTHER_HEAD" 2>/dev/null || true
+  git -C "$WT" reset -q "$G_WT_HEAD" 2>/dev/null || true
+  capture_guard_state
+}
+
+# label, cwd, then the guard arguments. Assert exit 86, empty stdout, and
+# unchanged HEAD plus index in the target, the other repo, and the worktree.
+reject_leading_global() {
+  local label="$1" cwd="$2" rc rh ri oh oi wh wi
+  shift 2
+  run_guard_in "$cwd" "$ROOT" "$@" >"$ROOT/out" 2>"$ROOT/err"
+  rc=$?
+  rh=$(git -C "$ROOT" rev-parse HEAD)
+  ri=$(git -C "$ROOT" ls-files -s)
+  oh=$(git -C "$OTHER" rev-parse HEAD)
+  oi=$(git -C "$OTHER" ls-files -s)
+  wh=$(git -C "$WT" rev-parse HEAD)
+  wi=$(git -C "$WT" ls-files -s)
+  idx_note=""
+  [[ "$ri" == "$G_ROOT_INDEX" ]] || idx_note="${idx_note} root-index"
+  [[ "$oi" == "$G_OTHER_INDEX" ]] || idx_note="${idx_note} other-index"
+  [[ "$wi" == "$G_WT_INDEX" ]] || idx_note="${idx_note} wt-index"
+  if [[ -s "$ROOT/out" ]]; then
+    REJECT_CLEAN=0
+    bad "$label produced stdout ($(tr '\n' ' ' <"$ROOT/out"))"
+    restore_guard_state
+    return
+  fi
+  if [[ "$rc" -eq 86 && -z "$idx_note" && "$rh" == "$G_ROOT_HEAD" && "$oh" == "$G_OTHER_HEAD" && "$wh" == "$G_WT_HEAD" ]] &&
+     grep -q "leading git global option" "$ROOT/err"; then
+    REJECT_CLEAN=1
+    ok "$label"
+  else
+    REJECT_CLEAN=0
+    bad "$label (rc=$rc root $G_ROOT_HEAD->$rh other $G_OTHER_HEAD->$oh wt $G_WT_HEAD->$wh changed:${idx_note:-none} err=$(tr '\n' ' ' <"$ROOT/err") staged_other=$(git -C "$OTHER" diff --cached --name-only | tr '\n' ' ') staged_root=$(git -C "$ROOT" diff --cached --name-only | tr '\n' ' ') staged_wt=$(git -C "$WT" diff --cached --name-only | tr '\n' ' '))"
+    restore_guard_state
+  fi
+}
+
+# 0 when $2 is an exact cached name, 1 when the index was read and the name
+# is absent, 2 when git diff failed. A piped quiet grep is L-077.
+cached_exact_name_status() {
+  local repo="$1" want="$2" name names
+  names=$(git -C "$repo" diff --cached --name-only) || return 2
+  while IFS= read -r name; do
+    [[ "$name" == "$want" ]] && return 0
+  done <<< "$names"
+  return 1
+}
+
+# Legitimate operations whose first argument is the subcommand.
+printf 'legit-after-global-option-fix\n' > "$ROOT/README.md"
+run_guard add -- README.md >"$ROOT/out" 2>"$ROOT/err"
+rc=$?
+legit_blob=$(git -C "$ROOT" rev-parse :README.md 2>/dev/null || true)
+cached_exact_name_status "$ROOT" "README.md"
+name_rc=$?
+if [[ "$rc" -eq 0 && -n "$legit_blob" && "$name_rc" -eq 0 ]]; then
+  ok "subcommand-first add -- README.md still stages (exit $rc)"
+else
+  bad "subcommand-first add -- README.md (rc=$rc blob=$legit_blob err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+git -C "$ROOT" reset -q 2>/dev/null || true
+git -C "$ROOT" checkout -q -- README.md 2>/dev/null || true
+
+run_guard status --porcelain >"$ROOT/out" 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 0 ]] && ! grep -q "leading git global option" "$ROOT/err"; then
+  ok "subcommand-first status --porcelain still exits 0"
+else
+  bad "subcommand-first status --porcelain (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+
+printf 'wt-legit-file\n' > "$WT/WT-LEGIT.txt"
+run_guard_in "$WT" "$ROOT" add -- WT-LEGIT.txt >"$ROOT/out" 2>"$ROOT/err"
+rc=$?
+wt_legit_blob=$(git -C "$WT" rev-parse :WT-LEGIT.txt 2>/dev/null || true)
+cached_exact_name_status "$WT" "WT-LEGIT.txt"
+name_rc=$?
+if [[ "$rc" -eq 0 && -n "$wt_legit_blob" && "$name_rc" -eq 0 ]]; then
+  ok "linked worktree subcommand-first add still stages (exit $rc)"
+else
+  bad "linked worktree subcommand-first add (rc=$rc blob=$wt_legit_blob err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+git -C "$WT" reset -q 2>/dev/null || true
+rm -f "$WT/WT-LEGIT.txt"
+
+mkdir -p "$ROOT/.agents" "$WT/.agents"
+printf 'bypass-gate\n' > "$ROOT/.agents/gate.json"
+printf 'bypass-wt-gate\n' > "$WT/.agents/gate.json"
+printf 'escaped-other\n' > "$OTHER/ESCAPED.txt"
+ln -sfn "$OTHER" "$ROOT/other-link"
+capture_guard_state
+REJECT_CLEAN=0
+
+reject_leading_global "foreign -C add does not stage into the other repo" "$ROOT" -C "$OTHER" add ESCAPED.txt
+cached_exact_name_status "$OTHER" "ESCAPED.txt"
+name_rc=$?
+if [[ "$REJECT_CLEAN" -eq 1 && -f "$OTHER/ESCAPED.txt" && "$name_rc" -eq 1 ]]; then
+  ok "foreign -C add left ESCAPED.txt untracked on disk"
+else
+  bad "foreign -C add filesystem/index (clean=$REJECT_CLEAN staged=$(git -C "$OTHER" diff --cached --name-only | tr '\n' ' '))"
+fi
+
+reject_leading_global "stuck -Cpath add does not stage into the other repo" "$ROOT" -C"$OTHER" add ESCAPED.txt
+reject_leading_global "relative symlink -C add does not stage into the other repo" "$ROOT" -C other-link add ESCAPED.txt
+reject_leading_global "--git-dir= add does not stage into the other repo" "$ROOT" --git-dir="$OTHER/.git" add ESCAPED.txt
+reject_leading_global "--git-dir --work-tree add does not stage into the other repo" "$ROOT" --git-dir "$OTHER/.git" --work-tree "$OTHER" add ESCAPED.txt
+reject_leading_global "-c then -C add does not stage into the other repo" "$ROOT" -c user.name=bypass -C "$OTHER" add ESCAPED.txt
+reject_leading_global "-C then -c add does not stage into the other repo" "$ROOT" -C "$OTHER" -c user.name=bypass add ESCAPED.txt
+reject_leading_global "-p then -C add does not stage into the other repo" "$ROOT" -p -C "$OTHER" add ESCAPED.txt
+reject_leading_global "--bare before -C add does not stage into the other repo" "$ROOT" --bare -C "$OTHER" add ESCAPED.txt
+reject_leading_global "linked worktree cwd with foreign -C add does not stage" "$WT" -C "$OTHER" add ESCAPED.txt
+
+reject_leading_global "same-repo -C add does not stage .agents/gate.json" "$ROOT" -C "$ROOT" add .agents/gate.json
+cached_exact_name_status "$ROOT" ".agents/gate.json"
+name_rc=$?
+if [[ "$REJECT_CLEAN" -eq 1 && -f "$ROOT/.agents/gate.json" && "$name_rc" -eq 1 ]]; then
+  ok "same-repo -C add left .agents/gate.json unstaged on disk"
+else
+  bad "same-repo -C add filesystem/index (clean=$REJECT_CLEAN staged=$(git -C "$ROOT" diff --cached --name-only | tr '\n' ' '))"
+fi
+reject_leading_global "same-repo -C . add does not stage .agents/gate.json" "$ROOT" -C . add .agents/gate.json
+reject_leading_global "same-repo subdirectory -C add does not stage .agents/gate.json" "$ROOT" -C "$ROOT/nested-sub" add ../.agents/gate.json
+reject_leading_global "linked-worktree -C add does not stage .agents/gate.json" "$ROOT" -C "$WT" add .agents/gate.json
+reject_leading_global "linked worktree cwd -C self add does not stage .agents/gate.json" "$WT" -C "$WT" add .agents/gate.json
+reject_leading_global "leading -- before add does not stage .agents/gate.json" "$ROOT" -- add .agents/gate.json
+reject_leading_global "--exec-path before status is refused" "$ROOT" --exec-path "$ROOT" status
+
+# A tracked control-plane edit committed via `git -C <target> commit` used to
+# skip check_staged_control_plane. Refuse it; HEAD and the index stay put.
+if ! git -C "$ROOT" cat-file -e 'HEAD:.agents/gate.json' 2>/dev/null; then
+  printf 'tracked-seed\n' > "$ROOT/.agents/gate.json"
+  git -C "$ROOT" add .agents/gate.json
+  git -C "$ROOT" commit -qm 'seed gate for global-option commit probe'
+fi
+printf 'dirty-for-dash-c-commit\n' > "$ROOT/.agents/gate.json"
+git -C "$ROOT" add .agents/gate.json
+capture_guard_state
+seed_blob=$(git -C "$ROOT" rev-parse 'HEAD:.agents/gate.json')
+reject_leading_global "same-repo -C commit does not move HEAD" "$ROOT" -C "$ROOT" commit -m 'bypass control plane'
+head_blob=$(git -C "$ROOT" rev-parse 'HEAD:.agents/gate.json' 2>/dev/null || true)
+if [[ "$REJECT_CLEAN" -eq 1 && "$head_blob" == "$seed_blob" && -f "$ROOT/.agents/gate.json" ]] &&
+   grep -qx 'dirty-for-dash-c-commit' "$ROOT/.agents/gate.json"; then
+  ok "same-repo -C commit left HEAD blob and the dirty worktree file"
+else
+  bad "same-repo -C commit filesystem (clean=$REJECT_CLEAN head_blob=$head_blob seed_blob=$seed_blob)"
+fi
+git -C "$ROOT" reset -q HEAD 2>/dev/null || true
+git -C "$ROOT" checkout -q HEAD -- .agents/gate.json 2>/dev/null || true
+rm -f "$OTHER/ESCAPED.txt" "$ROOT/other-link"
+
 if [[ "$FAIL" -eq 0 ]]; then
   echo "$PASS passed, $FAIL failed, $SKIP skipped"
   exit 0
