@@ -1828,6 +1828,41 @@ fi
 git -C "$ROOT" checkout -q HEAD -- .agents/gate.json 2>/dev/null || true
 rm -f "$ROOT/STORAGE.txt" "$WT/STORAGE.txt"
 
+# --- allowed push reaches the remote ----------------------------------------
+# Every push sensor above checks a refusal. This one checks that an allowed push
+# actually lands: check_push receives the arguments after `push`, so it must
+# hand `push` back to real git. Without it, `git push origin main` runs as
+# `git origin main` and every allowed push fails. The configured URL matches
+# the expected slug; insteadOf sends the transfer to a local bare repository.
+PUSH_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-repo-guard-push.XXXXXX")
+PUSH_BARE=$(mktemp -d "${TMPDIR:-/tmp}/gibson-repo-guard-bare.XXXXXX")
+trap 'rm -rf "$ROOT" "$PUSH_ROOT" "$PUSH_BARE"' EXIT
+git -C "$PUSH_BARE" init -q --bare
+git -C "$PUSH_ROOT" init -q -b main
+git -C "$PUSH_ROOT" config user.email test@gibson.invalid
+git -C "$PUSH_ROOT" config user.name gibson-test
+printf 'push base\n' > "$PUSH_ROOT/README.md"
+git -C "$PUSH_ROOT" add README.md
+git -C "$PUSH_ROOT" commit -qm 'push base'
+git -C "$PUSH_ROOT" remote add origin https://github.com/acme/app.git
+git -C "$PUSH_ROOT" config "url.$PUSH_BARE.insteadOf" https://github.com/acme/app.git
+git -C "$PUSH_ROOT" switch -q -c feat/allowed-push
+run_guard_in "$PUSH_ROOT" "$PUSH_ROOT" push -u origin feat/allowed-push >/dev/null 2>"$ROOT/err"
+rc=$?
+pushed_tip=$(git -C "$PUSH_BARE" rev-parse --verify -q refs/heads/feat/allowed-push 2>/dev/null || true)
+local_tip=$(git -C "$PUSH_ROOT" rev-parse HEAD)
+if [[ "$rc" -eq 0 && -n "$pushed_tip" && "$pushed_tip" == "$local_tip" ]]; then
+  ok "allowed push reaches the expected remote (exit $rc)"
+else
+  bad "allowed push (rc=$rc pushed=${pushed_tip:-none} local=$local_tip err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+upstream_ref=$(git -C "$PUSH_ROOT" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
+if [[ "$upstream_ref" == "origin/feat/allowed-push" ]]; then
+  ok "allowed push keeps its flags (-u sets upstream)"
+else
+  bad "allowed push flags (upstream=${upstream_ref:-none})"
+fi
+
 if [[ "$FAIL" -eq 0 ]]; then
   echo "$PASS passed, $FAIL failed, $SKIP skipped"
   exit 0
