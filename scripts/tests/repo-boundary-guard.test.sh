@@ -1596,7 +1596,7 @@ storage_refuse() {
         GIT_ALTERNATE_OBJECT_DIRECTORIES=$(printf '"%s"' "$VICTIM_OBJECTS")
         ;;
       escaped-alternates)
-        GIT_ALTERNATE_OBJECT_DIRECTORIES=$(printf '%s\extra' "$VICTIM_OBJECTS")
+        GIT_ALTERNATE_OBJECT_DIRECTORIES="${VICTIM_OBJECTS}\\extra"
         ;;
       cross-checkout-index) GIT_INDEX_FILE="$ROOT_INDEX" ;;
       foreign-dir-and-index)
@@ -1763,7 +1763,7 @@ victim_index_after=$(storage_digest "$VICTIM_INDEX") || victim_index_after="unre
 if [[ "$rc" -eq 0 && "$name_rc" -eq 0 && -n "$wt_head_before" && "$wt_head_after" == "$wt_head_before" && "$victim_head_after" == "$victim_head_before" && "$victim_index_after" == "$victim_index_before" ]]; then
   ok "linked worktree own index and object directory still stage (exit $rc)"
 else
-  bad "linked worktree own storage (rc=$rc name_rc=$name_rc wt_head $wh->$wt_head_after err=$(tr '\n' ' ' <"$ROOT/err"))"
+  bad "linked worktree own storage (rc=$rc name_rc=$name_rc wt_head $wt_head_before->$wt_head_after err=$(tr '\n' ' ' <"$ROOT/err"))"
 fi
 git -C "$WT" reset -q -- STORAGE.txt 2>/dev/null || true
 
