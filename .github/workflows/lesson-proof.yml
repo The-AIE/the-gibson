@@ -1,0 +1,29 @@
+name: Lesson proof
+
+# Advisory replay of closed-lesson proofs (#570).
+# The job stays green. It does not set a commit status and does not post a comment.
+# Reviewer: this workflow file is new. Diff it first.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lesson-proof-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lesson-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Report lesson proofs
+        run: node scripts/lesson-proof.mjs
