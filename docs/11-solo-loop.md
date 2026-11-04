@@ -47,7 +47,7 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 │   ── context reset ──
 │   6. REVIEW    lens review of the PR; Tier C → cross-vendor if  [reviewer hat]
 │                REVIEWER_CMD is set, else adversarial self-pass
-│                + flag for human merge gate
+│                + flag Tier C for E3 (D-015)
 │   ── context reset ──
 │   7. UX-EVAL   Playwright vs. the PR's preview deployment       [ux-evaluator hat]
 │   8. SECURITY  CI layers run on the PR automatically; read      [security hat]
@@ -55,8 +55,10 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 │   9. RESOLVE   REQUEST_CHANGES? → back to 4 (bounded: 3 rounds, [builder hat]
 │                then park the PR + write a handoff note)
 │  10. MERGE     if gates green and NOT human-gated → merge,      [release hat]
-│                verify deploy, smoke, cleanup. Human-gated →
-│                queue it for Mark, move on.
+│                verify deploy, smoke, cleanup. Tier C merges once
+│                E3 (exact head) + required checks are met (D-015).
+│                Human-gated (e.g. G6 billing, schema) → queue it
+│                for Mark, move on.
 │  11. RETRO     any lesson? file it; harness fix if small        [historian hat]
 │  12. JOURNAL   append loop-state.md: what/why/next; report to AK
 └── 13. REPEAT   next issue. Stop only for: human gate on ALL remaining work,
@@ -245,7 +247,7 @@ compare against a stale baseline.
   paths suppress Devin supervisor handoffs
   ([doc 22](22-devin-cloud-supervisor.md)). Origin forms: `https://`,
   `git@host:`, or `ssh://git@host/...` on the configured `GH_HOST`.
-- **Human-gate queue:** Tier C merges and other stops accumulate in a digest
+- **Human-gate queue:** owner decisions (e.g. G6 billing merges, schema) and other stops accumulate in a digest
   (Hermes pings Mark) instead of blocking the loop — the loop moves to the next
   issue and circles back after approval.
 - **Heartbeat:** every iteration reports to Agent Kontrol; 15 minutes of silence
@@ -320,7 +322,7 @@ installed and no second vendor is available, run:
 | Law 5 | Different vendor | Fresh context + alt model counts as present reviewer |
 | Escalation | `--reviewers codex,claude` | Same-vendor alt-model second opinion (no deadlock) |
 | Tier B | One independent APPROVE | Prefer **two** independent fresh-context APPROVE verdicts when available |
-| Tier C | Human gate (docs/14 G12) | **Unchanged** — still human-gated |
+| Tier C | G12 floor: E3 cross-vendor review at the exact head + required checks (D-015) | **Unchanged** — same-vendor review cannot meet E3; Tier C waits for a cross-vendor reviewer |
 | Missing review path | Fail closed (block handoff) | Fail closed only if the configured solo review path itself breaks |
 
 Default `--reviewers` under `--solo-platform` becomes `<runner>:review` (e.g.

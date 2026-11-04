@@ -35,8 +35,10 @@ it up at stage 2.
 ## 2. Your approval queue (human gates)
 
 Agents stop only for the 16 gates in [docs/14-human-gates.md](docs/14-human-gates.md)
-— destructive ops, money, outward-facing sends/launches, scope breaks, Tier C
-merges, credentials. Everything else proceeds without you.
+— destructive ops, money (including billing/pricing/payment merges, G6),
+outward-facing sends/launches, scope breaks, credentials. Tier C merges clear on
+E3 cross-vendor review at the exact head plus required checks (G12 floor, D-015)
+with no owner step. Everything else proceeds without you.
 
 You'll get gate requests batched in the digest (below) and as PR comments tagged
 `@mrhinkle` with **exactly one decision** stated. Answer on the PR or via Hermes;
@@ -151,12 +153,17 @@ Different agents (or fresh solo-loop hats):
 | UX (if UI) | `playbooks/ux-evaluator.md` | `BASE_URL=$(scripts/preview-url.sh N)` + Playwright |
 | Security | `playbooks/security.md` + CI | layers table on PR |
 
-You only intervene for Tier C / schema (G12) or other [human gates](docs/14-human-gates.md).
+Tier C clears on cross-vendor review at the exact head plus green required checks
+(G12 floor, D-015), with no owner step. You only intervene for the
+[human gates](docs/14-human-gates.md) — for example G6 billing/pricing/payment code,
+G1 destructive schema changes, or the one-schema-merge-in-flight rule.
 
 ### 7.6 Merge + deploy + cleanup (release hat)
 
 ```bash
-# After APPROVE + CI green + (if Tier C) your approval comment:
+# After APPROVE + CI green; Tier C also needs the G12 floor (E3 cross-vendor review
+# at this exact head + required checks, D-015) — no owner comment for Tier C alone.
+# Billing/pricing/payment code (G6) or an explicit owner hold still waits for the owner.
 gh pr merge 88 --squash --delete-branch
 # verify Vercel READY for the merge commit; smoke happy path
 ~/Code/the-gibson/scripts/release-claim.sh 102
@@ -185,7 +192,8 @@ Same pipeline, one runner:
 | Start a feature | Brief → approve PLAN.md |
 | Quick fix | Issue with acceptance criteria |
 | See status | AK dashboard / digest / `gh issue list -l gibson` |
-| Approve a Tier C merge | Reply on the PR (G12) |
+| Tier C merge | No action: E3 review at the exact head plus required checks clear it (G12 floor, D-015) |
+| Approve a billing/pricing/payment merge | Reply on the PR (G6) |
 | Stop everything on a repo | `gibson-halt` label |
 | Overnight grind | `scripts/loop.sh --runner grok` |
 | Teach the fleet | PR a lesson to `memory/LESSONS.md` |

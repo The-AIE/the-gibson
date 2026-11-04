@@ -34,7 +34,7 @@ loop path by `loop-handoff` and `second-opinion.sh`. On the interactive path it 
 prose: over 2026-08-15 → 09-04, 16 of 34 merges carried no cross-vendor verdict on
 GitHub and 8 had no review event at all. `.github/workflows/pr-review-evidence.yml`
 + `scripts/pr-review-evidence.mjs` publish a `review-evidence` commit status on every
-PR head. Making it a required check is the owner's call (G12):
+PR head. Making it a required check is the owner's call (G14, an approval only a human holds):
 
 ```bash
 gh api -X PATCH repos/The-AIE/the-gibson/branches/main/protection/required_status_checks \

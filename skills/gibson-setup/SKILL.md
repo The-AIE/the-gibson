@@ -70,8 +70,10 @@ for free.
    yes** (needs `DEVIN_API_KEY`; set `DEVIN_MAX_ACU` as the cap). Optional
    webhook wake per `adapters/devin/README.md`. Devin = merge captain: reviews
    finished branches and owns PRs; it merges only in the explicit `--merge`
-   handoff mode (docs/22) — the default leaves every merge to a human. Tier C
-   ends at the human gate in every mode (Law 7).
+   handoff mode (docs/22) — the default leaves every merge to a human. In every
+   mode Tier C merges only on the G12 floor — E3 cross-vendor review at the exact
+   head plus required checks (Law 7, D-015) — and billing/pricing/payment code
+   still waits for the owner (G6).
 
 ## Rules
 
@@ -80,7 +82,7 @@ for free.
 - **Right-sized, never under-gated**: install the lean baseline everywhere; add
   the heavy machinery where the audit found risk surfaces. But Law 7 is not
   profile-dependent — if ANY money/auth/consent/PII/security/prod-data surface
-  exists, its human merge gate gets wired regardless of chosen profile. A
+  exists, its Tier C review floor (E3 plus required checks) gets wired regardless of chosen profile. A
   static brochure site with a contact form still has a PII surface.
 - Every owner-credential step (branch protection, App installs, API keys) is an
   Ask Contract item — batched, never a drip.

@@ -908,7 +908,7 @@ label_desc() {
   case "$1" in
     tier-a) echo "Tier A — fully autonomous safe work" ;;
     tier-b) echo "Tier B — autonomous with review" ;;
-    tier-c) echo "Tier C — human merge gate (money/auth/PII/security/prod data)" ;;
+    tier-c) echo "Tier C — E3 review floor, no admin merge (money/auth/PII/security/prod data)" ;;
     agent-claimed) echo "An agent has claimed this issue" ;;
     blocked) echo "Blocked on human or external dependency" ;;
     gibson-halt) echo "Soft halt cue for the Gibson solo loop" ;;

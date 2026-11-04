@@ -849,7 +849,7 @@ f_tierc=$(fixture tierc '.labels = [{"name": "tier-c"}] |
   .statusCheckRollup = [{"__typename": "CheckRun", "name": "gate", "conclusion": "STARTUP_FAILURE", "steps": []}]')
 out=$(run "$f_tierc"); rc=$?
 check "tier-c downgrades ADMIN-CANDIDATE to BLOCKED" "$rc" "1"
-contains "cites the human gate" "$out" "human merge gate"
+contains "cites the no-admin rule" "$out" "no admin-merge path"
 
 out=$(run "$f_infra" --launched); rc=$?
 check "--launched removes the admin path" "$rc" "1"

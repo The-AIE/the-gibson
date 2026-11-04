@@ -39,7 +39,8 @@ WHAT IT DOES
     3. Required checks. Distinguishes a product red (a step failed) from GitHub
        Actions infrastructure (startup_failure / no steps / no runner), which
        re-runs identically and is usually concurrent across open PRs.
-    4. Tier. tier-c never gets an admin path; that is a human gate.
+    4. Tier. tier-c never gets an admin path (Law 7); it merges only on the
+       G12 floor (E3 at the exact head plus required checks, D-015).
 
   Read-only. It never merges, never comments, never edits.
 
@@ -51,8 +52,10 @@ WHY
 
 RISKS
   - Read-only: worst case is a wrong verdict, which the checklist it prints lets
-    you audit. It does not authorize anything by itself; a human still merges
-    Tier C, and ADMIN-CANDIDATE is a pre-launch operator decision, not a green light.
+    you audit. It does not authorize anything by itself. It does not verify the
+    Tier C G12 floor (E3 cross-vendor review at the exact head plus required
+    checks, D-015) — confirm that before merging Tier C — and ADMIN-CANDIDATE is
+    a pre-launch operator decision, not a green light.
 
 USAGE
   release-preflight.sh <pr> [--repo owner/name] [--partial] [--launched] [--json]
@@ -523,7 +526,7 @@ fi
 
 if [[ ${#ADMIN_REASONS[@]} -gt 0 ]]; then
   if [[ "$TIER" == "tier-c" ]]; then
-    BLOCKERS+=("Tier C is a human merge gate (Law 7) — no admin path, whatever the CI is doing")
+    BLOCKERS+=("Tier C has no admin-merge path (Law 7, G12 floor) — fix the check, whatever the CI is doing")
     ADMIN_REASONS=()
   elif [[ "$LAUNCHED" -eq 1 ]]; then
     BLOCKERS+=("post-launch posture (--launched): no admin merge on any red — escalate to the owner")
