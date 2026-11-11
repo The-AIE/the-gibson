@@ -362,23 +362,47 @@ if [[ "${1:-}" == "--renew" ]]; then
     echo "claim.sh: ERROR: PR #$_rn_pr has no '- Claimed:' line to anchor a Claim-expires line on — refusing to renew" >&2
     exit 1
   fi
+  # The body the write is allowed to replace. Kept so a post-write overlap
+  # failure can put it back. GitHub's pull-request edit has no compare-and-swap.
+  printf '%s\n' "$_rn_body" > "${_rn_file}.before"
   gh pr edit "$_rn_pr" --repo "$_rn_repo" --body-file "$_rn_file" || {
-    rm -f "$_rn_file"
+    rm -f "$_rn_file" "${_rn_file}.before"
     echo "claim.sh: ERROR: could not update PR #$_rn_pr" >&2
     exit 1
   }
   _rn_after=$(gh pr view "$_rn_pr" --repo "$_rn_repo" --json body -q .body) || {
-    rm -f "$_rn_file"
+    rm -f "$_rn_file" "${_rn_file}.before"
     echo "claim.sh: ERROR: wrote PR #$_rn_pr but could not re-read it to confirm the Claim-expires line" >&2
     exit 1
   }
   printf '%s\n' "$_rn_after" > "${_rn_file}.got"
   if ! cmp -s "$_rn_file" "${_rn_file}.got"; then
-    rm -f "$_rn_file" "${_rn_file}.got"
+    rm -f "$_rn_file" "${_rn_file}.got" "${_rn_file}.before"
     echo "claim.sh: ERROR: PR #$_rn_pr body after renew does not match the single-line edit — refusing to claim the renew succeeded" >&2
     exit 1
   fi
-  rm -f "$_rn_file" "${_rn_file}.got"
+  # cmp only proves the body matches the edit this process intended. A
+  # concurrent claim.sh can write `Displaced by` after the pre-write read;
+  # this full-body edit then removes it and cmp still passes. Re-check
+  # overlap against the inventory now. A fresh rival (exit nonzero) or a
+  # stale one (displaced-claim) means this renew would leave two overlapping
+  # claims, so restore the pre-write body and refuse. A rival that appears
+  # only after this second check is still a lost update; there is no
+  # compare-and-swap to close that window.
+  _rn_so_rc2=0
+  _rn_so_out2=$(env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE node "$_rn_dir/scope-overlap.mjs" "${_rn_args[@]}") || _rn_so_rc2=$?
+  if [[ "$_rn_so_rc2" -ne 0 ]] || grep -q '^scope-overlap: displaced-claim ' <<<"$_rn_so_out2"; then
+    [[ -z "$_rn_so_out2" ]] || printf '%s\n' "$_rn_so_out2" >&2
+    if ! gh pr edit "$_rn_pr" --repo "$_rn_repo" --body-file "${_rn_file}.before"; then
+      rm -f "$_rn_file" "${_rn_file}.got" "${_rn_file}.before"
+      echo "claim.sh: ERROR: renewing $_rn_id overlapped a claim that appeared during the write, and restoring the previous body of PR #$_rn_pr failed" >&2
+      exit 1
+    fi
+    rm -f "$_rn_file" "${_rn_file}.got" "${_rn_file}.before"
+    echo "claim.sh: ERROR: renewing $_rn_id overlapped a claim that appeared while the body was written — restored the previous body; re-claim through claim.sh so displacement is recorded" >&2
+    exit 1
+  fi
+  rm -f "$_rn_file" "${_rn_file}.got" "${_rn_file}.before"
   echo "claim.sh: renewed $_rn_id (PR #$_rn_pr) — Claim-expires: $_rn_new"
   exit 0
 fi
@@ -1543,10 +1567,13 @@ if [[ "$PROVENANCE_RC" -ne 0 ]]; then
 fi
 info "reservation: $RESERVATION_SHA"
 
-# Expired claims this claim displaced (#557). The `Displaced by` record on the
-# DISPLACED PR is what makes displacement terminal (pr-claims.sh reads it as
-# such, so a later push or --renew cannot revive that claim). It is therefore
-# the LAST step before success: every gate that can still roll this claim back
+# Expired claims this claim displaced (#557). pr-claims.sh treats a
+# `Displaced by` record on the DISPLACED PR as terminal while that record is
+# still in the body, so a later push or --renew refuses. --renew re-reads
+# before writing and restores the previous body if an overlapping claim is
+# visible after the write. A stamp that lands after that second check can
+# still be overwritten: the pull-request edit API has no compare-and-swap.
+# The stamp is the LAST step before success: every gate that can still roll this claim back
 # has already passed, so a rolled-back lane never strands a claim it was
 # displacing. A write that still fails here rolls this lane back, and
 # pr-claims.sh ignores a record whose displacer is no longer a live claim, so

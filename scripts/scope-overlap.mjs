@@ -912,10 +912,15 @@ function readPrClaimsOnce() {
  * `pr-claims.sh expiry` calls `stale` or `displaced`. FAILS CLOSED toward
  * blocking: a failed read returns null (the caller displaces nobody), and a
  * row that is not the nine-field shape is left out of the map, so that claim
- * keeps blocking. `fingerprint` is every raw row, sorted. A renew or a push
- * changes it even when the claim's scope does not, so admission can require
- * the expiry evidence to be part of the quiescent snapshot instead of a
- * later read.
+ * keeps blocking. `fingerprint` is the decision-relevant projection of each
+ * row, sorted: PR number, claim id, and state. effective-expires and
+ * last-push move on every push to every open claim, including claims that
+ * stay fresh and keep blocking. Folding those clocks into the fingerprint
+ * resets the admission streak on unrelated pushes and can exhaust the
+ * attempt budget. A renew or a push that revives a claim flips its state
+ * (stale → fresh) and still breaks the streak. A row that is not the
+ * nine-field shape stays raw, so a changing malformed inventory cannot
+ * look quiescent.
  */
 function readExpirySnapshot() {
   let out;
@@ -932,8 +937,8 @@ function readExpirySnapshot() {
   const fpLines = [];
   for (const line of out.split("\n")) {
     if (!line.trim()) continue;
-    fpLines.push(line);
     const cols = line.split("\t");
+    fpLines.push(cols.length === 9 ? `${cols[0]}\t${cols[1]}\t${cols[2]}` : line);
     if (cols.length !== 9) continue;
     if ((cols[2] !== "stale" && cols[2] !== "displaced") || !/^\d+$/.test(cols[0])) continue;
     stale.set(`${cols[0]}\t${cols[1]}`, {
@@ -1191,10 +1196,13 @@ function claimIssueNumber(id) {
  */
 function admitFingerprint(prClaims, ledgerClaims, expiryFingerprint) {
   // Combined claim-relevant projection of BOTH authoritative sources, plus
-  // the expiry rows from the SAME attempt. Scope alone stays quiet across a
-  // renew or a push (neither changes the claim id or the scope), so a
-  // fingerprint without expiry would settle while the claim was being
-  // revived and the decision would displace it from a later, stale read.
+  // the expiry STATE from the SAME attempt (PR number, claim id, state).
+  // Scope alone stays quiet across a renew or a push (neither changes the
+  // claim id or the scope), so a fingerprint without expiry state would
+  // settle while the claim was being revived and the decision would
+  // displace it from a later, stale read. The push clock itself is not
+  // part of this projection: a push that leaves the state fresh does not
+  // change the admission decision.
   const prPart = prClaims
     .map((c) => `pr\t${c.number}\t${c.id}\t${c.scope.join(" ")}`)
     .sort()

@@ -97,7 +97,9 @@ case "$1 $2" in
       printf '%s' "$n" > "$GH_ROOT/expiry-n"
       lists=0
       [[ -f "$GH_ROOT/list-n" ]] && lists=$(cat "$GH_ROOT/list-n")
-      if [[ -n "${GH_PAGES_LATE:-}" && "$lists" -ge 2 && "$n" -eq 1 ]]; then
+      if [[ -n "${GH_EXPIRY_ROTATE:-}" ]]; then
+        src="$GH_EXPIRY_ROTATE"
+      elif [[ -n "${GH_PAGES_LATE:-}" && "$lists" -ge 2 && "$n" -eq 1 ]]; then
         src="$GH_PAGES_LATE"
       fi
     else
@@ -106,7 +108,14 @@ case "$1 $2" in
       n=$((n + 1))
       printf '%s' "$n" > "$GH_ROOT/list-n"
     fi
-    nodes=$(jq -c '.[0]' "$src") || exit 1
+    if [[ "$joined" == *claimExpiry* && -n "${GH_EXPIRY_ROTATE:-}" ]]; then
+      # JSON array of pages. Expiry read n (1-based) selects index (n-1) mod length.
+      len=$(jq 'length' "$src") || exit 1
+      idx=$(( (n - 1) % len ))
+      nodes=$(jq -c ".[$idx]" "$src") || exit 1
+    else
+      nodes=$(jq -c '.[0]' "$src") || exit 1
+    fi
     page=$(printf '{"data":{"repository":{"pullRequests":{"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' "$nodes")
     printf '%s' "$page" | jq -r "$jqexpr"
     exit $?
@@ -128,6 +137,11 @@ case "$1 $2" in
         *) shift ;;
       esac
     done
+    # Optional: the first body write publishes a different inventory, so a
+    # post-write overlap recheck can see a rival the pre-write check missed.
+    if [[ -n "${GH_PAGES_ON_EDIT:-}" ]]; then
+      cp "$GH_PAGES_ON_EDIT" "${GH_PAGES:?}"
+    fi
     exit 0
     ;;
   "label create")
@@ -326,6 +340,41 @@ lacks "the post-settle page was not what decided" "$out" "displaced expired clai
 unset GH_PAGES_LATE
 rm -f "$ROOT/expiry-n" "$ROOT/list-n"
 
+# Two expiry pages that differ only in an unrelated claim's push clock must
+# still settle. A page pair whose state flips must not.
+write_rotate() { # $1 ours-json $2 pageA-rival $3 pageB-rival $4 dest
+  node -e 'const fs=require("fs"); const a=JSON.parse(process.argv[1]); const b=JSON.parse(process.argv[2]); const c=JSON.parse(process.argv[3]); fs.writeFileSync(process.argv[4], JSON.stringify([[a,b],[a,c]]));' \
+    "$1" "$2" "$3" "$4"
+}
+echo "scope-overlap admission · an unrelated push clock does not reset quiescence"
+rm -f "$ROOT/expiry-n" "$ROOT/list-n"
+ours=$(claim_node 110 issue-110-settle 'docs/only/**' "$FRESH" "$RECENT_PUSH")
+rival_a=$(claim_node 111 issue-111-other 'lib/**' "$FRESH" "$RECENT_PUSH")
+rival_b=$(claim_node 111 issue-111-other 'lib/**' "$FRESH" "$(iso_at -3600)")
+stage "${ours},${rival_a}"
+write_rotate "$ours" "$rival_a" "$rival_b" "$ROOT/expiry-rotate.json"
+out=$(GH_EXPIRY_ROTATE="$ROOT/expiry-rotate.json" \
+  GIBSON_CLAIM_ADMIT_DELAY=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=3 \
+  run_so --scope 'docs/only/**' --claim-id issue-110-settle --issue 110 --admit-pr 110); rc=$?
+check "admission settles while an unrelated claim's push clock moves" "$rc" "0"
+contains "the union was quiescent" "$out" "quiescent"
+
+echo "scope-overlap admission · a stale-to-fresh flip still breaks quiescence"
+rm -f "$ROOT/expiry-n" "$ROOT/list-n"
+ours=$(claim_node 112 issue-112-settle 'docs/only/**' "$FRESH" "$RECENT_PUSH")
+rival_stale=$(claim_node 113 issue-113-flip 'lib/**' "$EXPIRED" "$OLD_PUSH")
+rival_fresh=$(claim_node 113 issue-113-flip 'lib/**' "$EXPIRED" "$RECENT_PUSH")
+stage "${ours},${rival_stale}"
+write_rotate "$ours" "$rival_stale" "$rival_fresh" "$ROOT/expiry-rotate.json"
+out=$(GH_EXPIRY_ROTATE="$ROOT/expiry-rotate.json" \
+  GIBSON_CLAIM_ADMIT_DELAY=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=3 \
+  run_so --scope 'lib/**' --claim-id issue-112-settle --issue 112 --admit-pr 112); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a rival flipping stale to fresh refuses admission" ||
+  bad "admission settled across a state change (rc=$rc): $out"
+lacks "a flipping rival was not displaced" "$out" "displaced expired claim issue-113-flip"
+unset GH_EXPIRY_ROTATE
+rm -f "$ROOT/expiry-n" "$ROOT/list-n" "$ROOT/expiry-rotate.json"
+
 # --- claim.sh --renew -------------------------------------------------------
 echo "claim.sh --renew moves the date"
 stage "$(claim_node 41 issue-40-renewme 'lib/**' "$EXPIRED" "$OLD_PUSH")"
@@ -401,6 +450,21 @@ contains "the Displaced by line is still there" "$(cat "$ROOT/body-48")" "- Disp
 check "Claim-expires was not rewritten over that line" "$(sed -n 's/^- Claim-expires: //p' "$ROOT/body-48")" "$new"
 rm -f "$ROOT/bin/node"
 unset GH_INJECT_BODY_LINE GH_INJECT_BODY_FILE
+
+echo "claim.sh --renew restores the body when a rival appears during the write"
+stage "$(claim_node 49 issue-48-race 'lib/**' "$EXPIRED" "$OLD_PUSH")"
+printf '%b\n' "- Claim schema: gibson.claim/v2\n- Active-work claim: issue-48-race\n- Issue: #48\n- Claim scope: lib/**\n- Claimed: 2026-10-01T00:00:00Z\n- Claim-expires: ${EXPIRED}\n\nbody text" > "$ROOT/body-49"
+before=$(cat "$ROOT/body-49")
+rival_page="$(claim_node 49 issue-48-race 'lib/**' "$EXPIRED" "$OLD_PUSH"),$(claim_node 50 issue-49-rival 'lib/util/**' "$FRESH" "$RECENT_PUSH")"
+printf '[[%s]]' "$rival_page" > "$ROOT/pages-on-edit.json"
+out=$(GH_PAGES_ON_EDIT="$ROOT/pages-on-edit.json" \
+  GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 48 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a rival that appears during the write refuses the renew" ||
+  bad "renew kept a date move over a concurrent rival: $out"
+contains "the refusal says the previous body was restored" "$out" "restored the previous body"
+contains "the rival is named" "$out" "issue-49-rival"
+check "Claim-expires was restored" "$(cat "$ROOT/body-49")" "$before"
+contains "the original prose survived the restore" "$(cat "$ROOT/body-49")" "body text"
 
 echo "a Displaced-by whose displacer is not a live claim is ignored"
 stage "$(claim_node_extra 71 issue-70-stranded 'lib/**' "$EXPIRED" "$OLD_PUSH" "$DISP")"
