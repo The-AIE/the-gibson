@@ -77,7 +77,11 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 echo "$*" >> "${GH_LOG:?}"
 case "$1 $2" in
   "api graphql")
-    [[ -n "${GH_STALL:-}" ]] && sleep "$GH_STALL"
+    if [[ -n "${GH_STALL:-}" ]]; then
+      sleep "$GH_STALL" &
+      [[ -n "${GH_STALL_PID_FILE:-}" ]] && echo "$!" > "$GH_STALL_PID_FILE"
+      wait
+    fi
     joined="$*"
     shift 2
     jqexpr=""
@@ -349,11 +353,23 @@ out=$(run_so --scope 'components/nav/Item.tsx' --claim-id issue-31-mine --issue 
 echo "scope-overlap · a stalled claim read is killed at the timeout and blocks (liveness)"
 stage "$(claim_node 53 issue-52-live 'app/**' "$FRESH" "$RECENT_PUSH")"
 _t0=$(date +%s)
-out=$(GH_STALL=30 GIBSON_PR_CLAIMS_TIMEOUT_MS=1500 run_so --scope 'docs/free/**' --claim-id issue-31-mine --issue 31); rc=$?
+out=$(GH_STALL=30 GH_STALL_PID_FILE="$ROOT/stall.pid" GIBSON_PR_CLAIMS_TIMEOUT_MS=1500 run_so --scope 'docs/free/**' --claim-id issue-31-mine --issue 31); rc=$?
 _dt=$(( $(date +%s) - _t0 ))
 [[ "$rc" -ne 0 ]] && ok "a stalled read refuses admission" || bad "a stalled read admitted (rc=$rc): $out"
 [[ "$_dt" -lt 20 ]] && ok "a stalled read is bounded by the timeout" || bad "a stalled read ran ${_dt}s; the timeout was not applied"
-unset _t0 _dt
+sleep 1
+_sp=$(cat "$ROOT/stall.pid" 2>/dev/null || true)
+if [[ "$_sp" =~ ^[0-9]+$ ]] && ! kill -0 "$_sp" 2>/dev/null; then
+  ok "the stalled gh's descendant is killed with it (whole process tree)"
+else
+  bad "the stalled gh left a descendant running (pid '${_sp:-none recorded}')"
+  [[ "$_sp" =~ ^[0-9]+$ ]] && kill "$_sp" 2>/dev/null || true
+fi
+out=$(GIBSON_PR_CLAIMS_TIMEOUT_MS=1500.5 run_so --scope 'docs/free/**' --claim-id issue-31-mine --issue 31); rc=$?
+check "a fractional timeout falls back to the default instead of failing every read" "$rc" "0"
+out=$(GIBSON_PR_CLAIMS_TIMEOUT_MS=Infinity run_so --scope 'docs/free/**' --claim-id issue-31-mine --issue 31); rc=$?
+check "an infinite timeout falls back to the default" "$rc" "0"
+unset _t0 _dt _sp
 
 echo "scope-overlap · displacing a stale intermediate also names its predecessor"
 PRED='- Displaced by: issue-40-mid (PR #40)'

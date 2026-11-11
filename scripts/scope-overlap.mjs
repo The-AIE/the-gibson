@@ -896,21 +896,49 @@ function prClaimsScriptPath() {
 
 /** One live read. Returns the raw stdout, or null when the read itself failed. */
 // Liveness: a stalled `gh` inside pr-claims.sh must not hold admission open
-// forever. On timeout the child is killed, execFileSync throws, and both readers
-// return null, which every caller already treats as fail-closed.
-const PR_CLAIMS_TIMEOUT_MS = Number(process.env.GIBSON_PR_CLAIMS_TIMEOUT_MS) > 0
-  ? Number(process.env.GIBSON_PR_CLAIMS_TIMEOUT_MS)
+// forever, and killing pr-claims.sh alone would orphan the `gh` it started
+// (liveness contract clause 4: kill the whole process tree). The read runs
+// under a small bash wrapper with job control on, so the reader gets its own
+// process group and the watcher kills that whole group at the cap. The wrapper
+// is inline, so the sensor still needs only pr-claims.sh beside it.
+// The watcher calls /bin/sleep by absolute path: a `sleep` found on PATH could
+// be someone else's and return at once, which would kill every read. If
+// /bin/sleep is missing the read is killed at once and admission refuses.
+// execFileSync's own timeout is a backstop a little past the cap. On either
+// expiry execFileSync throws and both readers return null, which every caller
+// already treats as fail-closed.
+const _envPrClaimsTimeoutMs = Number(process.env.GIBSON_PR_CLAIMS_TIMEOUT_MS);
+const PR_CLAIMS_TIMEOUT_MS = Number.isSafeInteger(_envPrClaimsTimeoutMs) && _envPrClaimsTimeoutMs > 0
+  ? _envPrClaimsTimeoutMs
   : 120_000;
+const PR_CLAIMS_TREE_KILL_WRAPPER = [
+  "set -m",
+  '"$@" </dev/null & p=$!',
+  '( /bin/sleep "$GIBSON_PR_CLAIMS_CAP_SECS"; kill -KILL -- "-$p" 2>/dev/null ) >/dev/null 2>&1 & w=$!',
+  'wait "$p"; rc=$?',
+  'kill -KILL -- "-$w" 2>/dev/null',
+  'exit "$rc"',
+].join("\n");
 
-function readPrClaimsOnce() {
-  try {
-    return execFileSync(prClaimsScriptPath(), ["list", opt.repo], {
+function runPrClaims(subcommand) {
+  const secs = String(Math.max(1, Math.ceil(PR_CLAIMS_TIMEOUT_MS / 1000)));
+  return execFileSync(
+    "bash",
+    ["-c", PR_CLAIMS_TREE_KILL_WRAPPER, "pr-claims-read", prClaimsScriptPath(), subcommand, opt.repo],
+    {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 16 * 1024 * 1024,
-      timeout: PR_CLAIMS_TIMEOUT_MS,
+      env: { ...process.env, GIBSON_PR_CLAIMS_CAP_SECS: secs },
+      timeout: PR_CLAIMS_TIMEOUT_MS + 15_000,
       killSignal: "SIGKILL",
-    });
+    }
+  );
+}
+
+function readPrClaimsOnce() {
+  try {
+    return runPrClaims("list");
   } catch {
     return null;
   }
@@ -934,13 +962,7 @@ function readPrClaimsOnce() {
 function readExpirySnapshot() {
   let out;
   try {
-    out = execFileSync(prClaimsScriptPath(), ["expiry", opt.repo], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: PR_CLAIMS_TIMEOUT_MS,
-      killSignal: "SIGKILL",
-    });
+    out = runPrClaims("expiry");
   } catch {
     return null;
   }
