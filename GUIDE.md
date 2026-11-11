@@ -192,7 +192,7 @@ Same pipeline, one runner:
 | Start a feature | Brief → approve PLAN.md |
 | Quick fix | Issue with acceptance criteria |
 | See status | AK dashboard / digest / `gh issue list -l gibson` |
-| Tier C merge | No action: one independent approval at the exact head plus required checks clear it (G12 floor, D-015) |
+| Tier C merge | No action: one independent approval at the exact head, from a review that covered the Tier C adversarial cases, plus required checks clear it (G12 floor, D-015) |
 | Approve a billing/pricing/payment merge | Reply on the PR (G6) |
 | Approve a schema merge | Reply on the PR (schema merges are human-gated, one in flight) |
 | Stop everything on a repo | `gibson-halt` label |
