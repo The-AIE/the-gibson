@@ -264,13 +264,19 @@ function parseLedger(text) {
       };
       continue;
     }
+    // Any other level-2 heading ends the lesson. A later Status or Proof
+    // under "## Notes" must not be absorbed into the lesson above it.
+    if (visible.trim().startsWith("## ")) {
+      flush();
+      continue;
+    }
     if (!current) continue;
     const field = visible.match(/^\*\*(Status|Proof):\*\*\s*(.*)$/);
     if (field) {
       absorb(current, field[1], field[2], i + 1);
       continue;
     }
-    if (current.cont && visible.trim() !== "" && !/^\*\*[A-Za-z]/.test(visible) && !visible.startsWith("## ")) {
+    if (current.cont && visible.trim() !== "" && !/^\*\*[A-Za-z]/.test(visible) && !visible.trim().startsWith("## ")) {
       current[current.cont] = `${current[current.cont]} ${visible.trim()}`;
       continue;
     }

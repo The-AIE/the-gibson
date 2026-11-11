@@ -44,7 +44,7 @@ Gate stdout and stderr are not copied into the report. Each invocation stops at 
 
 The text report and the JSON report (`gibson.lesson-proof.report.v1`) list each lesson as `proven`, `unproven`, `unknown`, or `not-closure`. A finished report exits 0. `--strict` exits non-zero when any closure is not proven, including a closure that is unknown. A ledger that cannot be read exits non-zero and is not an empty pass.
 
-`.github/workflows/lesson-proof.yml` runs the checker without `--strict`. The job is not a required check. It does not block a merge.
+`.github/workflows/lesson-proof.yml` runs the checker without `--strict` on pull requests, on manual dispatch, and on a daily schedule. The job is not a required check. It does not block a merge. sensor-health grades that scheduled heartbeat.
 
 ## What this does not claim
 

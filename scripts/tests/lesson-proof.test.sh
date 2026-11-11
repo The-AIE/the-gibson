@@ -629,6 +629,33 @@ else
   bad "inline json rc=$rc"
 fi
 
+echo "# non-lesson level-2 heading ends the entry"
+BOUNDARY="$ROOT/boundary.md"
+{
+  printf '## %s · 2026-10-25 · boundary\n' "$(lid 950)"
+  printf '**Tags:** #fixture\n'
+  printf '\n'
+  printf '## Notes\n'
+  printf '**Status:** fixed\n'
+  printf '**Proof:** %s gates/enforcing.sh tree-good\n' "$SHA"
+  printf '\n'
+  printf ' ## Also not a lesson\n'
+  printf '**Status:** fixed\n'
+  printf '\n'
+  printf '## %s · 2026-10-25 · after notes\n' "$(lid 951)"
+  printf '**Status:** intake\n'
+} > "$BOUNDARY"
+run_sensor "$BOUNDARY"
+if [[ "$rc" -eq 0 ]] \
+  && [[ "$(get_field "$RUN_JSON" "$(lid 950)" verdict)" == "unknown" ]] \
+  && [[ "$(get_field "$RUN_JSON" "$(lid 950)" reason)" == "status-missing" ]] \
+  && [[ "$(get_field "$RUN_JSON" "$(lid 951)" verdict)" == "not-closure" ]] \
+  && ! grep -F 'verdict=proven' "$RUN_OUT" >/dev/null; then
+  ok "a non-lesson level-2 heading does not donate Status or Proof"
+else
+  bad "section boundary rc=$rc ($(cat "$RUN_OUT"))"
+fi
+
 SUMMARY="$ROOT/summary.md"
 : > "$SUMMARY"
 GITHUB_ACTIONS=1 GITHUB_STEP_SUMMARY="$SUMMARY" \
@@ -825,6 +852,12 @@ if grep -F 'node scripts/lesson-proof.mjs' "$WF" >/dev/null; then
   ok "workflow invokes the checker"
 else
   bad "workflow does not invoke the checker"
+fi
+if grep -F 'schedule:' "$WF" >/dev/null \
+  && grep -F '.github/workflows/lesson-proof.yml' "$REPO_ROOT/config/sensor-health-observation.v1.json" >/dev/null; then
+  ok "workflow heartbeat is registered for sensor-health"
+else
+  bad "workflow heartbeat is not registered for sensor-health"
 fi
 if grep -F -- '--strict' "$WF" >/dev/null; then
   bad "workflow passes --strict"
