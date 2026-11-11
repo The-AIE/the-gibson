@@ -101,7 +101,10 @@ changed_files() {
 CHANGED=$(changed_files)
 
 # scope_recheck MODE [args...] — the changed files go in on stdin, one definition of "changed".
-scope_recheck() { printf '%s\n' "$CHANGED" | node scripts/scope-recheck.mjs "$@"; }
+scope_recheck() {
+  command -v node >/dev/null 2>&1 || { echo "scope_recheck: node missing" >&2; return 127; }
+  printf '%s\n' "$CHANGED" | node scripts/scope-recheck.mjs "$@"
+}
 
 echo "prepush: base=$BASE changed=$(printf '%s\n' "$CHANGED" | grep -c . || true)"
 

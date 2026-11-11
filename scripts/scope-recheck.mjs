@@ -109,7 +109,7 @@ function resolveRepo(o) {
     return o.repo;
   }
   const url = run("git", ["config", "--get", "remote.origin.url"]).out.trim();
-  const host = (process.env.GH_HOST || "github.com").replace(/[.]/g, "\\.");
+  const host = (process.env.GH_HOST || "github.com").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`^(?:https://${host}/|git@${host}:|ssh://git@${host}/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\\.git)?/?$`);
   const m = re.exec(url);
   if (!m) {
