@@ -191,8 +191,13 @@ function iso(ms) {
 
 function boundedInt(flag, raw, allowZero) {
   const ok = allowZero ? /^\d+$/.test(raw) : /^[1-9]\d*$/.test(raw);
-  if (!ok) throw new Error(`${flag} must be a ${allowZero ? "non-negative" : "positive"} integer`);
-  return Number(raw);
+  const value = Number(raw);
+  // A long digit string matches the pattern, but Number() is Infinity.
+  // JSON.stringify would then store the budget as null.
+  if (!ok || !Number.isSafeInteger(value)) {
+    throw new Error(`${flag} must be a ${allowZero ? "non-negative" : "positive"} integer`);
+  }
+  return value;
 }
 
 function ghCreateTimeoutMs() {

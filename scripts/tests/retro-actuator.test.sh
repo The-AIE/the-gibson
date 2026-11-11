@@ -417,6 +417,23 @@ else
   bad "repair budget 0 exits 2 (rc=$LAST_RC err=$LAST_ERR)"
 fi
 
+overflow=$("$NODE_REAL" -e 'process.stdout.write("9".repeat(309))')
+run_tool --events "$FIX/one-attempt.jsonl" --state "$TMP/overflow-budget.json" --now "$NOW0" --repair-budget "$overflow"
+if [[ "$LAST_RC" -eq 2 && -z "$LAST_OUT" && "$LAST_ERR" == *"retro-actuator: --repair-budget must be a positive integer"* ]]; then
+  ok "overflowing repair budget exits 2"
+else
+  bad "overflowing repair budget exits 2 (rc=$LAST_RC err=$LAST_ERR)"
+fi
+absent "overflowing repair budget wrote no state" "$TMP/overflow-budget.json"
+
+run_tool --events "$FIX/one-attempt.jsonl" --state "$TMP/overflow-lock.json" --now "$NOW0" --lock-timeout-ms "$overflow"
+if [[ "$LAST_RC" -eq 2 && -z "$LAST_OUT" && "$LAST_ERR" == *"retro-actuator: --lock-timeout-ms must be a non-negative integer"* ]]; then
+  ok "overflowing lock timeout exits 2"
+else
+  bad "overflowing lock timeout exits 2 (rc=$LAST_RC err=$LAST_ERR)"
+fi
+absent "overflowing lock timeout wrote no state" "$TMP/overflow-lock.json"
+
 run_tool --events "$FIX/one-attempt.jsonl" --state "$TMP/usage.json" --now not-a-date
 if [[ "$LAST_RC" -eq 2 && -z "$LAST_OUT" ]]; then
   ok "bad --now exits 2"
