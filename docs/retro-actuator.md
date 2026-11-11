@@ -38,8 +38,15 @@ Two identifiers:
 The first distinct failed attempt of a new key is pending. The second distinct
 attempt, or one review-cap breach (`review_rounds` greater than the tier cap,
 not equal to it), records one incident and one repair-issue request. Replaying
-the file, interleaving the same lines, or running two processes against the
-same state file still yields one incident and one request.
+the file or interleaving the same lines still yields one incident and one
+request. Two processes take turns on that state file only by creating the lock
+with an exclusive `open` (`wx`). A lock that is already there is reported, not
+reclaimed. Reclaiming it (rename the file away, recheck, link it back) opens a
+gap where a second process creates its own lock, and both holders can overwrite
+the ledger or file a duplicate repair issue. After the bounded lock wait the
+run exits UNKNOWN and names the lock file, the pid recorded in it, the age, and
+the manual removal step. Delete that file only after confirming the recorded
+process is gone.
 
 Review caps are read from `config/review-round-caps.json`. An omitted tier uses
 that file's `default`. An unknown tier, a missing round count, or an unreadable

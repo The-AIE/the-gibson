@@ -5,8 +5,8 @@
  * WHAT IT DOES
  *   Reads CI-failure and review-cap events (JSON lines). The second distinct
  *   failed attempt of one incident key, or one review-cap breach, records one
- *   incident and one repair-issue request. Replays and overlapping processes
- *   share an atomic state file and do not double those records.
+ *   incident and one repair-issue request. Replays share an atomic state file.
+ *   A leftover lock is reported, not taken, so two processes cannot both hold it.
  *
  * WHY
  *   Doc 28 loop 3 had no trigger. A repeated failure had to be remembered.
@@ -34,8 +34,8 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
-  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -213,60 +213,22 @@ function sleepMs(ms) {
   }
 }
 
-function pidAlive(pid) {
+function lockRefusal(lockPath) {
+  let recorded = "unreadable";
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-
-function lockIsStale(lockPath) {
-  let text = "";
-  try {
-    text = readFileSync(lockPath, "utf8").trim();
+    const pid = Number(readFileSync(lockPath, "utf8").trim());
+    if (Number.isInteger(pid) && pid > 0) recorded = String(pid);
   } catch {
-    return false;
+    recorded = "unreadable";
   }
-  const pid = Number(text);
-  if (Number.isInteger(pid) && pid > 0) return !pidAlive(pid);
+  let age = "unknown";
   try {
-    return Date.now() - statSync(lockPath).mtimeMs > 60000;
+    const seconds = Math.max(0, Math.floor((Date.now() - statSync(lockPath).mtimeMs) / 1000));
+    age = `${seconds}s`;
   } catch {
-    return false;
+    age = "unknown";
   }
-}
-
-function reclaimStaleLock(lockPath) {
-  // Rename is the claim. Only one waiter can move the stale file. A waiter
-  // must not unlink the original path: that deletes a lock another process
-  // created after the stale check.
-  const claim = `${lockPath}.reclaim.${process.pid}.${randomBytes(6).toString("hex")}`;
-  try {
-    renameSync(lockPath, claim);
-  } catch {
-    return false;
-  }
-  if (!lockIsStale(claim)) {
-    try {
-      linkSync(claim, lockPath);
-    } catch {
-      return false;
-    }
-    try {
-      unlinkSync(claim);
-    } catch {
-      /* the restored lock is the one that matters */
-    }
-    return false;
-  }
-  try {
-    unlinkSync(claim);
-  } catch {
-    /* the path is already free */
-  }
-  return true;
+  return `lock held at ${lockPath} (pid ${recorded}, age ${age}). Remove ${lockPath} only after confirming that process is gone.`;
 }
 
 export function acquireLock(lockPath, timeoutMs) {
@@ -280,9 +242,11 @@ export function acquireLock(lockPath, timeoutMs) {
       return { ok: true, fd, path: lockPath };
     } catch (error) {
       if (error.code !== "EEXIST") return { ok: false, reason: "lock-failed" };
-      const reclaimed = lockIsStale(lockPath) && reclaimStaleLock(lockPath);
-      if (Date.now() - start >= timeoutMs) return { ok: false, reason: "lock-timeout" };
-      if (!reclaimed) sleepMs(Math.min(20, Math.max(0, timeoutMs - (Date.now() - start))));
+      // The file belongs to whoever created it. Never rename, replace, or
+      // unlink it. Two holders is worse than a run that waits, then refuses.
+      const elapsed = Date.now() - start;
+      if (elapsed >= timeoutMs) return { ok: false, reason: lockRefusal(lockPath) };
+      sleepMs(Math.min(20, Math.max(0, timeoutMs - elapsed)));
     }
   }
 }
@@ -290,15 +254,18 @@ export function acquireLock(lockPath, timeoutMs) {
 export function releaseLock(lock) {
   if (!lock || !lock.ok) return;
   try {
+    const held = fstatSync(lock.fd);
+    const named = lstatSync(lock.path);
+    if (named.isFile() && named.dev === held.dev && named.ino === held.ino) {
+      unlinkSync(lock.path);
+    }
+  } catch {
+    /* lock already gone or replaced */
+  }
+  try {
     closeSync(lock.fd);
   } catch {
     /* already closed */
-  }
-  try {
-    const current = readFileSync(lock.path, "utf8").trim();
-    if (current === String(process.pid)) unlinkSync(lock.path);
-  } catch {
-    /* lock already gone */
   }
 }
 

@@ -874,8 +874,9 @@ fi
 "$NODE_REAL" -e 'setInterval(function () {}, 1000000)' >/dev/null 2>&1 &
 printf '%s\n' "$!" > "$TMP/holder.pid"
 printf '%s' "$(cat "$TMP/holder.pid")" > "$TMP/held.json.lock"
+holder_pid=$(cat "$TMP/holder.pid")
 check "a live lock is UNKNOWN" 3 \
-  'r.evaluation==="UNKNOWN" && r.unknown_reason==="lock-timeout"' \
+  "r.evaluation===\"UNKNOWN\" && r.unknown_reason.includes(\"$TMP/held.json.lock\") && r.unknown_reason.includes(\"pid ${holder_pid}\") && r.unknown_reason.includes(\"age \") && r.unknown_reason.includes(\"Remove ${TMP}/held.json.lock\")" \
   --events "$FIX/one-attempt.jsonl" --state "$TMP/held.json" --now "$NOW0" --root "$REPO_ROOT" --lock-timeout-ms 200
 absent "a live lock wrote no state" "$TMP/held.json"
 if [[ "$(cat "$TMP/held.json.lock")" == "$(cat "$TMP/holder.pid")" ]]; then
@@ -883,7 +884,6 @@ if [[ "$(cat "$TMP/held.json.lock")" == "$(cat "$TMP/holder.pid")" ]]; then
 else
   bad "a live lock was not stolen"
 fi
-holder_pid=$(cat "$TMP/holder.pid")
 kill "$holder_pid" 2>/dev/null || true
 wait "$holder_pid" 2>/dev/null || true
 rm -f "$TMP/holder.pid"
@@ -892,8 +892,24 @@ rm -f "$TMP/holder.pid"
 # inherited EXIT trap on bash 3.2 and can remove TMP.
 dead_pid=$("$NODE_REAL" -e 'process.stdout.write(String(process.pid))')
 printf '%s' "$dead_pid" > "$TMP/stale.json.lock"
-check "a dead lock is replaced" 0 'r.pending_count===1 && r.evaluation==="complete"' \
-  --events "$FIX/one-attempt.jsonl" --state "$TMP/stale.json" --now "$NOW0" --root "$REPO_ROOT" --lock-timeout-ms 1000
+stale_cksum=$(cksum "$TMP/stale.json.lock")
+stale_ino=$(node -e 'process.stdout.write(String(require("node:fs").statSync(process.argv[1]).ino))' "$TMP/stale.json.lock")
+check "a dead lock is refused and names the file" 3 \
+  "r.evaluation===\"UNKNOWN\" && r.unknown_reason.includes(\"$TMP/stale.json.lock\") && r.unknown_reason.includes(\"pid ${dead_pid}\") && r.unknown_reason.includes(\"age \") && r.unknown_reason.includes(\"Remove ${TMP}/stale.json.lock\")" \
+  --events "$FIX/one-attempt.jsonl" --state "$TMP/stale.json" --now "$NOW0" --root "$REPO_ROOT" --lock-timeout-ms 200
+absent "a dead lock wrote no state" "$TMP/stale.json"
+if [[ "$LAST_ERR" == *"pid ${dead_pid}"* && "$LAST_ERR" == *"Remove ${TMP}/stale.json.lock"* ]]; then
+  ok "a dead lock names the file on stderr"
+else
+  bad "a dead lock names the file on stderr (err=$LAST_ERR)"
+fi
+stale_cksum_after=$(cksum "$TMP/stale.json.lock")
+stale_ino_after=$(node -e 'process.stdout.write(String(require("node:fs").statSync(process.argv[1]).ino))' "$TMP/stale.json.lock")
+if [[ "$stale_cksum" == "$stale_cksum_after" && "$stale_ino" == "$stale_ino_after" && "$(cat "$TMP/stale.json.lock")" == "$dead_pid" ]]; then
+  ok "a dead lock was not removed or renamed"
+else
+  bad "a dead lock was not removed or renamed"
+fi
 
 check "omitted --state uses docs/retro-actuator-state.json under --root" 0 'r.pending_count===1' \
   --events "$FIX/one-attempt.jsonl" --root "$TMP/default-root" --now "$NOW0" --repair-budget 2
@@ -1341,28 +1357,28 @@ check "a later pre-deployment cap breach does not request another repair" 0 \
   'r.evaluation==="complete" && r.incidents[0].state==="reopened" && r.issue_requests.length===0 && r.incidents[0].repair_attempts_used===1 && r.incidents[0].real_issue_requests===1' \
   --events "$TMP/caph2-old.jsonl" --state "$CAPH2" --now "$NOW7" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
 
-printf '\n%s\n' "=== stale lock reclaim ==="
+printf '\n%s\n' "=== stale lock is reported, not reclaimed ==="
 cat > "$TMP/lock-probe.mjs" << 'END'
 import { appendFileSync } from "node:fs";
 const mod = await import(process.env.TOOL_URL);
-const lock = mod.acquireLock(process.env.LOCK_PATH, 5000);
+const lock = mod.acquireLock(process.env.LOCK_PATH, Number(process.env.LOCK_WAIT));
 if (!lock.ok) {
+  appendFileSync(process.env.LOCK_LOG, process.pid + " refuse " + Date.now() + "\n");
   process.stderr.write(String(lock.reason) + "\n");
   process.exit(2);
 }
 appendFileSync(process.env.LOCK_LOG, process.pid + " enter " + Date.now() + "\n");
 const view = new Int32Array(new SharedArrayBuffer(4));
-Atomics.wait(view, 0, 0, 400);
+Atomics.wait(view, 0, 0, Number(process.env.LOCK_HOLD));
 appendFileSync(process.env.LOCK_LOG, process.pid + " leave " + Date.now() + "\n");
 mod.releaseLock(lock);
 END
-dead_pid=$("$NODE_REAL" -e 'process.stdout.write(String(process.pid))')
-printf '%s' "$dead_pid" > "$TMP/race.lock"
 : > "$TMP/race.log"
-TOOL_URL="file://${TOOL}" LOCK_PATH="$TMP/race.lock" LOCK_LOG="$TMP/race.log" \
+rm -f "$TMP/race.lock"
+TOOL_URL="file://${TOOL}" LOCK_PATH="$TMP/race.lock" LOCK_LOG="$TMP/race.log" LOCK_WAIT=5000 LOCK_HOLD=400 \
   node "$TMP/lock-probe.mjs" >"$TMP/race1.out" 2>"$TMP/race1.err" &
 race1=$!
-TOOL_URL="file://${TOOL}" LOCK_PATH="$TMP/race.lock" LOCK_LOG="$TMP/race.log" \
+TOOL_URL="file://${TOOL}" LOCK_PATH="$TMP/race.lock" LOCK_LOG="$TMP/race.log" LOCK_WAIT=5000 LOCK_HOLD=400 \
   node "$TMP/lock-probe.mjs" >"$TMP/race2.out" 2>"$TMP/race2.err" &
 race2=$!
 race1_rc=0
@@ -1370,9 +1386,9 @@ race2_rc=0
 wait "$race1" || race1_rc=$?
 wait "$race2" || race2_rc=$?
 if [[ "$race1_rc" -eq 0 && "$race2_rc" -eq 0 ]]; then
-  ok "two stale-lock waiters both finished"
+  ok "two concurrent lock runs both finished"
 else
-  bad "two stale-lock waiters both finished (rc=$race1_rc/$race2_rc)"
+  bad "two concurrent lock runs both finished (rc=$race1_rc/$race2_rc)"
 fi
 if LOCK_LOG="$TMP/race.log" node --input-type=module -e '
 import { readFileSync } from "node:fs";
@@ -1385,6 +1401,7 @@ for (const line of lines) {
   const pid = parts[0];
   const kind = parts[1];
   const at = Number(parts[2]);
+  if (kind === "refuse") process.exit(5);
   if (kind === "enter") {
     if (open) process.exit(3);
     open = { pid, at };
@@ -1401,14 +1418,46 @@ spans.sort((a, b) => a.start - b.start);
 if (!(spans[0].end <= spans[1].start)) process.exit(7);
 if (spans[0].pid === spans[1].pid) process.exit(8);
 '; then
-  ok "two stale-lock waiters did not overlap"
+  ok "two concurrent runs never both held the lock"
 else
-  bad "two stale-lock waiters did not overlap"
+  bad "two concurrent runs never both held the lock"
 fi
 if [[ ! -e "$TMP/race.lock" ]]; then
-  ok "stale-lock waiters released the lock"
+  ok "each run released only the lock it created"
 else
-  bad "stale-lock waiters released the lock"
+  bad "each run released only the lock it created"
+fi
+
+foreign_pid=$("$NODE_REAL" -e 'process.stdout.write(String(process.pid))')
+printf '%s' "$foreign_pid" > "$TMP/foreign.lock"
+foreign_cksum=$(cksum "$TMP/foreign.lock")
+foreign_ino=$(node -e 'process.stdout.write(String(require("node:fs").statSync(process.argv[1]).ino))' "$TMP/foreign.lock")
+: > "$TMP/foreign.log"
+TOOL_URL="file://${TOOL}" LOCK_PATH="$TMP/foreign.lock" LOCK_LOG="$TMP/foreign.log" LOCK_WAIT=200 LOCK_HOLD=50 \
+  node "$TMP/lock-probe.mjs" >"$TMP/foreign1.out" 2>"$TMP/foreign1.err" &
+foreign1=$!
+TOOL_URL="file://${TOOL}" LOCK_PATH="$TMP/foreign.lock" LOCK_LOG="$TMP/foreign.log" LOCK_WAIT=200 LOCK_HOLD=50 \
+  node "$TMP/lock-probe.mjs" >"$TMP/foreign2.out" 2>"$TMP/foreign2.err" &
+foreign2=$!
+foreign1_rc=0
+foreign2_rc=0
+wait "$foreign1" || foreign1_rc=$?
+wait "$foreign2" || foreign2_rc=$?
+foreign_cksum_after=$(cksum "$TMP/foreign.lock")
+foreign_ino_after=$(node -e 'process.stdout.write(String(require("node:fs").statSync(process.argv[1]).ino))' "$TMP/foreign.lock")
+foreign_names=$(find "$TMP" -maxdepth 1 -name 'foreign.lock*' ! -name 'foreign.lock' -print)
+if [[ "$foreign1_rc" -eq 2 && "$foreign2_rc" -eq 2 ]] \
+  && [[ "$foreign_cksum" == "$foreign_cksum_after" && "$foreign_ino" == "$foreign_ino_after" ]] \
+  && [[ -z "$foreign_names" ]] \
+  && ! grep -q ' enter ' "$TMP/foreign.log"; then
+  ok "two runs facing a foreign lock neither proceed nor touch it"
+else
+  bad "two runs facing a foreign lock neither proceed nor touch it (rc=$foreign1_rc/$foreign2_rc names=$(printf '%s' "$foreign_names"))"
+fi
+if grep -q "pid ${foreign_pid}" "$TMP/foreign1.err" && grep -q "Remove ${TMP}/foreign.lock" "$TMP/foreign1.err"; then
+  ok "a foreign lock refusal names the file, pid, and removal step"
+else
+  bad "a foreign lock refusal names the file, pid, and removal step"
 fi
 
 printf '\n%s\n' "=== summary ==="
