@@ -44,7 +44,7 @@ A check that cannot run is unknown. That includes a commit that is not in the lo
 
 A non-fix closure is never proven. An accepted-risk sign-off is not a Status or Proof field, so a passing replay on a non-fix closure stays unknown.
 
-Gate stdout and stderr are not copied into the report. Each invocation stops at 5 seconds. The child process receives `PATH`, `HOME`, `TMPDIR`, and locale only.
+Gate stdout and stderr are not copied into the report. Each invocation stops at 5 seconds. On expiry the checker kills the gate and every descendant, including a child that left the process group, before it removes the temporary directory. The child process receives `PATH`, `HOME`, `TMPDIR`, and locale only.
 
 ## Report
 

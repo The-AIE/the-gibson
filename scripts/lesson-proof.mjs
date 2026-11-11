@@ -28,7 +28,7 @@
  *   node scripts/lesson-proof.mjs [--ledger PATH] [--repo PATH] [--json PATH] [--strict]
  *   node scripts/lesson-proof.mjs --help
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -46,6 +46,61 @@ import { parseFlags } from "./lib/args.mjs";
 const PREFIX = "lesson-proof:";
 const SCHEMA = "gibson.lesson-proof.report.v1";
 const GATE_TIMEOUT_MS = 5000;
+const GATE_REAP_MS = 400;
+const GATE_STDIO_MAX = 64 * 1024;
+// Records the gate's exit in a file. The parent kills this process group on
+// expiry; a status file is how a synchronous caller learns the exit code
+// without waiting on the event loop.
+const GATE_SUPERVISOR = [
+  'const { spawn } = require("node:child_process");',
+  'const fs = require("node:fs");',
+  "const statusPath = process.argv[2];",
+  "const bin = process.argv[3];",
+  "const args = process.argv.slice(4);",
+  `const MAX = ${GATE_STDIO_MAX};`,
+  "let out = 0;",
+  "let err = 0;",
+  "let settled = false;",
+  "function writeStatus(line) {",
+  "  if (settled) return;",
+  "  settled = true;",
+  "  const tmp = statusPath + '.tmp';",
+  "  try {",
+  "    fs.writeFileSync(tmp, line);",
+  "    fs.renameSync(tmp, statusPath);",
+  "  } catch {",
+  "    /* the parent treats a missing status as did-not-run */",
+  "  }",
+  "}",
+  "let child;",
+  "try {",
+  '  child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });',
+  "} catch {",
+  '  writeStatus("error SPAWN\\n");',
+  "  process.exit(0);",
+  "}",
+  "function count(buf, kind) {",
+  '  if (kind === "out") out += buf.length;',
+  "  else err += buf.length;",
+  "  if (out > MAX || err > MAX) {",
+  '    writeStatus("error MAXBUFFER\\n");',
+  '    try { child.kill("SIGKILL"); } catch { /* already gone */ }',
+  "    process.exit(0);",
+  "  }",
+  "}",
+  'if (child.stdout) child.stdout.on("data", (buf) => count(buf, "out"));',
+  'if (child.stderr) child.stderr.on("data", (buf) => count(buf, "err"));',
+  'child.on("error", (error) => {',
+  '  writeStatus("error " + String((error && error.code) || "SPAWN") + "\\n");',
+  "  process.exit(0);",
+  "});",
+  'child.on("exit", (code, signal) => {',
+  '  if (signal) writeStatus("signal " + signal + "\\n");',
+  '  else writeStatus("exit " + String(code) + "\\n");',
+  "  process.exit(0);",
+  "});",
+  "",
+].join("\n");
 const JS_ON = "const LESSON_PROOF_ENFORCE = true;";
 const JS_OFF = "const LESSON_PROOF_ENFORCE = false;";
 const SH_ON = "LESSON_PROOF_ENFORCE=1";
@@ -58,7 +113,7 @@ const LIMITS = [
   "Non-fix closures are never proven. Accepted-risk sign-off is not a cross-lane ledger field.",
   "Replay executes the entrypoint blob from the stated commit with --fixture. Only bash and node entrypoints are runnable.",
   "The disarm mutation rewrites exactly one LESSON_PROOF_ENFORCE line in that entrypoint file.",
-  "Each gate invocation is capped at 5 seconds. A timeout, spawn failure, or missing commit is unknown.",
+  "Each gate invocation is capped at 5 seconds. On expiry the gate and its descendants are killed before the temporary directory is removed. A timeout, spawn failure, or missing commit is unknown.",
   "The commit must already exist in the local repository. This checker does not fetch.",
   "The checker does not read fixture bytes. The entrypoint decides what the bad directory means.",
   "Replay copies only the entrypoint blob and the fixture tree into a temporary directory. A relative import or source of another repository file is not available. When the file still parses, both runs exit non-zero and the row is unproven, not unknown.",
@@ -420,20 +475,160 @@ function gateEnv(work) {
   };
 }
 
-function runGate(how, file, fixtureDir, work) {
-  const r = spawnSync(how.bin, [...how.run, "--fixture", fixtureDir], {
-    cwd: work,
-    env: gateEnv(work),
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function safePid(pid) {
+  return Number.isInteger(pid) && pid > 1 && pid !== process.pid;
+}
+
+function signalPid(pid, signal) {
+  if (!safePid(pid) && !(Number.isInteger(pid) && pid < -1)) return;
+  try {
+    process.kill(pid, signal);
+  } catch {
+    /* already gone */
+  }
+}
+
+function processRows() {
+  const listed = spawnSync("ps", ["-ax", "-o", "pid=,ppid="], {
     encoding: "utf8",
-    timeout: GATE_TIMEOUT_MS,
-    // A gate can ignore SIGTERM. SIGKILL is what makes this timeout a bound.
-    killSignal: "SIGKILL",
-    maxBuffer: 64 * 1024,
+    timeout: 2000,
+    maxBuffer: 8 * 1024 * 1024,
   });
-  if (r.error && r.error.code === "ETIMEDOUT") return { ran: false, reason: "gate-timeout" };
-  if (r.error || r.signal) return { ran: false, reason: "gate-did-not-run" };
-  if (typeof r.status !== "number") return { ran: false, reason: "gate-did-not-run" };
-  return { ran: true, exitCode: r.status, reason: null };
+  if (listed.status !== 0 || typeof listed.stdout !== "string") return null;
+  const rows = [];
+  for (const line of listed.stdout.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 2) continue;
+    const pid = Number(parts[0]);
+    const ppid = Number(parts[1]);
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
+    rows.push({ pid, ppid });
+  }
+  return rows;
+}
+
+function descendantPids(rootPid) {
+  const rows = processRows();
+  if (!rows || !safePid(rootPid)) return [];
+  const byParent = new Map();
+  for (const row of rows) {
+    const list = byParent.get(row.ppid);
+    if (list) list.push(row.pid);
+    else byParent.set(row.ppid, [row.pid]);
+  }
+  const out = [];
+  const seen = new Set([rootPid]);
+  const stack = [rootPid];
+  while (stack.length) {
+    const current = stack.pop();
+    for (const child of byParent.get(current) || []) {
+      if (!safePid(child) || seen.has(child)) continue;
+      seen.add(child);
+      out.push(child);
+      stack.push(child);
+    }
+  }
+  return out;
+}
+
+// SIGKILL the leader's process group and any descendant that left it.
+// spawnSync's timeout only signals the direct child, so a grandchild keeps
+// running after the temporary directory is removed.
+function killTree(leader) {
+  const descendants = descendantPids(leader);
+  for (const pid of descendants) signalPid(pid, "SIGKILL");
+  if (safePid(leader)) {
+    signalPid(-leader, "SIGKILL");
+    signalPid(leader, "SIGKILL");
+  }
+  return descendants;
+}
+
+function pidAlive(pid) {
+  if (!safePid(pid)) return false;
+  const listed = spawnSync("ps", ["-p", String(pid), "-o", "stat="], {
+    encoding: "utf8",
+    timeout: 1000,
+  });
+  if (listed.status !== 0 || typeof listed.stdout !== "string") {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return err.code === "EPERM";
+    }
+  }
+  const stat = listed.stdout.trim();
+  // A zombie is not running. Waiting on it would burn the reap budget.
+  if (!stat || stat.startsWith("Z")) return false;
+  return true;
+}
+
+function waitDead(pids, budgetMs) {
+  const pending = pids.filter((pid) => safePid(pid));
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (pending.every((pid) => !pidAlive(pid))) return;
+    sleepMs(25);
+  }
+}
+
+function mapGateStatus(text) {
+  const line = String(text || "").trim();
+  const space = line.indexOf(" ");
+  if (space < 0) return { ran: false, reason: "gate-did-not-run" };
+  const kind = line.slice(0, space);
+  const rest = line.slice(space + 1).trim();
+  if (kind === "exit" && /^-?\d+$/.test(rest)) {
+    return { ran: true, exitCode: Number(rest), reason: null };
+  }
+  return { ran: false, reason: "gate-did-not-run" };
+}
+
+function runGate(how, file, fixtureDir, work) {
+  const statusPath = join(work, ".gate-status");
+  const supervisorPath = join(work, ".gate-supervisor.cjs");
+  rmSync(statusPath, { force: true });
+  rmSync(`${statusPath}.tmp`, { force: true });
+  writeFileSync(supervisorPath, GATE_SUPERVISOR);
+  const child = spawn(
+    process.execPath,
+    [supervisorPath, statusPath, how.bin, ...how.run, "--fixture", fixtureDir],
+    {
+      cwd: work,
+      env: gateEnv(work),
+      detached: true,
+      stdio: "ignore",
+    },
+  );
+  child.unref();
+  const leader = child.pid;
+  if (!safePid(leader)) return { ran: false, reason: "gate-did-not-run" };
+  const deadline = Date.now() + GATE_TIMEOUT_MS;
+  while (!existsSync(statusPath)) {
+    if (Date.now() >= deadline) {
+      const descendants = killTree(leader);
+      waitDead([leader, ...descendants], GATE_REAP_MS);
+      return { ran: false, reason: "gate-timeout" };
+    }
+    sleepMs(40);
+  }
+  let text = "";
+  try {
+    text = readFileSync(statusPath, "utf8");
+  } catch {
+    const descendants = killTree(leader);
+    waitDead([leader, ...descendants], GATE_REAP_MS);
+    return { ran: false, reason: "gate-did-not-run" };
+  }
+  const mapped = mapGateStatus(text);
+  const descendants = killTree(leader);
+  waitDead([leader, ...descendants], GATE_REAP_MS);
+  return mapped;
 }
 
 function disarm(source) {

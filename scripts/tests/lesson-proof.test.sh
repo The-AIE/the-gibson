@@ -506,6 +506,62 @@ if [[ "$ignore_rc" -eq 0 \
 else
   bad "SIGTERM-ignoring gate rc=$ignore_rc elapsed=${ignore_elapsed}s reason=$ignore_reason"
 fi
+
+sentinel_running() {
+  local stat pid rest
+  while read -r stat pid rest; do
+    case "$stat" in
+      Z*) continue ;;
+    esac
+    case "$rest" in
+      *lesson-proof-orphan-sentinel*) return 0 ;;
+    esac
+  done < <(ps -ax -o stat=,pid=,command=)
+  return 1
+}
+
+reap_sentinels() {
+  local stat pid rest
+  while read -r stat pid rest; do
+    case "$stat" in
+      Z*) continue ;;
+    esac
+    case "$rest" in
+      *lesson-proof-orphan-sentinel*) kill -9 "$pid" 2>/dev/null || true ;;
+    esac
+  done < <(ps -ax -o stat=,pid=,command=)
+}
+
+reap_sentinels
+{
+  printf '## %s · 2026-10-25 · orphan-child\n' "$(lid 941)"
+  printf '**Status:** fixed\n'
+  printf '**Proof:** %s gates/orphan-child.sh tree-good\n' "$SHA"
+  printf '**Tags:** #fixture\n'
+} > "$ROOT/orphan.md"
+orphan_start=$(date +%s)
+node "$SENSOR" --repo "$REPO" --ledger "$ROOT/orphan.md" --json "$ROOT/orphan.json" \
+  >"$ROOT/orphan.out" 2>"$ROOT/orphan.err"
+orphan_rc=$?
+orphan_elapsed=$(( $(date +%s) - orphan_start ))
+orphan_reason=$(get_field "$ROOT/orphan.json" "$(lid 941)" replay.bad.reason)
+sleep 0.4
+if [[ "$orphan_rc" -eq 0 \
+   && "$(get_field "$ROOT/orphan.json" "$(lid 941)" verdict)" == "unknown" \
+   && "$orphan_reason" == "gate-timeout" \
+   && "$orphan_elapsed" -ge 8 \
+   && "$orphan_elapsed" -le 25 ]] \
+   && ! sentinel_running; then
+  ok "timeout kills a detached descendant (${orphan_elapsed}s)"
+else
+  bad "detached descendant rc=$orphan_rc elapsed=${orphan_elapsed}s reason=$orphan_reason running=$(sentinel_running && echo yes || echo no)"
+  reap_sentinels
+fi
+if printf '%s\n' "$(header_field "$ROOT/orphan.json" limits)" | grep -F 'descendants are killed' >/dev/null; then
+  ok "timeout limit names descendants"
+else
+  bad "timeout limit does not name descendants"
+fi
 if [[ "$(get_field "$BIG_JSON" "$(lid 903)" proof)" == "null" \
    && "$(get_field "$BIG_JSON" "$(lid 904)" proof)" == "unknown" \
    && "$(get_field "$BIG_JSON" "$(lid 901)" proof.sha)" == "$SHA" ]]; then
