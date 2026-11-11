@@ -1,5 +1,8 @@
 ---
 name: gibson-direct
+key: gibson.gibson-direct
+category: Engineering Tools
+tags: [gibson, spec]
 description: "The owner's product-direction interface to the Gibson: turn plain-English goals into a well-scoped plan and decomposed, acceptance-criteria'd issues the fleet can build from — and answer the fleet's product questions on the owner's behalf where direction already covers them. For owners who don't read code. Trigger: 'here's what I want built', 'product direction', 'turn this into a plan/issues', or when gibson-audit finds no usable backlog."
 ---
 

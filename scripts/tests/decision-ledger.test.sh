@@ -576,6 +576,280 @@ else
   ok "FIFO skip (mkfifo unavailable)"
 fi
 
+
+echo
+echo "=== #624: stale PID observation cannot lose a successful append ==="
+# Derived from the captain's original unmodified-source reproducer (issue #624).
+# Both writer exits and all exact identities remain assertions on both paths.
+if python3 - "$TOOL" "$ROOT" <<'PYRACE'
+import json
+import fcntl
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+tool = Path(sys.argv[1])
+out = Path(sys.argv[2]) / 'stale-race'
+out.mkdir()
+processes = []
+with tempfile.TemporaryDirectory(prefix='ledger-race-', dir=str(out)) as tmp:
+    root = Path(tmp).resolve(); ledger = root / 'ledger.jsonl'; bindir = root / 'bin'; bindir.mkdir()
+    real_cat, real_mv = shutil.which('cat'), shutil.which('mv')
+    (bindir / 'cat').write_text('''#!/usr/bin/env bash
+set -euo pipefail
+last="${!#}"
+if [[ "${GIBSON_RACE_ROLE:-}" == observer && "$last" == "$GIBSON_RACE_LEDGER.lock/pid" && ! -f "$GIBSON_RACE_DIR/observer-read" ]]; then
+  old=$("$GIBSON_RACE_CAT" "$@")
+  : > "$GIBSON_RACE_DIR/observer-read"
+  for ((n=0;n<1500;n++)); do
+    if [[ -f "$GIBSON_RACE_DIR/release-observer" ]]; then printf '%s\\n' "$old"; exit 0; fi
+    sleep 0.01
+  done
+  exit 70
+fi
+exec "$GIBSON_RACE_CAT" "$@"
+''')
+    (bindir / 'mv').write_text('''#!/usr/bin/env bash
+set -euo pipefail
+last="${!#}"
+if [[ "${GIBSON_RACE_ROLE:-}" == holder && "$last" == "$GIBSON_RACE_LEDGER" ]]; then
+  : > "$GIBSON_RACE_DIR/holder-ready"
+  for ((n=0;n<1500;n++)); do
+    if [[ -f "$GIBSON_RACE_DIR/release-holder" ]]; then exec "$GIBSON_RACE_MV" "$@"; fi
+    sleep 0.01
+  done
+  exit 70
+fi
+exec "$GIBSON_RACE_MV" "$@"
+''')
+    for p in bindir.iterdir(): p.chmod(0o755)
+    env = {**os.environ, 'PATH': str(bindir) + os.pathsep + os.environ['PATH'],
+           'GIBSON_RACE_CAT': real_cat, 'GIBSON_RACE_MV': real_mv,
+           'GIBSON_RACE_DIR': str(root), 'GIBSON_RACE_LEDGER': str(ledger)}
+    def args(identity):
+        return [str(tool), 'add', '--ledger', str(ledger), '--created-at', '2026-11-02T01:00:00Z',
+                '--repo', 'acme/app', '--gate', 'G1', '--source-type', 'pr', '--source-id', identity,
+                '--source-sha', 'a' * 40, '--what', 'Offline race fixture', '--why-you', 'Owner decision fixture',
+                '--risk-level', 'low', '--risk-consequence', 'Fixture row lost', '--risk-undo', 'Remove fixture',
+                '--recommend', 'Wait', '--recommend-rationale', 'Fixture only', '--if-you-wait', 'No live work',
+                '--source-ref', 'offline fixture']
+    def await_file(name):
+        until = time.monotonic() + 12
+        while not (root / name).exists():
+            if time.monotonic() > until: raise RuntimeError('timed out awaiting ' + name)
+            time.sleep(0.01)
+    try:
+        subprocess.run(args('seed'), env=env, check=True, capture_output=True, timeout=12)
+        dead = subprocess.Popen([sys.executable, '-c', 'pass']); dead.wait()
+        lock = Path(str(ledger) + '.lock'); lock.mkdir()
+        (lock / 'pid').write_text(str(dead.pid) + '\n'); (lock / 'owner').write_text('old-fixture\n')
+        observer = subprocess.Popen(args('observer'), env={**env, 'GIBSON_RACE_ROLE': 'observer'}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        processes.append(observer); await_file('observer-read')
+        # Inspect actual kernel exclusion, not elapsed time or a source-text flag.
+        # With serialization the old interleaving is impossible: let A complete
+        # before waiting for B's rename barrier. Unfixed code reaches B first.
+        serialized = False
+        guard = Path(str(ledger) + '.lock-guard')
+        if guard.exists():
+            fd = os.open(guard, os.O_RDONLY)
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    serialized = True
+            finally:
+                os.close(fd)
+        holder = subprocess.Popen(args('holder'), env={**env, 'GIBSON_RACE_ROLE': 'holder'}, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        processes.append(holder)
+        if serialized:
+            (root / 'release-observer').touch()
+            observer_out, observer_err = observer.communicate(timeout=12)
+            await_file('holder-ready')
+        else:
+            await_file('holder-ready')
+            live_pid = int((lock / 'pid').read_text()); assert live_pid == holder.pid
+            (root / 'release-observer').touch()
+            observer_out, observer_err = observer.communicate(timeout=12)
+        successor_intact = (lock / 'pid').exists() and int((lock / 'pid').read_text()) == holder.pid
+        (root / 'release-holder').touch()
+        holder_out, holder_err = holder.communicate(timeout=12)
+        rows = [json.loads(s) for s in ledger.read_text().splitlines()]
+        ids = [r['source_id'] for r in rows]
+        report = {'serialized': serialized, 'observer_exit': observer.returncode,
+                  'holder_exit': holder.returncode, 'successor_intact': successor_intact,
+                  'expected_ids': ['seed', 'observer', 'holder'], 'actual_ids': ids}
+        for name, value in [('observer.out', observer_out), ('observer.err', observer_err), ('holder.out', holder_out), ('holder.err', holder_err)]:
+            (out / name).write_bytes(value)
+        (out / 'ledger.jsonl').write_bytes(ledger.read_bytes())
+        (out / 'result.json').write_text(json.dumps(report, indent=2) + '\n')
+        print(json.dumps(report, indent=2))
+        assert observer.returncode == holder.returncode == 0, report
+        assert sorted(ids) == ['holder', 'observer', 'seed'] and successor_intact, report
+    finally:
+        (root / 'release-observer').touch(); (root / 'release-holder').touch()
+        for p in processes:
+            if p.poll() is None:
+                p.terminate()
+                try: p.wait(timeout=3)
+                except subprocess.TimeoutExpired: p.kill(); p.wait()
+PYRACE
+then
+  ok "stale observer preserves successor ownership and all successful appends"
+else
+  bad "stale observer displaced a successor or lost a successful append"
+fi
+
+echo
+echo "=== #624: kernel ownership, crashes, refusals and identical retries ==="
+if python3 - "$TOOL" "$ROOT" <<'PYGUARD'
+import fcntl, json, os, signal, subprocess, sys, time
+from pathlib import Path
+
+tool, root = Path(sys.argv[1]), Path(sys.argv[2]) / 'guard-cases'
+root.mkdir()
+processes = []
+
+def args(ledger, identity):
+    return [str(tool), 'add', '--ledger', str(ledger), '--created-at', '2026-11-02T01:00:00Z',
+            '--repo', 'acme/app', '--gate', 'G1', '--source-type', 'pr', '--source-id', identity,
+            '--source-sha', 'a' * 40, '--what', 'Offline race fixture', '--why-you', 'Owner decision fixture',
+            '--risk-level', 'low', '--risk-consequence', 'Fixture row lost', '--risk-undo', 'Remove fixture',
+            '--recommend', 'Wait', '--recommend-rationale', 'Fixture only', '--if-you-wait', 'No live work',
+            '--source-ref', 'offline fixture']
+
+def run(argv, **kw):
+    return subprocess.run(argv, capture_output=True, timeout=12, **kw)
+
+def launch(argv, **kw):
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, **kw)
+    processes.append(p)
+    return p
+
+def await_file(path):
+    deadline = time.monotonic() + 12
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise AssertionError('barrier not reached: ' + str(path))
+        time.sleep(.01)
+
+try:
+    # A live kernel holder is authoritative even without the legacy PID files.
+    ledger = root / 'crash.jsonl'
+    assert run(args(ledger, 'seed')).returncode == 0
+    guard = Path(str(ledger) + '.lock-guard')
+    inode = guard.stat().st_ino
+    ready = root / 'guard-ready'
+    holder = launch([sys.executable, '-c', '''import os,fcntl,sys,time
+fd=os.open(sys.argv[1],os.O_RDONLY)
+fcntl.flock(fd,fcntl.LOCK_EX)
+open(sys.argv[2],"w").close()
+time.sleep(30)
+''', str(guard), str(ready)])
+    await_file(ready)
+    before = ledger.read_bytes()
+    blocked = run(args(ledger, 'blocked'), env={**os.environ, 'DECISION_LEDGER_LOCK_TRIES': '2'})
+    assert blocked.returncode == 4 and ledger.read_bytes() == before, blocked.stderr
+    holder.kill(); holder.communicate(timeout=3)
+    # Recover known-dead legacy metadata while owning the same kernel inode.
+    lock = Path(str(ledger) + '.lock'); lock.mkdir()
+    (lock / 'pid').write_text(str(holder.pid) + '\n')
+    (lock / 'owner').write_text('crashed-fixture\n')
+    recovered = run(args(ledger, 'recovered'))
+    assert recovered.returncode == 0, recovered.stderr
+    assert [json.loads(s)['source_id'] for s in ledger.read_text().splitlines()] == ['seed', 'recovered']
+    assert guard.stat().st_ino == inode and not lock.exists()
+    fd = os.open(guard, os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); os.close(fd)
+    print('live kernel holder refused; crash released ownership; known-dead metadata safely recovered')
+
+    # Refuse every non-directory guard without opening a FIFO or touching a victim.
+    victim = root / 'victim'; victim.mkdir(); (victim / 'keep').write_text('unchanged')
+    for kind in ('symlink', 'dangling', 'file', 'fifo'):
+        leaf = root / ('unsafe-' + kind + '.jsonl')
+        unsafe = Path(str(leaf) + '.lock-guard')
+        if kind == 'symlink': unsafe.symlink_to(victim)
+        elif kind == 'dangling': unsafe.symlink_to(root / 'missing-victim')
+        elif kind == 'file': unsafe.write_text('unchanged')
+        else: os.mkfifo(unsafe)
+        result = run([str(tool), 'list', '--ledger', str(leaf)])
+        assert result.returncode == 4, (kind, result.returncode, result.stderr)
+        assert not leaf.exists() and (victim / 'keep').read_text() == 'unchanged'
+        assert not (root / 'missing-victim').exists()
+    print('symlink, dangling symlink, regular-file and FIFO guards refused without mutation')
+
+    # Unknown or unsafe legacy metadata stays intact and never becomes approval.
+    for kind in ('pid-link', 'owner-fifo', 'unknown-owner'):
+        leaf = root / (kind + '.jsonl'); lock = Path(str(leaf) + '.lock'); lock.mkdir()
+        if kind == 'pid-link':
+            (lock / 'pid').symlink_to(victim / 'keep')
+        elif kind == 'owner-fifo':
+            gone = launch([sys.executable, '-c', 'pass']); gone.communicate(timeout=3)
+            (lock / 'pid').write_text(str(gone.pid) + '\n'); os.mkfifo(lock / 'owner')
+        else:
+            (lock / 'owner').write_text('not-published-yet\n')
+        result = run([str(tool), 'list', '--ledger', str(leaf)], env={**os.environ, 'DECISION_LEDGER_LOCK_TRIES': '2'})
+        assert result.returncode == 4 and lock.exists() and not leaf.exists(), (kind, result.stderr)
+        assert (victim / 'keep').read_text() == 'unchanged'
+    print('unsafe PID/owner and incomplete ownership refused; victim bytes retained')
+
+    # Killing the Bash owner cannot free a lock still held by its prepared-write child.
+    ledger = root / 'orphan.jsonl'; assert run(args(ledger, 'seed')).returncode == 0
+    bindir = root / 'bin'; bindir.mkdir(); ready = root / 'rename-ready'; release = root / 'rename-release'
+    import shutil
+    real_mv = shutil.which('mv')
+    wrapper = bindir / 'mv'
+    wrapper.write_text('''#!/usr/bin/env bash
+set -eu
+: > "$RENAME_READY"
+for ((i=0;i<1500;i++)); do
+  if [[ -f "$RENAME_RELEASE" ]]; then exec "$REAL_MV" "$@"; fi
+  sleep 0.01
+done
+exit 70
+'''); wrapper.chmod(0o755)
+    env = {**os.environ, 'PATH': str(bindir) + os.pathsep + os.environ['PATH'],
+           'RENAME_READY': str(ready), 'RENAME_RELEASE': str(release), 'REAL_MV': real_mv}
+    writer = launch(args(ledger, 'prepared'), env=env); await_file(ready)
+    writer.kill(); writer.wait(timeout=3)
+    before = ledger.read_bytes()
+    blocked = run(args(ledger, 'next'), env={**os.environ, 'DECISION_LEDGER_LOCK_TRIES': '2'})
+    assert blocked.returncode == 4 and ledger.read_bytes() == before, blocked.stderr
+    release.touch(); writer.communicate(timeout=12)
+    # Prepared rename may have committed before the killed parent could report.
+    # Retrying its same identity must be an idempotent no-op, then admit next.
+    assert run(args(ledger, 'prepared')).returncode == 0
+    assert run(args(ledger, 'next')).returncode == 0
+    ids = [json.loads(s)['source_id'] for s in ledger.read_text().splitlines()]
+    assert ids == ['seed', 'prepared', 'next'], ids
+    print('orphan prepared-write child retained exclusion; retry recovered without duplicate/lost events')
+
+    ledger = root / 'identical.jsonl'
+    writers = [launch(args(ledger, 'same')) for _ in range(3)]
+    results = [p.communicate(timeout=12) for p in writers]
+    assert all(p.returncode == 0 for p in writers), results
+    assert len({o.strip() for o, _ in results}) == 1
+    assert len(ledger.read_text().splitlines()) == 1
+    print('concurrent identical retries all succeeded and retained exactly one event')
+finally:
+    # Bound every child/process group, including descendants of a killed parent.
+    for p in processes:
+        try: os.killpg(p.pid, signal.SIGTERM)
+        except ProcessLookupError: pass
+        if p.poll() is None:
+            try: p.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(p.pid, signal.SIGKILL); p.communicate(timeout=3)
+PYGUARD
+then
+  ok "kernel ownership survives interleavings, releases on crash and refuses unsafe storage"
+else
+  bad "kernel ownership, crash recovery, refusal or idempotency regression"
+fi
+
 echo
 echo "=== summary ==="
 echo "PASS=$PASS FAIL=$FAIL"

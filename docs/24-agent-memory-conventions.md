@@ -124,7 +124,7 @@ Every adopted target should include a short section equivalent to
 |-------|--------|
 | Target `MEMORY.md` / `memory/` | Lessons about **that product repo** |
 | Gibson `memory/LESSONS.md` | Lessons about **the harness** and cross-repo patterns |
-| Mission Control memory | Short-lived runtime coordination |
+| Agent Kontrol memory | Short-lived runtime coordination |
 
 Promote a target lesson into Gibson `memory/LESSONS.md` when it is harness-general
 (e.g. a gate bug, a worktree rule). Keep product-specific merge gotchas in the

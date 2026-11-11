@@ -49,7 +49,7 @@ grok -p "$(cat playbooks/historian.md)
 
 Mode: weekly-retro
 Since: 2026-07-17
-Sources: gh pr list --search 'merged:>=YYYY-MM-DD', CI, MC costs
+Sources: gh pr list --search 'merged:>=YYYY-MM-DD', CI, AK costs
 "
 ```
 
@@ -84,7 +84,7 @@ Prefer the agent that hit it ships the small fix in-session. Else file
 ## Weekly sweep procedure
 
 1. Pull exhaust: merged PRs, CI failures, REQUEST_CHANGES reasons, eval reports,
-   MC `cost_usd`, twice-failed tasks, deploy incidents.
+   AK `cost_usd`, twice-failed tasks, deploy incidents.
 2. Cluster recurring causes; dedup against LESSONS.md.
    Before filing anything, apply the public/private test in docs/09: an entry that
    names your hosts, private repositories, accounts or local paths goes to

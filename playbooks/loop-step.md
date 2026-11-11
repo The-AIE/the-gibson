@@ -14,7 +14,7 @@ outputs:
   - hat-specific artifacts (PR, tests, verdict, eval, merge, lesson)
   - updated gibson/loop-state.md (next hat / next action / round count)
   - append to gibson/journal.md
-  - MC heartbeat when configured
+  - AK heartbeat when configured
 gates:
   - kill switch checked by driver before this prompt runs (docs/11)
   - fresh context per hat — do not assume prior conversation memory
@@ -178,7 +178,7 @@ touch /path/to/target/gibson/HALT
 ### If `{{hat}}` = historian
 
 - File lessons if any trigger fired; small harness fix if in scope.
-- Append journal; heartbeat MC; set next hat to triage (`builder` or
+- Append journal; heartbeat AK; set next hat to triage (`builder` or
   `decomposer` if queue empty and plan approved).
 
 ---
@@ -256,7 +256,7 @@ touch /path/to/target/gibson/HALT
    What: ...
    Why next: ...
    ```
-3. Report status (MC `report_status` / curl heartbeat if configured).
+3. Report status (AK `report_status` / curl heartbeat if configured).
 4. Exit 0 on clean progress; non-zero only on unrecoverable error (driver counts
    error budget).
 
