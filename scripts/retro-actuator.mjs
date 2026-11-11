@@ -61,6 +61,7 @@ import {
 const REPORT_SCHEMA = "gibson.retro-actuator-report.v1";
 const STATE_SCHEMA = "gibson.retro-actuator-state.v1";
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const GH_CREATE_TIMEOUT_MS = 15000;
 const DEFAULT_REPAIR_BUDGET = 2;
 const MAX_EVENT_BYTES = 2 * 1024 * 1024;
 const MAX_EVENTS = 10000;
@@ -188,18 +189,15 @@ function iso(ms) {
   return new Date(ms).toISOString().replace(".000Z", "Z");
 }
 
-function positiveInt(flag, raw) {
-  if (!/^[1-9]\d*$/.test(raw)) {
-    throw new Error(`${flag} must be a positive integer`);
-  }
+function boundedInt(flag, raw, allowZero) {
+  const ok = allowZero ? /^\d+$/.test(raw) : /^[1-9]\d*$/.test(raw);
+  if (!ok) throw new Error(`${flag} must be a ${allowZero ? "non-negative" : "positive"} integer`);
   return Number(raw);
 }
 
-function nonNegativeInt(flag, raw) {
-  if (!/^\d+$/.test(raw)) {
-    throw new Error(`${flag} must be a non-negative integer`);
-  }
-  return Number(raw);
+function ghCreateTimeoutMs() {
+  const n = Number(process.env.RETRO_GH_CREATE_TIMEOUT_MS);
+  return Number.isInteger(n) && n >= 50 && n <= 60000 ? n : GH_CREATE_TIMEOUT_MS;
 }
 
 function sleepMs(ms) {
@@ -282,12 +280,9 @@ export function acquireLock(lockPath, timeoutMs) {
       return { ok: true, fd, path: lockPath };
     } catch (error) {
       if (error.code !== "EEXIST") return { ok: false, reason: "lock-failed" };
-      if (lockIsStale(lockPath) && reclaimStaleLock(lockPath)) {
-        if (Date.now() - start >= timeoutMs) return { ok: false, reason: "lock-timeout" };
-        continue;
-      }
+      const reclaimed = lockIsStale(lockPath) && reclaimStaleLock(lockPath);
       if (Date.now() - start >= timeoutMs) return { ok: false, reason: "lock-timeout" };
-      sleepMs(Math.min(20, Math.max(0, timeoutMs - (Date.now() - start))));
+      if (!reclaimed) sleepMs(Math.min(20, Math.max(0, timeoutMs - (Date.now() - start))));
     }
   }
 }
@@ -436,14 +431,18 @@ function blankReport(apply) {
   };
 }
 
+function markUnknown(report, reason) {
+  report.evaluation = "UNKNOWN";
+  report.unknown_reason = reason;
+  report.alerts.push({ reason: "triage-alert", detail: reason });
+}
+
 function unknownReport(apply, reason) {
   const report = blankReport(apply);
-  report.evaluation = "UNKNOWN";
+  markUnknown(report, reason);
   report.detector = "UNKNOWN";
   report.trust = "untrusted";
   report.new_keys_trusted = false;
-  report.unknown_reason = reason;
-  report.alerts.push({ reason: "triage-alert", detail: reason });
   return report;
 }
 
@@ -739,26 +738,37 @@ function latestRealIssue(inc) {
 
 function issueBody(inc) {
   const attempts = inc.attempts
-    .map(
-      (attempt) =>
-        `- attempt_id=${attempt.attempt_id} head_sha=${attempt.head_shas.join(",")} observed_at=${attempt.observed_at}`
-    )
+    .map((attempt) => `- attempt_id=${attempt.attempt_id} head_sha=${attempt.head_shas.join(",")} observed_at=${attempt.observed_at}`)
     .join("\n");
-  return [
-    "Advisory repair request from the retro actuator.",
-    "",
-    "This request does not merge pull requests and does not claim the work.",
-    "",
-    `Incident key: ${inc.incident_key}`,
-    `State: ${inc.state}`,
-    `Normalized signature: ${inc.normalized_signature}`,
-    `Signature schema version: ${inc.signature_schema_version}`,
-    "Distinct attempts:",
-    attempts || "- none",
-    "",
-    "Limit: deployed and effective evidence is checked for shape only. This actuator does not observe which SHA workers run.",
-    "",
-  ].join("\n");
+  return `Advisory repair request from the retro actuator.
+
+This request does not merge pull requests and does not claim the work.
+
+Incident key: ${inc.incident_key}
+State: ${inc.state}
+Normalized signature: ${inc.normalized_signature}
+Signature schema version: ${inc.signature_schema_version}
+Distinct attempts:
+${attempts || "- none"}
+
+Limit: deployed and effective evidence is checked for shape only. This actuator does not observe which SHA workers run.
+`;
+}
+
+function pushRequest(inc, report, status, reason, nowMs, title) {
+  const request = { status, requested_at: iso(nowMs), reason, title };
+  if (status === "planned") {
+    request.body = issueBody(inc);
+    request.gh_url = null;
+    request.gh_number = null;
+  }
+  inc.issue_requests.push(request);
+  report.issue_requests.push({
+    action: status === "planned" ? "would-create" : status,
+    incident_key: inc.incident_key,
+    title,
+    reason,
+  });
 }
 
 function maybeIssue(inc, nowMs, report, opts, reason) {
@@ -766,18 +776,7 @@ function maybeIssue(inc, nowMs, report, opts, reason) {
   if (latest) {
     const then = parseRfc3339(latest.requested_at);
     if (then !== null && nowMs - then < WEEK_MS) {
-      inc.issue_requests.push({
-        status: "suppressed-flood",
-        requested_at: iso(nowMs),
-        reason,
-        title: null,
-      });
-      report.issue_requests.push({
-        action: "suppressed-flood",
-        incident_key: inc.incident_key,
-        title: null,
-        reason,
-      });
+      pushRequest(inc, report, "suppressed-flood", reason, nowMs, null);
       return;
     }
   }
@@ -797,44 +796,13 @@ function maybeIssue(inc, nowMs, report, opts, reason) {
         incident_key: inc.incident_key,
       };
     }
-    const escalation = inc.escalation;
-    inc.issue_requests.push({
-      status: "suppressed-budget",
-      requested_at: iso(nowMs),
-      reason,
-      title: null,
-    });
-    report.escalations.push(escalation);
-    report.issue_requests.push({
-      action: "suppressed-budget",
-      incident_key: inc.incident_key,
-      title: null,
-      reason,
-    });
-    if (human === "unknown") {
-      report.evaluation = "UNKNOWN";
-      report.unknown_reason = "escalation human is unknown";
-      report.alerts.push({ reason: "triage-alert", detail: "escalation human is unknown" });
-    }
+    pushRequest(inc, report, "suppressed-budget", reason, nowMs, null);
+    report.escalations.push(inc.escalation);
+    if (human === "unknown") markUnknown(report, "escalation human is unknown");
     return;
   }
-  const title = `Repair repeated failure ${shortHash(inc.incident_key)}`;
-  inc.issue_requests.push({
-    status: "planned",
-    requested_at: iso(nowMs),
-    reason,
-    title,
-    body: issueBody(inc),
-    gh_url: null,
-    gh_number: null,
-  });
+  pushRequest(inc, report, "planned", reason, nowMs, `Repair repeated failure ${shortHash(inc.incident_key)}`);
   inc.repair_attempts_used += 1;
-  report.issue_requests.push({
-    action: "would-create",
-    incident_key: inc.incident_key,
-    title,
-    reason,
-  });
 }
 
 function openIncident(state, event, budget) {
@@ -872,13 +840,8 @@ function checkDeployed(evidence) {
     return { ok: false, reason: "bad-remediation-sha" };
   }
   if (!nonEmptyRef(evidence.workers_evidence_ref)) {
-    return {
-      ok: false,
-      reason:
-        evidence.workers_evidence_ref === "unknown"
-          ? "workers-evidence-unknown"
-          : "missing-workers-evidence",
-    };
+    const unknown = evidence.workers_evidence_ref === "unknown";
+    return { ok: false, reason: unknown ? "workers-evidence-unknown" : "missing-workers-evidence" };
   }
   if (parseRfc3339(evidence.recorded_at) === null) {
     return { ok: false, reason: "missing-recorded-at" };
@@ -913,15 +876,9 @@ function transition(inc, to, evidence, at, report) {
     reject(report, inc.incident_key, inc.state, to, "illegal-transition");
     return false;
   }
-  if (to === "deployed") {
-    const checked = checkDeployed(evidence);
-    if (!checked.ok) {
-      reject(report, inc.incident_key, inc.state, to, checked.reason);
-      return false;
-    }
-  }
-  if (to === "effective") {
-    const checked = checkEffective(evidence);
+  const checker = to === "deployed" ? checkDeployed : to === "effective" ? checkEffective : null;
+  if (checker) {
+    const checked = checker(evidence);
     if (!checked.ok) {
       reject(report, inc.incident_key, inc.state, to, checked.reason);
       return false;
@@ -956,6 +913,28 @@ function failurePredatesDeployment(inc, observedAt) {
   return observed < boundary;
 }
 
+function takePending(inc, pending) {
+  inc.attempts = pending.attempts.slice();
+  inc.raw_signatures = pending.raw_signatures.slice();
+  inc.detector_versions = pending.detector_versions.slice();
+}
+
+function escapeDeployed(inc, event, nowMs, report, opts) {
+  if (inc.state !== "effective" && inc.state !== "deployed") return false;
+  if (failurePredatesDeployment(inc, event.observed_at)) return true;
+  const from = inc.state;
+  inc.state = "reopened";
+  inc.history.push({ from, to: "reopened", at: event.observed_at });
+  inc.revoked_claims.push({ claim: from, at: event.observed_at });
+  maybeIssue(inc, nowMs, report, opts, "escape");
+  return true;
+}
+
+function requestRepair(inc, event, nowMs, report, opts, reason) {
+  if (failurePredatesDeployment(inc, event.observed_at)) return;
+  maybeIssue(inc, nowMs, report, opts, reason);
+}
+
 function onFailure(state, event, id, nowMs, report, opts) {
   const normalized = normalizeSignature(event.raw_signature);
   const key = incidentKey({
@@ -967,19 +946,8 @@ function onFailure(state, event, id, nowMs, report, opts) {
   if (existing) {
     noteEvidence(existing, event);
     const fresh = addAttempt(existing, event, id);
-    if (existing.state === "effective" || existing.state === "deployed") {
-      if (failurePredatesDeployment(existing, event.observed_at)) return;
-      const from = existing.state;
-      existing.state = "reopened";
-      existing.history.push({ from, to: "reopened", at: event.observed_at });
-      existing.revoked_claims.push({ claim: from, at: event.observed_at });
-      maybeIssue(existing, nowMs, report, opts, "escape");
-      return;
-    }
-    if (!fresh) return;
-    if (existing.state === "reopened") {
-      maybeIssue(existing, nowMs, report, opts, "escape");
-    }
+    if (escapeDeployed(existing, event, nowMs, report, opts)) return;
+    if (fresh && existing.state === "reopened") requestRepair(existing, event, nowMs, report, opts, "escape");
     return;
   }
   let pending = state.pending[key];
@@ -999,9 +967,7 @@ function onFailure(state, event, id, nowMs, report, opts) {
   addAttempt(pending, event, id);
   if (pending.attempts.length < 2) return;
   const inc = blankIncident(key, event.repo, normalized, opts.repairBudget);
-  inc.raw_signatures = pending.raw_signatures.slice();
-  inc.detector_versions = pending.detector_versions.slice();
-  inc.attempts = pending.attempts.slice();
+  takePending(inc, pending);
   inc.history.push({ from: null, to: "detected", at: event.observed_at });
   delete state.pending[key];
   state.incidents[key] = inc;
@@ -1011,9 +977,7 @@ function onFailure(state, event, id, nowMs, report, opts) {
 function onReviewCap(state, event, id, nowMs, report, opts, caps) {
   const cap = resolveCap(caps, event.tier);
   if (cap === null) {
-    report.evaluation = "UNKNOWN";
-    report.unknown_reason = "review cap cannot be resolved";
-    report.alerts.push({ reason: "triage-alert", detail: "review cap cannot be resolved" });
+    markUnknown(report, "review cap cannot be resolved");
     return;
   }
   if (event.review_rounds <= cap) return;
@@ -1027,25 +991,15 @@ function onReviewCap(state, event, id, nowMs, report, opts, caps) {
     inc = openIncident(state, event, opts.repairBudget);
     const pending = state.pending[key];
     if (pending) {
-      inc.attempts = pending.attempts.slice();
-      inc.raw_signatures = pending.raw_signatures.slice();
-      inc.detector_versions = pending.detector_versions.slice();
+      takePending(inc, pending);
       delete state.pending[key];
     }
   }
   noteEvidence(inc, event);
   addAttempt(inc, event, id);
-  if (inc.state === "effective" || inc.state === "deployed") {
-    if (failurePredatesDeployment(inc, event.observed_at)) return;
-    const from = inc.state;
-    inc.state = "reopened";
-    inc.history.push({ from, to: "reopened", at: event.observed_at });
-    inc.revoked_claims.push({ claim: from, at: event.observed_at });
-    maybeIssue(inc, nowMs, report, opts, "escape");
-    return;
-  }
+  if (escapeDeployed(inc, event, nowMs, report, opts)) return;
   if (inc.state === "reopened" || realIssueCount(inc) === 0) {
-    maybeIssue(inc, nowMs, report, opts, "review-cap");
+    requestRepair(inc, event, nowMs, report, opts, "review-cap");
   }
 }
 
@@ -1146,19 +1100,24 @@ function fillReport(state, report) {
     (inc) => inc.escalation && inc.escalation.human === "unknown"
   );
   if (unresolvedUnknown && report.evaluation !== "UNKNOWN") {
-    report.evaluation = "UNKNOWN";
-    report.unknown_reason = "escalation human is unknown";
-    report.alerts.push({ reason: "triage-alert", detail: "escalation human is unknown" });
+    markUnknown(report, "escalation human is unknown");
   }
+}
+
+function ghChildNeverStarted(result) {
+  // A pid or a signal means the OS started gh. A timeout (ETIMEDOUT) or a full
+  // output buffer (ENOBUFS, or ERR_CHILD_PROCESS_STDIO_MAXBUFFER on other
+  // Node versions) can happen after GitHub has already opened the issue.
+  if (!result || !result.error || result.pid || result.signal) return false;
+  const code = result.error.code;
+  return code !== "ETIMEDOUT" && code !== "ENOBUFS" && code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
 }
 
 function applyIssues(state, report, persist) {
   for (const inc of Object.values(state.incidents)) {
     for (const request of inc.issue_requests) {
       if (request.status === "creating") {
-        report.evaluation = "UNKNOWN";
-        report.unknown_reason = "a previous create did not finish";
-        report.alerts.push({ reason: "triage-alert", detail: "a previous create did not finish" });
+        markUnknown(report, "a previous create did not finish");
         return;
       }
     }
@@ -1193,7 +1152,7 @@ function applyIssues(state, report, persist) {
         result = spawnSync(
           "gh",
           ["issue", "create", "--repo", inc.repo, "--title", request.title, "--body-file", bodyPath],
-          { encoding: "utf8" }
+          { encoding: "utf8", timeout: ghCreateTimeoutMs() }
         );
       } finally {
         try {
@@ -1204,25 +1163,17 @@ function applyIssues(state, report, persist) {
       }
       report.gh_invocations += 1;
       if (!result || result.error || result.status !== 0) {
-        // A child that never started cannot have created an issue. A child
-        // that started and then failed may have created one and lost the reply.
-        // Leave that request "creating" so the next --apply does not open another.
-        if (result && result.error) request.status = "planned";
-        report.evaluation = "UNKNOWN";
-        report.unknown_reason = "gh issue create failed";
-        report.alerts.push({ reason: "triage-alert", detail: "gh issue create failed" });
+        // Reset only when gh provably never started. Leave "creating" when the
+        // child ran, timed out, or filled the output buffer: the issue may exist.
+        if (ghChildNeverStarted(result)) request.status = "planned";
+        markUnknown(report, "gh issue create failed");
         return;
       }
       const url = String(result.stdout || "").trim();
       const matched = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/(\d+)$/.exec(url);
       if (!matched) {
         request.status = "creating";
-        report.evaluation = "UNKNOWN";
-        report.unknown_reason = "gh issue create returned no issue url";
-        report.alerts.push({
-          reason: "triage-alert",
-          detail: "gh issue create returned no issue url",
-        });
+        markUnknown(report, "gh issue create returned no issue url");
         return;
       }
       request.status = "created";
@@ -1265,13 +1216,13 @@ function main() {
           key: "repairBudget",
           type: "string",
           default: () => DEFAULT_REPAIR_BUDGET,
-          transform: (raw) => positiveInt("--repair-budget", raw),
+          transform: (raw) => boundedInt("--repair-budget", raw, false),
         },
         "--lock-timeout-ms": {
           key: "lockTimeoutMs",
           type: "string",
           default: () => 5000,
-          transform: (raw) => nonNegativeInt("--lock-timeout-ms", raw),
+          transform: (raw) => boundedInt("--lock-timeout-ms", raw, true),
         },
       },
     });

@@ -79,6 +79,15 @@ case "$mode" in
     printf '%s\n' 'not-a-url'
     exit 0
     ;;
+  flood)
+    dd if=/dev/zero bs=1024 count=2048 2>/dev/null | tr '\0' 'A'
+    exit 0
+    ;;
+  hang)
+    sleep 30
+    printf '%s\n' 'https://github.com/The-AIE/the-gibson/issues/569'
+    exit 0
+    ;;
   snapshot)
     if [[ -z "${RETRO_STATE_PATH:-}" || -z "${RETRO_STATE_SNAPSHOT:-}" ]]; then
       exit 97
@@ -981,6 +990,36 @@ rm -f "$BIN/cat"
 mv "$BIN/gh.off" "$BIN/gh"
 expect_state "missing gh leaves the request planned" "$TMP/no-gh.json" \
   'Object.values(s.incidents)[0].issue_requests[0].status==="planned"'
+
+GH_MODE=flood
+: > "$GH_LOG"
+check "a full gh output buffer stays creating" 3 \
+  'r.evaluation==="UNKNOWN" && r.unknown_reason==="gh issue create failed" && r.gh_invocations===1' \
+  --apply --events "$FIX/two-attempts.jsonl" --state "$TMP/gh-buffer.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+expect_state "output-buffer failure is not retry-safe" "$TMP/gh-buffer.json" \
+  'Object.values(s.incidents)[0].issue_requests[0].status==="creating"'
+GH_MODE=ok
+: > "$GH_LOG"
+check "an output-buffer create is not retried" 3 \
+  'r.evaluation==="UNKNOWN" && r.unknown_reason==="a previous create did not finish" && r.gh_invocations===0' \
+  --apply --events "$FIX/two-attempts.jsonl" --state "$TMP/gh-buffer.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+if [[ ! -s "$GH_LOG" ]]; then ok "output-buffer create did not call gh again"; else bad "output-buffer create did not call gh again"; fi
+
+GH_MODE=hang
+export RETRO_GH_CREATE_TIMEOUT_MS=300
+: > "$GH_LOG"
+check "a timed-out gh create stays creating" 3 \
+  'r.evaluation==="UNKNOWN" && r.unknown_reason==="gh issue create failed" && r.gh_invocations===1' \
+  --apply --events "$FIX/two-attempts.jsonl" --state "$TMP/gh-timeout.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+expect_state "timed-out create is not retry-safe" "$TMP/gh-timeout.json" \
+  'Object.values(s.incidents)[0].issue_requests[0].status==="creating"'
+unset RETRO_GH_CREATE_TIMEOUT_MS
+GH_MODE=ok
+: > "$GH_LOG"
+check "a timed-out create is not retried" 3 \
+  'r.evaluation==="UNKNOWN" && r.unknown_reason==="a previous create did not finish" && r.gh_invocations===0' \
+  --apply --events "$FIX/two-attempts.jsonl" --state "$TMP/gh-timeout.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+if [[ ! -s "$GH_LOG" ]]; then ok "timed-out create did not call gh again"; else bad "timed-out create did not call gh again"; fi
 : > "$GH_LOG"
 check "a create that never started can be retried" 0 \
   'r.evaluation==="complete" && r.gh_invocations===1 && r.issue_requests.length===0' \
@@ -1272,6 +1311,35 @@ write_cap "$TMP/capr-later.jsonl" c7 "$SHA_E" "2026-01-09T00:00:00Z" "$RAW88" de
 check "a later reopened cap breach can request another repair" 0 \
   'r.issue_requests[0].action==="would-create" && r.issue_requests[0].reason==="review-cap" && r.incidents[0].repair_attempts_used===2 && r.incidents[0].real_issue_requests===2 && r.incidents[0].state==="reopened"' \
   --events "$TMP/capr-later.jsonl" --state "$CAPR" --now "$NOW7" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+
+PRE=$TMP/preopen.json
+check "pre-deploy-on-reopened seed" 0 'r.incidents.length===1 && r.incidents[0].real_issue_requests===1' \
+  --events "$FIX/two-attempts.jsonl" --state "$PRE" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+walk_to_effective "$PRE" 2 duty-human 02
+write_ci "$TMP/preopen-live.jsonl" live1 "$SHA_E" "$NOW1" "$RAW88" det-1
+check "a live failure reopens inside the flood window" 0 \
+  'r.incidents[0].state==="reopened" && r.issue_requests[0].action==="suppressed-flood" && r.incidents[0].repair_attempts_used===1' \
+  --events "$TMP/preopen-live.jsonl" --state "$PRE" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_ci "$TMP/preopen-old.jsonl" old-after "$SHA_D" "2026-01-01T00:00:02Z" "$RAW88" det-1
+check "a later pre-deployment attempt does not request another repair" 0 \
+  'r.evaluation==="complete" && r.incidents[0].state==="reopened" && r.issue_requests.length===0 && r.incidents[0].repair_attempts_used===1 && r.incidents[0].real_issue_requests===1' \
+  --events "$TMP/preopen-old.jsonl" --state "$PRE" --now "$NOW7" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+expect_state "the historical attempt is stored on the reopened incident" "$PRE" \
+  'const i=Object.values(s.incidents)[0]; i.state==="reopened" && i.attempts.some((a) => a.attempt_id==="old-after") && i.repair_attempts_used===1'
+
+CAPH2=$TMP/caph2.json
+write_cap "$TMP/caph2-seed.jsonl" c0 "$SHA_C" "$NOW0" "$RAW88" det-1 B 3
+check "reopened cap historical seed" 0 'r.incidents[0].real_issue_requests===1' \
+  --events "$TMP/caph2-seed.jsonl" --state "$CAPH2" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+walk_to_effective "$CAPH2" 2 duty-human 02
+write_cap "$TMP/caph2-live.jsonl" c-live "$SHA_E" "$NOW1" "$RAW88" det-1 B 4
+check "a live cap breach reopens inside the flood window" 0 \
+  'r.incidents[0].state==="reopened" && r.issue_requests[0].action==="suppressed-flood" && r.incidents[0].repair_attempts_used===1' \
+  --events "$TMP/caph2-live.jsonl" --state "$CAPH2" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_cap "$TMP/caph2-old.jsonl" c-old2 "$SHA_D" "2026-01-01T00:00:02Z" "$RAW88" det-1 B 5
+check "a later pre-deployment cap breach does not request another repair" 0 \
+  'r.evaluation==="complete" && r.incidents[0].state==="reopened" && r.issue_requests.length===0 && r.incidents[0].repair_attempts_used===1 && r.incidents[0].real_issue_requests===1' \
+  --events "$TMP/caph2-old.jsonl" --state "$CAPH2" --now "$NOW7" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
 
 printf '\n%s\n' "=== stale lock reclaim ==="
 cat > "$TMP/lock-probe.mjs" << 'END'
