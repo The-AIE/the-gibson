@@ -1477,6 +1477,217 @@ else
   bad "a foreign lock refusal names the file, pid, and removal step"
 fi
 
+# Kill the command if it is still running after limit_ms. A FIFO read that
+# blocks must fail this suite instead of hanging it. The flag is removed as
+# soon as the command exits so a late timer does not signal a recycled pid.
+run_bounded() {
+  local limit_ms="$1"
+  shift
+  local pid killer rc
+  "$@" >"$TMP/bounded.out" 2>"$TMP/bounded.err" &
+  pid=$!
+  : > "$TMP/bounded.armed"
+  "$NODE_REAL" "$TMP/wall.mjs" "$TMP/bounded.armed" "$pid" "$limit_ms" &
+  killer=$!
+  rc=0
+  wait "$pid" || rc=$?
+  rm -f "$TMP/bounded.armed"
+  kill "$killer" 2>/dev/null || true
+  wait "$killer" 2>/dev/null || true
+  LAST_RC=$rc
+  LAST_OUT=$(cat "$TMP/bounded.out")
+  LAST_ERR=$(cat "$TMP/bounded.err")
+  printf '%s\n' "$LAST_OUT" > "$TMP/last.json"
+}
+
+cat > "$TMP/wall.mjs" << 'END'
+import { existsSync } from "node:fs";
+const flag = process.argv[2];
+const pid = Number(process.argv[3]);
+const ms = Number(process.argv[4]);
+setTimeout(() => {
+  if (existsSync(flag)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* the command already exited */
+    }
+  }
+  process.exit(0);
+}, ms);
+END
+
+printf '\n%s\n' "=== lock describe cannot block, and a failed init drops its own inode ==="
+mkfifo "$TMP/fifo.json.lock"
+fifo_ino=$(node -e 'process.stdout.write(String(require("node:fs").lstatSync(process.argv[1]).ino))' "$TMP/fifo.json.lock")
+fifo_start=$(node -e 'process.stdout.write(String(Date.now()))')
+run_bounded 2000 node "$TOOL" --events "$FIX/one-attempt.jsonl" --state "$TMP/fifo.json" --now "$NOW0" --root "$REPO_ROOT" --lock-timeout-ms 200
+fifo_elapsed=$(( $(node -e 'process.stdout.write(String(Date.now()))') - fifo_start ))
+if [[ "$LAST_RC" -eq 3 && "$fifo_elapsed" -lt 1500 ]] \
+  && report_eval "r.evaluation===\"UNKNOWN\" && r.unknown_reason.includes(\"lock path is not a regular file\") && r.unknown_reason.includes(\"$TMP/fifo.json.lock\")"; then
+  ok "a fifo lock is UNKNOWN within the lock timeout plus margin (${fifo_elapsed}ms)"
+else
+  bad "a fifo lock is UNKNOWN within the lock timeout plus margin (rc=$LAST_RC elapsed=${fifo_elapsed}ms err=$LAST_ERR)"
+fi
+fifo_ino_after=$(node -e 'process.stdout.write(String(require("node:fs").lstatSync(process.argv[1]).ino))' "$TMP/fifo.json.lock")
+if [[ -p "$TMP/fifo.json.lock" && "$fifo_ino" == "$fifo_ino_after" ]]; then
+  ok "a fifo lock was not removed"
+else
+  bad "a fifo lock was not removed"
+fi
+absent "a fifo lock wrote no state" "$TMP/fifo.json"
+
+mkfifo "$TMP/fifo-target"
+ln -s "$TMP/fifo-target" "$TMP/symfifo.json.lock"
+sym_start=$(node -e 'process.stdout.write(String(Date.now()))')
+run_bounded 2000 node "$TOOL" --events "$FIX/one-attempt.jsonl" --state "$TMP/symfifo.json" --now "$NOW0" --root "$REPO_ROOT" --lock-timeout-ms 200
+sym_elapsed=$(( $(node -e 'process.stdout.write(String(Date.now()))') - sym_start ))
+if [[ "$LAST_RC" -eq 3 && "$sym_elapsed" -lt 1500 && -L "$TMP/symfifo.json.lock" && -p "$TMP/fifo-target" ]] \
+  && report_eval "r.evaluation===\"UNKNOWN\" && r.unknown_reason.includes(\"lock path is not a regular file\") && r.unknown_reason.includes(\"$TMP/symfifo.json.lock\")"; then
+  ok "a symlink to a fifo is UNKNOWN within the lock timeout plus margin (${sym_elapsed}ms)"
+else
+  bad "a symlink to a fifo is UNKNOWN within the lock timeout plus margin (rc=$LAST_RC elapsed=${sym_elapsed}ms err=$LAST_ERR)"
+fi
+
+BIG_PID=$("$NODE_REAL" -e 'process.stdout.write(String(process.pid))')
+MARKER="OVERSIZE-MARKER-569-SHOULD-NOT-APPEAR"
+cat > "$TMP/write-big-lock.mjs" << 'END'
+import { writeFileSync } from "node:fs";
+const head = Buffer.from(process.env.BIG_PID + "\n");
+const gap = Buffer.alloc(80, 0x41);
+const marker = Buffer.from(process.env.MARKER);
+const tail = Buffer.alloc(256 * 1024, 0x42);
+writeFileSync(process.env.BIG_PATH, Buffer.concat([head, gap, marker, tail]));
+END
+BIG_PATH="$TMP/big.json.lock" BIG_PID="$BIG_PID" MARKER="$MARKER" node "$TMP/write-big-lock.mjs"
+big_size=$(node -e 'process.stdout.write(String(require("node:fs").statSync(process.argv[1]).size))' "$TMP/big.json.lock")
+big_cksum=$(cksum "$TMP/big.json.lock")
+run_bounded 2000 node "$TOOL" --events "$FIX/one-attempt.jsonl" --state "$TMP/big.json" --now "$NOW0" --root "$REPO_ROOT" --lock-timeout-ms 200
+big_cksum_after=$(cksum "$TMP/big.json.lock")
+big_size_after=$(node -e 'process.stdout.write(String(require("node:fs").statSync(process.argv[1]).size))' "$TMP/big.json.lock")
+if [[ "$LAST_RC" -eq 3 && "$big_cksum" == "$big_cksum_after" && "$big_size" == "$big_size_after" ]] \
+  && report_eval "r.evaluation===\"UNKNOWN\" && r.unknown_reason.includes(\"pid ${BIG_PID}\") && r.unknown_reason.includes(\"age \") && !r.unknown_reason.includes(\"${MARKER}\") && r.unknown_reason.length < 800"; then
+  ok "an oversized lock file does not blow up the refusal"
+else
+  bad "an oversized lock file does not blow up the refusal (rc=$LAST_RC reason_len=${#LAST_ERR})"
+fi
+absent "an oversized lock wrote no state" "$TMP/big.json"
+
+# RLIMIT_FSIZE 0 lets open(wx) create the inode and makes the following write throw.
+# The report comes back on a pipe: the same limit rejects every regular-file write,
+# including a result file, so the parent (not under the limit) records it.
+cat > "$TMP/lock-fail-probe.mjs" << 'END'
+process.on("SIGXFSZ", () => {});
+import { existsSync, readdirSync } from "node:fs";
+const mod = await import(process.env.TOOL_URL);
+function fds() {
+  return readdirSync("/dev/fd").length;
+}
+const before = fds();
+const lock = mod.acquireLock(process.env.LOCK_PATH, Number(process.env.LOCK_WAIT));
+const after = fds();
+const exists = existsSync(process.env.LOCK_PATH);
+if (lock && lock.ok) mod.releaseLock(lock);
+process.stdout.write(JSON.stringify({
+  ok: Boolean(lock && lock.ok),
+  reason: lock && !lock.ok ? String(lock.reason) : "",
+  exists,
+  before,
+  after,
+}) + "\n");
+END
+cat > "$TMP/lock-fail-runner.mjs" << 'END'
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const child = spawn(
+  "bash",
+  ["-c", "ulimit -f 0 || exit 99; exec node \"$1\"", "bash", process.argv[2]],
+  {
+    env: {
+      ...process.env,
+      TOOL_URL: process.argv[3],
+      LOCK_PATH: process.argv[4],
+      LOCK_WAIT: "200",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  }
+);
+let out = "";
+let err = "";
+const timer = setTimeout(() => {
+  child.kill("SIGKILL");
+}, 2000);
+child.stdout.setEncoding("utf8");
+child.stderr.setEncoding("utf8");
+child.stdout.on("data", (chunk) => {
+  out += chunk;
+});
+child.stderr.on("data", (chunk) => {
+  err += chunk;
+});
+child.on("close", (code, signal) => {
+  clearTimeout(timer);
+  writeFileSync(process.argv[5], JSON.stringify({ code, signal, out, err }));
+});
+END
+rm -f "$TMP/fail.lock"
+node "$TMP/lock-fail-runner.mjs" "$TMP/lock-fail-probe.mjs" "file://${TOOL}" "$TMP/fail.lock" "$TMP/fail-result.json"
+if FAIL_OUT="$TMP/fail-result.json" node --input-type=module -e '
+import { readFileSync } from "node:fs";
+const result = JSON.parse(readFileSync(process.env.FAIL_OUT, "utf8"));
+if (result.code !== 0 || result.signal) {
+  process.stderr.write(JSON.stringify(result) + "\n");
+  process.exit(1);
+}
+const row = JSON.parse(result.out);
+if (row.ok !== false || row.reason !== "lock-failed" || row.exists !== false || row.after !== row.before) {
+  process.stderr.write(JSON.stringify(row) + "\n");
+  process.exit(1);
+}
+'; then
+  ok "a lock write failure closes its descriptor and removes only its inode"
+else
+  bad "a lock write failure closes its descriptor and removes only its inode"
+fi
+: > "$TMP/fail.log"
+TOOL_URL="file://${TOOL}" LOCK_PATH="$TMP/fail.lock" LOCK_LOG="$TMP/fail.log" LOCK_WAIT=500 LOCK_HOLD=0 \
+  node "$TMP/lock-probe.mjs" >"$TMP/fail-next.out" 2>"$TMP/fail-next.err"
+fail_next_rc=$?
+if [[ "$fail_next_rc" -eq 0 && ! -e "$TMP/fail.lock" ]] && ! grep -q ' refuse ' "$TMP/fail.log"; then
+  ok "the next acquire works after a failed lock init"
+else
+  bad "the next acquire works after a failed lock init (rc=$fail_next_rc)"
+fi
+
+printf '%s' "4242" > "$TMP/inf.lock"
+inf_cksum=$(cksum "$TMP/inf.lock")
+cat > "$TMP/lock-inf-probe.mjs" << 'END'
+const mod = await import(process.env.TOOL_URL);
+const started = Date.now();
+const lock = mod.acquireLock(process.env.LOCK_PATH, Number(process.env.LOCK_WAIT));
+process.stdout.write(JSON.stringify({
+  ok: Boolean(lock && lock.ok),
+  reason: lock && !lock.ok ? String(lock.reason) : "",
+  ms: Date.now() - started,
+}) + "\n");
+if (lock && lock.ok) mod.releaseLock(lock);
+END
+run_bounded 2000 env TOOL_URL="file://${TOOL}" LOCK_PATH="$TMP/inf.lock" LOCK_WAIT=Infinity \
+  node "$TMP/lock-inf-probe.mjs"
+inf_cksum_after=$(cksum "$TMP/inf.lock")
+if [[ "$LAST_RC" -eq 0 && "$inf_cksum" == "$inf_cksum_after" ]] && FAIL_OUT="$TMP/bounded.out" node --input-type=module -e '
+import { readFileSync } from "node:fs";
+const row = JSON.parse(readFileSync(process.env.FAIL_OUT, "utf8"));
+if (row.ok !== false || row.reason !== "lock-failed" || !(row.ms < 500)) {
+  process.stderr.write(JSON.stringify(row) + "\n");
+  process.exit(1);
+}
+'; then
+  ok "a non-finite lock timeout refuses without taking or spinning"
+else
+  bad "a non-finite lock timeout refuses without taking or spinning (rc=$LAST_RC out=$LAST_OUT)"
+fi
+
 printf '\n%s\n' "=== summary ==="
 printf 'retro-actuator.test.sh: %s passed, %s failed\n' "$PASS" "$FAIL"
 if [[ "$FAIL" -ne 0 ]]; then

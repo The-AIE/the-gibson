@@ -7,6 +7,7 @@
  *   failed attempt of one incident key, or one review-cap breach, records one
  *   incident and one repair-issue request. Replays share an atomic state file.
  *   A leftover lock is reported, not taken, so two processes cannot both hold it.
+ *   That report opens the lock once, nonblocking, and reads at most 64 bytes.
  *
  * WHY
  *   Doc 28 loop 3 had no trigger. A repeated failure had to be remembered.
@@ -33,6 +34,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  constants as fsConstants,
   existsSync,
   fstatSync,
   fsyncSync,
@@ -40,6 +42,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -218,34 +221,61 @@ function sleepMs(ms) {
   }
 }
 
+const LOCK_DESCRIBE_BYTES = 64;
+
+function lockHeld(lockPath, detail) {
+  return `lock held at ${lockPath} (${detail}). Remove ${lockPath} only after confirming that process is gone.`;
+}
+
 function lockRefusal(lockPath) {
-  let recorded = "unreadable";
+  // One open, then fstat of that descriptor. Checking the path and then
+  // reading it races, and readFileSync blocks forever on a FIFO with no writer.
+  let fd;
   try {
-    const pid = Number(readFileSync(lockPath, "utf8").trim());
-    if (Number.isInteger(pid) && pid > 0) recorded = String(pid);
+    fd = openSync(lockPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
   } catch {
-    recorded = "unreadable";
+    return lockHeld(lockPath, "lock path is not a regular file");
   }
-  let age = "unknown";
   try {
-    const seconds = Math.max(0, Math.floor((Date.now() - statSync(lockPath).mtimeMs) / 1000));
-    age = `${seconds}s`;
+    const st = fstatSync(fd);
+    if (!st.isFile()) return lockHeld(lockPath, "lock path is not a regular file");
+    const buf = Buffer.alloc(LOCK_DESCRIBE_BYTES);
+    const n = readSync(fd, buf, 0, LOCK_DESCRIBE_BYTES, 0);
+    const line = buf.subarray(0, n).toString("utf8").split("\n", 1)[0].trim();
+    const recorded = /^[1-9]\d{0,9}$/.test(line) ? line : "unreadable";
+    const seconds = Math.max(0, Math.floor((Date.now() - st.mtimeMs) / 1000));
+    return lockHeld(lockPath, `pid ${recorded}, age ${seconds}s`);
   } catch {
-    age = "unknown";
+    return lockHeld(lockPath, "lock path is not a regular file");
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      /* already closed */
+    }
   }
-  return `lock held at ${lockPath} (pid ${recorded}, age ${age}). Remove ${lockPath} only after confirming that process is gone.`;
 }
 
 export function acquireLock(lockPath, timeoutMs) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0) {
+    return { ok: false, reason: "lock-failed" };
+  }
   const start = Date.now();
   mkdirSync(dirname(lockPath), { recursive: true });
   for (;;) {
+    let fd;
     try {
-      const fd = openSync(lockPath, "wx", 0o600);
+      fd = openSync(lockPath, "wx", 0o600);
       writeFileSync(fd, String(process.pid));
       fsyncSync(fd);
       return { ok: true, fd, path: lockPath };
     } catch (error) {
+      if (fd !== undefined) {
+        // openSync created this inode. releaseLock closes fd and unlinks
+        // only while the path still names that inode.
+        releaseLock({ ok: true, fd, path: lockPath });
+        return { ok: false, reason: "lock-failed" };
+      }
       if (error.code !== "EEXIST") return { ok: false, reason: "lock-failed" };
       // The file belongs to whoever created it. Never rename, replace, or
       // unlink it. Two holders is worse than a run that waits, then refuses.
