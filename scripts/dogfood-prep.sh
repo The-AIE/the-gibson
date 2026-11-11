@@ -212,11 +212,17 @@ else
 fi
 
 # --- evidence template ---
-EVIDENCE_DIR="$GIBSON/memory/dogfood"
+# shellcheck source=lib/private-home.sh
+. "$SCRIPT_DIR/lib/private-home.sh"
+EVIDENCE_HOME=$(gibson_private_home "$GIBSON") || exit 2
+EVIDENCE_DIR="$EVIDENCE_HOME/memory/dogfood"
+# Default output is unchanged; with the override set, name the resolved private directory.
+EVIDENCE_LABEL="memory/dogfood"
+[[ -n "${GIBSON_PRIVATE_HOME+x}" ]] && EVIDENCE_LABEL="$EVIDENCE_DIR"
 if [[ -d "$EVIDENCE_DIR" ]]; then
   ok "evidence dir $EVIDENCE_DIR"
 else
-  warn "missing memory/dogfood — create before committing journal evidence"
+  warn "missing $EVIDENCE_LABEL — create before committing journal evidence"
 fi
 
 echo
@@ -237,7 +243,7 @@ printf '  %q' "${LAUNCH[@]}"
 echo
 echo "  # local kill:  touch $HALT"
 echo "  # or:          GIBSON_HALT=1"
-echo "  # evidence:    copy $REPO/gibson/journal.md → memory/dogfood/YYYY-MM-DD-journal.md"
+echo "  # evidence:    copy $REPO/gibson/journal.md → $EVIDENCE_LABEL/YYYY-MM-DD-journal.md"
 echo
 
 if [[ "$CHECK_ONLY" -eq 1 ]]; then

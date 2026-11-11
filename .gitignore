@@ -3,3 +3,6 @@ node_modules/
 .DS_Store
 .gibson-baseline.json
 .gibson-receipts/
+
+# eval layer output (#583): may contain prompts
+.gibson-evals/

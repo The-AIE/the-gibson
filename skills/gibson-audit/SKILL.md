@@ -1,5 +1,8 @@
 ---
 name: gibson-audit
+key: gibson.gibson-audit
+category: Engineering Tools
+tags: [gibson, audit]
 description: "Audit any repository for Gibson-readiness: what the product is, stack, test/CI/gate coverage, backlog shape, risk surfaces (money, auth, consent/PII, security boundaries, production data), and a plain-English readiness report with concrete gaps. First stage of the /gibson pipeline; also useful standalone ('audit this repo', 'is this repo ready for the fleet', 'gibson readiness check')."
 ---
 

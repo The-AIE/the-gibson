@@ -53,7 +53,7 @@ the products it ships. Over-claiming here would violate the red-team PROTOCOL.
 |---|---|---|
 | **covered** at build time | 2 | ASI04 (code supply chain), ASI09 (owner trust / human gates) |
 | **partial** at build time | 8 | ASI01–03, ASI05–08, ASI10 — solid for *building* software with agents; not a full runtime story |
-| **runtime-only** residual | all ten have a runtime half when the *shipped product* runs agents | Point adopters at a runtime governor (Mission Control, CSA Agentic Trust, AGT, etc.) — **not** into Gibson core (D-008) |
+| **runtime-only** residual | all ten have a runtime half when the *shipped product* runs agents | Point adopters at a runtime governor (Agent Kontrol, CSA Agentic Trust, AGT, etc.) — **not** into Gibson core (D-008) |
 
 We do **not** claim "Gibson implements the OWASP Agentic Top 10." We claim: for the
 SDLC surface Gibson owns, these are the gates that address each category, and where
