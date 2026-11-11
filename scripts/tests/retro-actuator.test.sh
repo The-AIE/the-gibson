@@ -79,6 +79,14 @@ case "$mode" in
     printf '%s\n' 'not-a-url'
     exit 0
     ;;
+  snapshot)
+    if [[ -z "${RETRO_STATE_PATH:-}" || -z "${RETRO_STATE_SNAPSHOT:-}" ]]; then
+      exit 97
+    fi
+    cp "$RETRO_STATE_PATH" "$RETRO_STATE_SNAPSHOT" || exit 97
+    printf '%s\n' 'https://github.com/The-AIE/the-gibson/issues/569'
+    exit 0
+    ;;
   *)
     exit 98
     ;;
@@ -914,10 +922,116 @@ mv "$BIN/gh.off" "$BIN/gh"
 expect_state "missing gh leaves the request planned" "$TMP/no-gh.json" \
   'Object.values(s.incidents)[0].issue_requests[0].status==="planned"'
 
+GH_MODE=snapshot
+export RETRO_STATE_PATH="$TMP/snap-apply.json"
+export RETRO_STATE_SNAPSHOT="$TMP/snap-during-gh.json"
+: > "$GH_LOG"
+check "apply writes creating before gh returns" 0 \
+  'r.mode==="apply" && r.gh_invocations===1 && r.issue_requests[0].action==="created"' \
+  --apply --events "$FIX/two-attempts.jsonl" --state "$TMP/snap-apply.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+if [[ -f "$TMP/snap-during-gh.json" ]]; then
+  ok "state file existed while gh ran"
+else
+  bad "state file existed while gh ran"
+fi
+expect_state "state during gh is creating" "$TMP/snap-during-gh.json" \
+  'Object.values(s.incidents)[0].issue_requests[0].status==="creating" && !Object.values(s.incidents)[0].issue_requests[0].gh_url'
+expect_state "state after gh is created" "$TMP/snap-apply.json" \
+  'Object.values(s.incidents)[0].issue_requests[0].status==="created" && Object.values(s.incidents)[0].issue_requests[0].gh_number===569'
+GH_MODE=ok
+unset RETRO_STATE_PATH RETRO_STATE_SNAPSHOT
+
+printf '\n%s\n' "=== long incident keys ==="
+LONG_RAW=$TMP/long-raw.txt
+SIG_LIB=$REPO_ROOT/scripts/lib/retro-signature.mjs
+if LONG_RAW=$LONG_RAW SIG_LIB=$SIG_LIB node --input-type=module -e '
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const lib = await import(pathToFileURL(process.env.SIG_LIB).href);
+const expanded = "a:1".repeat(3333) + "a";
+const quoted = "\"".repeat(10000);
+if (expanded.length !== 10000 || quoted.length !== 10000) {
+  process.stderr.write("fixture length " + expanded.length + "/" + quoted.length + "\n");
+  process.exit(2);
+}
+const repo = "The-AIE/the-gibson";
+const expandedKey = lib.incidentKey({
+  repo,
+  normalizedSignature: lib.normalizeSignature(expanded),
+  signatureSchemaVersion: 1
+});
+const quotedKey = lib.incidentKey({
+  repo,
+  normalizedSignature: lib.normalizeSignature(quoted),
+  signatureSchemaVersion: 1
+});
+if (!(expandedKey.length > 4000 && expandedKey.length <= 65536)) {
+  process.stderr.write("expanded key length " + expandedKey.length + "\n");
+  process.exit(2);
+}
+if (!(quotedKey.length > 4000 && quotedKey.length <= 65536)) {
+  process.stderr.write("quoted key length " + quotedKey.length + "\n");
+  process.exit(2);
+}
+writeFileSync(process.env.LONG_RAW, expanded);
+'; then
+  ok "a 10000-character signature produces a key between 4001 and 65536"
+else
+  bad "a 10000-character signature produces a key between 4001 and 65536"
+fi
+LONG_EVENTS=$TMP/long-events.jsonl
+LONG_STATE=$TMP/long.json
+SHA_A=$SHA_A SHA_B=$SHA_B NOW0=$NOW0 LONG_RAW=$LONG_RAW LONG_EVENTS=$LONG_EVENTS \
+  node --input-type=module -e '
+import { readFileSync, writeFileSync } from "node:fs";
+const raw = readFileSync(process.env.LONG_RAW, "utf8");
+const lines = ["attempt-long-1", "attempt-long-2"].map((attempt, index) => JSON.stringify({
+  kind: "ci-failure",
+  repo: "The-AIE/the-gibson",
+  attempt_id: attempt,
+  head_sha: index === 0 ? process.env.SHA_A : process.env.SHA_B,
+  observed_at: process.env.NOW0,
+  raw_signature: raw,
+  detector_version: "det-1",
+  detector_health: "healthy"
+}));
+writeFileSync(process.env.LONG_EVENTS, lines.join("\n") + "\n");
+'
+check "a long signature still opens one incident" 0 \
+  'r.incidents.length===1 && r.incidents[0].state==="detected" && r.incidents[0].distinct_attempts===2' \
+  --events "$LONG_EVENTS" --state "$LONG_STATE" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_life "$TMP/long-life.jsonl" "$LONG_STATE" triaged "2026-01-01T00:10:01Z" '{}'
+check "lifecycle accepts the long incident key" 0 \
+  'r.incidents[0].state==="triaged" && r.rejected_transitions.length===0 && r.evaluation==="complete"' \
+  --events "$TMP/long-life.jsonl" --state "$LONG_STATE" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_override "$TMP/long-override.jsonl" "$LONG_STATE" duty-human "2026-01-01T00:10:02Z"
+check "budget override accepts the long incident key" 0 \
+  'r.evaluation==="complete" && r.rejected_transitions.length===0' \
+  --events "$TMP/long-override.jsonl" --state "$LONG_STATE" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+OVER=$TMP/over-key.jsonl
+OVER=$OVER node --input-type=module -e '
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.OVER, JSON.stringify({
+  kind: "lifecycle",
+  repo: "The-AIE/the-gibson",
+  observed_at: "2026-01-01T00:10:03Z",
+  detector_health: "healthy",
+  detector_version: "det-1",
+  incident_key: "x".repeat(65537),
+  to: "triaged",
+  evidence: {}
+}) + "\n");
+'
+check "an event line over 65536 is rejected before it is trusted" 3 \
+  'r.evaluation==="UNKNOWN" && r.unknown_reason.includes("too long")' \
+  --events "$OVER" --state "$TMP/over-key-state.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+absent "a rejected long key writes no state" "$TMP/over-key-state.json"
+
 printf '\n%s\n' "=== workflow ==="
 WF="$REPO_ROOT/.github/workflows/retro-actuator.yml"
 if grep -q 'node scripts/retro-actuator.mjs' "$WF" \
   && grep -q 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2' "$WF" \
+  && grep -q 'persist-credentials: false' "$WF" \
   && grep -q 'permissions: {}' "$WF" \
   && grep -q 'contents: read' "$WF" \
   && grep -q 'RUNNER_TEMP' "$WF" \

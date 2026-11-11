@@ -86,8 +86,11 @@ batch. A state that already has incidents but no trusted schema is refused.
 ## Mode and the workflow
 
 The default mode is dry-run. The report lists the issue the program would open.
-`--apply` is the only path that runs `gh issue create`. Dry-run still writes
-the state file, so a second dry-run against the same `--state` path dedups.
+`--apply` is the only path that runs `gh issue create`. Before that call it
+writes the request as `creating`. If the process dies after GitHub has created
+the issue, the next `--apply` sees that marker and does not open a second
+issue. Dry-run still writes the state file, so a second dry-run against the
+same `--state` path dedups.
 
 `.github/workflows/retro-actuator.yml` is a new workflow. It runs on a weekly
 schedule and on `workflow_dispatch`. It passes no `--apply`. Its state path is
@@ -124,6 +127,7 @@ These are limits of this program, not properties it has proven.
 - The program does not edit the lesson ledger.
 - Dedup holds only for a `--state` file that is reused. The scheduled workflow's temp state does not remember an earlier run.
 - Seen event ids are kept for the life of that state file and are not a bounded log.
+- A lifecycle or budget-override `incident_key` is accepted up to 65536 characters, which covers a key this program emits for a 10,000-character signature after normalization and JSON escaping. The event line itself is also capped at 65536 characters, so a key that does not fit on one line is rejected.
 - Duplicate JSON object keys follow the runtime JSON parser.
 - No live event collector is wired.
 - The literal `unknown` does not satisfy a human name, a workers-evidence ref, or a measurement ref.

@@ -63,6 +63,15 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_REPAIR_BUDGET = 2;
 const MAX_EVENT_BYTES = 2 * 1024 * 1024;
 const MAX_EVENTS = 10000;
+const MAX_RAW_SIGNATURE = 10000;
+// incidentKey() is JSON.stringify([repo, normalizedSignature, schemaVersion]).
+// The normalizer's largest expansion is "a:1" -> "a:<line>" (3 -> 8), so a
+// 10_000-character signature normalizes to at most ceil(10000/3)*8 characters.
+// JSON escaping can also double a signature of quotes or backslashes. Those
+// two growths do not stack: the characters that expand are not the ones that
+// escape. 65536 covers that key, the array wrapper, and a normal repo token,
+// and still rejects a multi-megabyte lifecycle key.
+const MAX_INCIDENT_KEY = 65536;
 const REAL_ISSUE = new Set(["planned", "creating", "created"]);
 const LIFECYCLE = new Set([
   "detected",
@@ -490,7 +499,7 @@ function validateEvent(obj, lineNo) {
     if (!(obj.head_sha === "unknown" || /^[0-9a-f]{40}$/.test(obj.head_sha || ""))) {
       return { ok: false, reason: `line ${lineNo} has a bad head_sha` };
     }
-    if (typeof obj.raw_signature !== "string" || obj.raw_signature.length < 1 || obj.raw_signature.length > 10000) {
+    if (typeof obj.raw_signature !== "string" || obj.raw_signature.length < 1 || obj.raw_signature.length > MAX_RAW_SIGNATURE) {
       return { ok: false, reason: `line ${lineNo} has a bad raw_signature` };
     }
     if (obj.raw_signature.includes("\0")) {
@@ -511,7 +520,7 @@ function validateEvent(obj, lineNo) {
     event.review_rounds = obj.review_rounds;
   }
   if (kind === "lifecycle" || kind === "budget-override") {
-    if (typeof obj.incident_key !== "string" || obj.incident_key.length < 1 || obj.incident_key.length > 4000) {
+    if (typeof obj.incident_key !== "string" || obj.incident_key.length < 1 || obj.incident_key.length > MAX_INCIDENT_KEY) {
       return { ok: false, reason: `line ${lineNo} has a bad incident_key` };
     }
     event.incident_key = obj.incident_key;
@@ -1054,7 +1063,7 @@ function fillReport(state, report) {
     .sort((a, b) => (a.incident_key < b.incident_key ? -1 : 1));
 }
 
-function applyIssues(state, report) {
+function applyIssues(state, report, persist) {
   for (const inc of Object.values(state.incidents)) {
     for (const request of inc.issue_requests) {
       if (request.status === "creating") {
@@ -1070,6 +1079,9 @@ function applyIssues(state, report) {
       if (request.status !== "planned") continue;
       request.status = "creating";
       request.body = issueBody(inc);
+      // Disk must show "creating" before gh runs. A crash after the issue
+      // exists otherwise leaves "planned" and the next --apply opens a duplicate.
+      persist();
       const bodyPath = join(
         tmpdir(),
         `retro-actuator-body-${process.pid}-${randomBytes(4).toString("hex")}.txt`
@@ -1252,7 +1264,11 @@ function main() {
         for (const event of parsed.events) {
           applyEvent(state, event, nowMs, report, opts, caps);
         }
-        if (apply && report.evaluation !== "UNKNOWN") applyIssues(state, report);
+        if (apply && report.evaluation !== "UNKNOWN") {
+          applyIssues(state, report, () => {
+            writeAtomic(statePath, `${JSON.stringify(state)}\n`);
+          });
+        }
         writeAtomic(statePath, `${JSON.stringify(state)}\n`);
         fillReport(state, report);
         if (report.evaluation === "UNKNOWN") code = 3;
