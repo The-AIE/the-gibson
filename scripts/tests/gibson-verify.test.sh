@@ -188,7 +188,7 @@ gv report --repo "$FX" --agent coord-agent --dry-run --receipt "$RECEIPT"
 gv report --repo "$FX" --agent coord-agent
 [[ "$RC" -eq 1 ]] && printf '%s' "$ERR" | grep 'MC_URL and MC_TOKEN' >/dev/null && ok "report: live POST without MC_URL/MC_TOKEN fails closed" || bad "missing env (rc=$RC err=$ERR)"
 
-# A stub Mission Control: first answer is the no-database demo drop, second is real.
+# A stub Agent Kontrol: first answer is the no-database demo drop, second is real.
 PORT_FILE="$ROOT/port"
 node -e '
   const http = require("http"); let n = 0;
@@ -207,7 +207,7 @@ if [[ -s "$PORT_FILE" ]]; then
   MC_URL="http://127.0.0.1:$(cat "$PORT_FILE")/" MC_TOKEN=t0k gv report --repo "$FX" --agent coord-agent
   [[ "$(jget delivered)" == "true" && "$RC" -eq 1 && "$(jget status)" == "claim-only" ]] && ok "report: delivered claim-only still exits 1" || bad "delivered claim-only (rc=$RC out=$OUT)"
 else
-  bad "stub Mission Control did not start"
+  bad "stub Agent Kontrol did not start"
 fi
 
 echo "# doctor"

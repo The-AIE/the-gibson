@@ -63,12 +63,40 @@ Each role recipe carries:
 ```
 
 `scripts/tests/goose-recipes.test.sh` fails when the playbook bytes change without
-updating the pin (drift). When you edit a playbook, recompute:
+updating the pin (drift). After editing a playbook, review the matching recipe's
+instructions, then run this explicit refresh from the Gibson worktree root.
+Use `builder`, `reviewer` or `security` as the argument:
 
 ```bash
-sha256sum playbooks/reviewer.md   # or builder.md / security.md
-# paste into the matching recipe's # playbook-sha256: line
+python3 - reviewer <<'PY'
+import hashlib, re, sys
+from pathlib import Path
+
+role = sys.argv[1]
+if role not in ("builder", "reviewer", "security"):
+    raise SystemExit("Expected builder, reviewer or security")
+playbook = Path("playbooks") / f"{role}.md"
+recipe = Path("playbooks/recipes") / f"{role}.yaml"
+if any(p.is_symlink() for p in (Path("playbooks"), recipe.parent, playbook, recipe)):
+    raise SystemExit("Refusing symlinked playbook or recipe paths")
+data = recipe.read_bytes()
+sources = re.findall(rb"^# playbook: ([^\r\n]+)$", data, re.M)
+pins = list(re.finditer(rb"^# playbook-sha256: ([0-9a-f]{64})$", data, re.M))
+if sources != [playbook.as_posix().encode()] or len(pins) != 1:
+    raise SystemExit("Expected one matching playbook header and one SHA-256 pin (LF line endings)")
+digest = hashlib.sha256(playbook.read_bytes()).hexdigest().encode()
+start, end = pins[0].span(1)
+updated = data[:start] + digest + data[end:]
+if updated != data:
+    recipe.write_bytes(updated)
+print(f"{recipe}: {digest.decode()}")
+PY
 ```
+
+This changes only the selected recipe's existing hash, preserving all other
+bytes. Review the playbook and recipe diff together and commit both. The hash
+binds bytes; it does not verify that the recipe instructions remain correct.
+Pre-push and CI keep checking drift without rewriting files or adding a gate.
 
 ### Audit stamp
 

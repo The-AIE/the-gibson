@@ -16,7 +16,7 @@ nav_order: 3
 Nine roles. Binding contracts (outputs, gates, forbidden actions) live in
 [`AGENTS.md`](../AGENTS.md) and `config/policy/role-contracts.v1.json`. This
 page explains the jobs. A role is not a vendor or a model. Any runtime can
-wear any hat; Mission Control routes by task class (deep refactors →
+wear any hat; Agent Kontrol routes by task class (deep refactors →
 claude-code, terminal-heavy fan-out → codex, research and second opinions →
 grok, messaging/ops and recurring jobs → hermes), but the AGENTS.md contract
 is identical wherever it runs. Dispatch prompts live in `playbooks/`.

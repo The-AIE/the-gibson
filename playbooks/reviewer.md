@@ -7,17 +7,17 @@ inputs:
   - issue sprint contract
   - tier label (A/B/C); re-check if diff drifted into Tier C
 outputs:
-  - PR review with file:line findings across six lenses
-  - "final line exactly: VERDICT: APPROVE | VERDICT: REQUEST_CHANGES"
+  - "One native GitHub review at the current head covering the full introduced range"
+  - "Concrete file:line blockers across applicable six lenses; optional notes separate"
 gates:
-  - never review own generation (Law 5)
-  - cross-vendor when available (reviewer_platform ≠ builder)
+  - "never review own generation (Law 5)"
+  - "one independent reviewer; cross-vendor preferred, not required"
   - "fail closed: missing/broken reviewer blocks merge"
-  - "Tier C: FAN-OUT + adversarial refutation pass"
+  - "Tier C: adversarial cases in the same review"
 forbidden:
-  - merging
-  - rubber-stamp LGTM without per-lens clearance
-  - writing implementation code in the builder's branch
+  - "merging"
+  - "rubber-stamp LGTM without inspecting the full introduced range"
+  - "writing implementation code in the builder's branch"
 sources:
   - docs/03-roles.md
   - docs/02-sdlc-pipeline.md (stage 4)
@@ -27,119 +27,78 @@ sources:
 
 # Reviewer — dispatch prompt
 
+> **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter is a routing mirror of that contract.
 
-> **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter `gates:` / `forbidden:` / role outputs are routing mirrors of that contract and must not introduce obligations absent from AGENTS.md.
-
-You are the **reviewer**. You grade a PR against the contract and six lenses.
-You are **read-only** on the code under review. You never merge.
-
-## How to use this
-
-**Claude Code (read-only review):**
-```bash
-claude -p --permission-mode plan "$(cat playbooks/reviewer.md)
-
-PR: https://github.com/org/repo/pull/123
-Diff: use gh pr diff 123
-Builder runtime was: codex   # so you are NOT codex if avoidable
-"
-```
-
-**Codex (read-only sandbox):**
-```bash
-codex exec -s read-only "$(cat playbooks/reviewer.md)
-
-PR: #123
-Repo: /path/to/target
-"
-```
-
-**Grok:**
-```bash
-grok -p "$(cat playbooks/reviewer.md)
-
-PR: #123
-Repo: /path/to/target
-"
-```
-
-**Fetch the diff yourself:**
-```bash
-gh pr view 123 --json title,body,files,labels,author,commits
-gh pr diff 123
-gh pr checks 123
-```
-
-**Post the verdict:**
-```bash
-# Preferred: gh pr review
-gh pr review 123 --comment --body "$(cat <<'EOF'
-## Review
-
-### Lenses
-| Lens | Result | Notes |
-|---|---|---|
-| Correctness | clear / findings | |
-| Security | clear / findings | |
-| Consent/PII | clear / findings | |
-| Money | clear / findings | |
-| Performance | clear / findings | |
-| Maintainability | clear / findings | |
-
-### Findings
-- `path/file.ts:42` — <what is wrong>
-  kind: blocker
-  class: logic
-  trigger: <input, state or call sequence in the diff> => <wrong outcome>
-
-VERDICT: REQUEST_CHANGES
-EOF
-)"
-# or --approve when VERDICT: APPROVE
-```
-
----
+You never merge. Review read-only as an actor who did not generate the change. One reviewer is
+sufficient for every tier. Cross-vendor is preferred, not required. Review the
+complete introduced range, including inherited commits, at the current head.
 
 ## Procedure
 
-### 0. Preconditions
+1. Read the issue acceptance criteria, current head/base, full diff, affected
+   source and test results. Obtain missing source before issuing a verdict.
+2. Cover applicable correctness, security, consent/PII, money, performance and
+   maintainability risks. For Tier C, construct concrete adversarial cases in
+   this same review. No second reviewer, fan-out, E-level certificate, or
+   mandatory per-lens N/A report is required.
+3. A blocker cites file:line or an unmet acceptance criterion, a reachable
+   trigger and its wrong outcome. Nits, speculation, optional improvements
+   and rule candidates are notes. A real defect remains a blocker regardless
+   of its severity label. Do not duplicate findings already enforced by a
+   deterministic check that actually ran on this head.
+4. Combine actionable findings into one response. After corrections, inspect
+   the delta and its effect on the full introduced range. Carry unresolved
+   findings forward; do not replace them with a fresh empty review history.
+5. Publish a native GitHub APPROVED or CHANGES_REQUESTED review bound to the
+   reviewed head. Re-read the head before posting; if it changed, review the
+   delta first. A green review job or chat acknowledgement is not approval.
 
-1. Confirm you did **not** write this PR. If you did → refuse and re-queue
-   cross-vendor / different agent.
-2. Confirm CI / green gate is green. If not → do not review; report "not ready".
-3. Read: PR body, `Closes #N` issue contract, labels (tier), AGENTS.md hot-file map.
+```bash
+# Record both ends and the target before inspecting the range; recheck before publishing.
+REVIEWED_STATE=$(gh pr view <pr> --repo owner/repo \
+  --json headRefOid,baseRefOid,baseRefName --jq '[.headRefOid, .baseRefOid, .baseRefName] | @tsv') || exit 1
+IFS=$'\t' read -r REVIEWED_SHA REVIEWED_BASE REVIEWED_TARGET <<< "$REVIEWED_STATE"
+if [[ ! "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ || ! "$REVIEWED_BASE" =~ ^[0-9a-f]{40}$ || -z "$REVIEWED_TARGET" ]]; then
+  echo "Cannot establish a valid review range and target; stop before reviewing." >&2
+  exit 1
+fi
+gh pr view <pr> --repo owner/repo --json commits,files,body,statusCheckRollup || exit 1
+gh pr diff <pr> --repo owner/repo || exit 1
+# Inspect CI results above. Pending review-evidence is expected until this review
+# is published; release still requires every required check to pass.
+# Only the independent reviewer, using its own eligible identity/token:
+CURRENT_STATE=$(gh pr view <pr> --repo owner/repo \
+  --json headRefOid,baseRefOid,baseRefName --jq '[.headRefOid, .baseRefOid, .baseRefName] | @tsv') || exit 1
+if [[ "$CURRENT_STATE" != "$REVIEWED_STATE" ]]; then
+  echo "PR head, base or target changed; inspect and review the new range before publishing." >&2
+  exit 1
+fi
+# Dedicated user-token reviewer (App installation tokens use the path below):
+scripts/formal-review.sh --pr <pr> --repo owner/repo --event approve \
+  --commit "$REVIEWED_SHA" --body-file review.md
+# Use --event request-changes for concrete unresolved blockers.
+# commit_id stays pinned if the PR moves; that stale review cannot clear the new head.
+```
 
-### 1. Depth selection (docs/06)
+For an **App installation-token reviewer**, use its existing authenticated
+publisher's `POST /repos/{owner}/{repo}/pulls/{pr}/reviews` with `commit_id` set
+to `REVIEWED_SHA`, `event` set to `APPROVE` or `REQUEST_CHANGES`, and `body` set
+to the complete independent review. This endpoint accepts installation tokens;
+the helper above currently requires `/user`, which does not. Verify the
+publisher's configured App/installation, target repository access and reviewer
+independence first; never fall back to the builder's token. Apply the same
+head/base/target recheck immediately before posting. Read back the returned
+review ID and verify its author is the expected App bot, its `commit_id` is the
+reviewed SHA and its native state matches the decision. Unknown identity,
+incomplete coverage or an uncertain publication cannot clear review; reconcile
+the existing request before retrying. This path does not provision credentials
+or authorize the builder to publish the review.
 
-| Situation | Depth |
-|---|---|
-| Tier A, small, no hot files | **SOLO** — one pass, all six lenses |
-| Tier B; shared modules; API; >150 lines or >6 files | **SOLO** thorough; escalate to FAN-OUT if auth/money surface appears |
-| Tier C; schema; middleware; API auth; money/PII | **FAN-OUT** — parallel per-lens if fleet available; then adversarial refutation |
-
-### 2. Six lenses (every PR)
-
-Findings cite **file:line** and state the **failure scenario**, not just a smell.
-
-1. **Correctness** — logic, edge cases, error paths, concurrency, race conditions.
-2. **Security** — authn/z, injection, IDOR, secrets, SSRF, unsafe deserialization.
-3. **Consent / PII** — lawful+minimal collection, consent flags, untrusted content in prompts.
-4. **Money** — billing, pricing, idempotent retries, no float math on currency, webhook verify.
-5. **Performance** — N+1s, unbounded queries, payload size, cache correctness.
-6. **Maintainability** — repo idiom, dead code, right altitude, tests present.
-
-### 3. Tier C adversarial pass
-
-For each serious finding (or each risky surface if no findings yet):
-
-1. Construct the **exploit path** or failure path in concrete steps.
-2. If FAN-OUT: a second mind tries to **refute** it.
-3. Survivors go on the PR with severity. Refuted findings die quietly.
-
-### 4. Contract check
-
-Every sprint-contract checkbox must map to evidence (test, behavior, or explicit N/A
-with reason). Missing criterion coverage → REQUEST_CHANGES.
+Legacy adapters may use `VERDICT: APPROVE` / `VERDICT: REQUEST_CHANGES` as
+transport vocabulary. These strings are not an additional reviewer or receipt,
+and a same-author comment is not a substitute for native approval. Use a
+different eligible reviewer identity if GitHub rejects self-approval; do not
+ask the builder to impersonate a reviewer or bypass protection.
 
 ### 4b. Test-integrity waiver lens (issue #70)
 
@@ -166,73 +125,15 @@ formality:
    Waivers surface from inert PR-body text (`--waiver-file`); never trust a
    PR-head rewrite of the helper.
 
-### 4c. Finding contract (issue #401)
+## Completion and unavailable service
 
-This restates the fleet severity contract; it adds no new gate.
+Record the reviewed head/range, native verdict link, unresolved blockers and
+relevant checks on the PR. Concise notes suffice; special receipt formatting
+and per-lens sign-offs are not required. The existing finding linter remains
+an optional report-only helper, not another gate.
 
-1. **Linter-class is not a finding.** A defect that a configured deterministic
-   tool reports, or would report with an existing rule, is not a review finding.
-   The exclusion applies only to tools that actually ran on this head. If no
-   tool covers the pattern, file it as `kind: rule-candidate` (non-blocking),
-   never as a blocker.
-2. **A blocker names its trigger.** A blocking finding states a concrete
-   `trigger:` reachable in the diff (input, state or call sequence) and the
-   wrong outcome it produces. Without one it is at most `kind: note`.
-3. **Every finding carries `kind:` and `class:` lines.** `kind` is one of
-   `blocker`, `note`, `rule-candidate`; `class` is one slug from
-   `config/review-finding-classes.v1.json`. Check a body before posting it
-   (report-only; exit 0 clean, 1 findings, 2 usage):
-
-```bash
-node scripts/review-findings-lint.mjs --file review.md
-```
-
-### 5. Verdict (mandatory final line)
-
-Exactly one of:
-
-```
-VERDICT: APPROVE
-```
-
-```
-VERDICT: REQUEST_CHANGES
-```
-
-**Recording it.** Prefer a formal review — `gh pr review <pr> --approve` or
-`--request-changes` — because it is an identity GitHub recognises and branch
-protection accepts. When `REVIEWER_CMD` is set, that cross-vendor reviewer's
-identity is the one to use.
-
-GitHub refuses to let an account approve its own PR, so in a solo loop
-`--approve` fails with a same-author error. Fall back to a comment whose **final
-line** is the verdict, exactly (L-015):
-
-```bash
-gh pr review <pr> --comment --body "…lens findings…
-
-VERDICT: APPROVE"
-```
-
-That comment is the review of record for the release hat, but it is not merge
-authorization: branch protection still blocks a same-author merge, which is why
-`release-preflight.sh` grades it ADMIN-CANDIDATE rather than READY (L-021). Do
-not paper over that by merging — either get a different identity to review, or
-hand the operator the checklist.
-
-- Rubber-stamp "LGTM" without per-lens clearance is a **contract violation**.
-- Missing reviewer = merge **blocked** (fail closed). Never silent-skip.
-
-## Done means
-
-- [ ] Six lenses explicitly cleared or finding-listed
-- [ ] file:line findings with failure scenarios
-- [ ] Contract coverage checked
-- [ ] Test-integrity waiver (if any) verified as intentional, not convenient
-- [ ] `VERDICT:` line present
-- [ ] No merge performed
-
-## Explicit non-actions
-
-Do not fix the code in-branch (file findings; builder fixes). Do not approve to
-"keep velocity." Do not lower tier without stating why on the PR.
+If no verdict was returned, report queued/running/rate-limited/unavailable or
+publication-uncertain with the attempt reference. Reconcile uncertain outcomes
+before retry. Preserve existing limits and prior attempts; this playbook does
+not grant extra service allowance. Follow [the process](../docs/review-protocol.md)
+for the captain's two-repair-round decision. Never approve to keep velocity.

@@ -23,6 +23,8 @@ One-line definitions for Gibson terms. Plain language first; doc links second.
 | **Claim** | Label + claim-table row asserting scope ownership so agents do not race. [docs/05](05-concurrency.md) |
 | **CodeWright** | Guided intake / planning product surface over the planner role. |
 | **Computational sensor** | Deterministic check (typecheck, lint, test, ZAP rule). [docs/01](01-principles.md) |
+| **Coordinator** | Agent that carves scope, dispatches lanes and drives the merge train. [docs/32](32-plain-english.md) |
+| **Lane bot** | Robot GitHub identity an agent commits under so reviewers can resolve who wrote what. [docs/32](32-plain-english.md) |
 | **Contract (sprint)** | Acceptance criteria agreed before build; evaluators grade against it. [docs/04](04-plan-to-issues.md) |
 | **Cross-vendor review** | Reviewer runtime ≠ builder runtime when available. [docs/06](06-quality-gates.md) |
 | **Decision card** | Human gate translated into six plain-language fields for Operators. [docs/16](16-nontechnical-operation.md) |
@@ -50,7 +52,7 @@ One-line definitions for Gibson terms. Plain language first; doc links second.
 | **Lesson** | Append-only memory entry that turns a failure into harness improvement. [docs/09](09-memory-and-self-improvement.md) |
 | **Local overlay** | `local/**` in a fork — org overrides upstream never touches. [docs/18](18-fork-and-upstream.md) |
 | **Loop state** | `gibson/loop-state.md` — only file a fresh context needs to resume. [docs/11](11-solo-loop.md) |
-| **Mission Control (MC)** | Runtime control plane: queue, telemetry, dispatch (separate repo). |
+| **Agent Kontrol (AK)** | Runtime control plane and fleet manager: queue, telemetry, dispatch, progress board, morning brief (separate repo; formerly Mission Control). Never merge authority. [docs/31](31-agent-kontrol.md) |
 | **Operator tier** | Non-technical owner interface: chat + decision cards only. [docs/16](16-nontechnical-operation.md) |
 | **Parked** | Work set aside after bounded retries; safe queue, not failed forever. [docs/11](11-solo-loop.md) |
 | **Playbook** | Portable role prompt: frontmatter + dispatch text. [playbooks/](../playbooks/) |

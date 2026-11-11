@@ -183,76 +183,28 @@ vendor-blind on purpose. Sensors live in `scripts/test-integrity.mjs` and
 |---|---|---|
 | **A** | Routine: UI copy, isolated components, docs, tests | Solo review pass; standard gates |
 | **B** | Elevated: shared modules, API routes, data reads, >150 lines or >6 files | Full-lens review; UX eval if visible |
-| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data | Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. |
+| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data | One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful. |
 
 Tier is assigned at decomposition and re-checked at review (diffs drift into Tier C;
 they never drift out without a reviewer saying so).
 
-## Review independence levels
+## Review independence
 
-> 🙂 **In plain English:** not all "reviews" are equally independent. A model
-> re-reading its own work with a clean slate can catch typos, but it's still
-> the same accountable actor. The levels below give a shared name for how
-> independent a review actually was, from **E0** (self-check — doesn't count)
-> up through **E3** (a different vendor's model, bound to the exact head) to
-> **E4** (a human's own decision).
+One independent reviewer is sufficient for every tier. The reviewer did not
+generate the work, operates read-only, and covers the complete introduced range
+at the current committed head. Cross-vendor is preferred, not required. Tier C
+adds adversarial cases within that same review, not additional reviewers.
 
-"Review" has meant several different things in practice: a different agent
-reviewing an exact head, a same-vendor different-model pass, a fresh-context
-pass by the same model, an adversarial self-check, deterministic CI. One
-canonical taxonomy (issue #161) replaces that loose language. `AGENTS.md`
-cites this table by level name rather than restating it, per its own hard
-byte cap — but this page is non-normative (banner above): it restates the
-vocabulary for readability. `AGENTS.md`'s citation and the decisions in
-`memory/DECISIONS.md` (D-015 for the Tier C floor, D-012 for A/B) remains the
-authority for what each tier actually requires. D-015 supersedes only D-011's
-owner-merge clause.
+The E0–E4 taxonomy and prior D-012/D-015 review-strength floors are historical;
+the owner-directed process amendment in #622 replaces the mandatory ladder.
+D-015's removal of the extra Tier C human merge click remains intact. The G12
+identifier now refers to independent approval at the exact head plus required
+checks. No substantive production, security, spending or owner gate is removed.
 
-| Level | Meaning |
-|---|---|
-| **E0** | Self-check: same execution context/actor. Never independent review. |
-| **E1** | Fresh-context evaluation: same model/provider identity, isolated context. Reduces anchoring; does not create a different accountable identity. |
-| **E2** | Separate evaluator identity or same-vendor different model: independently invoked and read-only. |
-| **E3** | Cross-vendor independent review: different provider and identity, exact-head bound. |
-| **E4** | Human authority: owner/authorized reviewer decision. |
-
-A level is achieved, not claimed: it is read from actual observed identities
-(builder/evaluator/reviewer provider, model, agent identity, session/run
-identity), isolation, capabilities, and an exact-head binding — never
-inferred from a parallel-review *strategy* or from silence. Exact-head
-staleness invalidates an otherwise-valid review at that level. A reviewer
-capable of mutating the reviewed head cannot supply independence at any
-level above E0 for that head.
-
-**Decided minimums:**
-
-- Tier C requires the **G12** floor (D-015, `memory/DECISIONS.md`): E3 at the
-  exact head + required checks. A cross-vendor E3 review
-  stays a claim until the merging party re-runs the checks and reads the diff.
-  An unread AI approval leaves the
-  floor unmet. The Tier C row check in `scripts/lib/contract-semantics.mjs`
-  (`diffTierTreatments`) checks that wording only. Runtime enforcement is
-  `scripts/pr-review-evidence.mjs` (exact-head review evidence) plus
-  branch-protection required checks today, and the #160 delivery-receipt
-  verifier later.
-- Tier A and Tier B require **E2** (D-012) — a separate evaluator identity
-  or same-vendor different model, independently invoked and read-only.
-  Rules out a same-actor self-check or fresh-context pass counting as
-  review, without imposing Tier C's cross-vendor overhead on routine and
-  elevated work.
-
-Schema and security-boundary changes were not given a separate decision:
-`AGENTS.md`'s Risk tiers table above already routes
-money/auth/security-boundary/schema/prod-data changes into Tier C, so they
-inherit the Tier C floor (D-015) rather than needing one of their own.
-
-**Still undecided:** delivery-control (`AGENTS.md`'s own separate binding
-section, not part of the Risk tiers table above) has no minimum yet — #161's
-acceptance criteria list it as its own owner decision, and #161's authority
-boundary forbids inferring one. A delivery-control change that isn't also
-money/auth/security-boundary/schema/prod-data falls back to whatever review
-practice this file already describes for its tier absent a decided E-level
-floor. Track under issue #161.
+Native GitHub APPROVED / CHANGES_REQUESTED is the normal record. Source
+adoption and live protection cutover are separate; see the
+[review process and rollout](review-protocol.md). Existing counters, required
+checks and failed findings remain in force until explicitly migrated.
 
 ## Review lenses
 
@@ -269,26 +221,25 @@ Six lenses; findings cite file:line and state the failure scenario, not just the
 
 ## Review depth (cost-shaped)
 
-- **SOLO pass** (default): one reviewer, all lenses, one report. Cheap, fast.
-- **FAN-OUT** (triggers: Tier C; touches schema/middleware/API auth surface; large
-  diffs): parallel per-lens reviewers, then an adversarial verification pass — 1–2
-  skeptics per finding prompted to *refute* it. Findings that survive go to the PR;
-  refuted findings die quietly (plausible-but-wrong findings are the failure mode
-  of inferential review).
-- Cross-vendor by default: reviewer runtime ≠ builder runtime when available,
-  reviewer runs **read-only**, verdict must end `VERDICT: APPROVE` or
-  `VERDICT: REQUEST_CHANGES`.
-- **Fail closed:** a missing or broken reviewer blocks the merge; it never silently
-  skips. (Deliberate hardening of Mission Control's current lenient behavior.)
+Use one reviewer for all applicable lenses. Scale source inspection and
+adversarial cases to the risk, without mandatory fan-out, second-reviewer
+refutation or per-lens N/A sign-offs. Concrete reachable defects and unmet
+acceptance criteria block; optional improvements are notes. Missing, partial
+or unavailable review blocks merge and is reported as a service/evidence
+problem, not counted as a code repair round.
+
+Combine fixes, review the delta in full context, and keep prior findings. After
+two substantive repair rounds the captain chooses finish, split, redesign or
+park; existing runner caps are preserved until deliberately migrated.
 
 ## Merge gate
 
 `release` role verifies, in order:
 1. `Closes #<issue>` present; issue contract checkboxes all verified.
 2. CI green (gate + tests + security hard-fail layers).
-3. Review verdict APPROVE; UX eval pass (when applicable).
+3. One independent native APPROVED review at the current head/full range; no unresolved blockers. UX eval pass when applicable.
 4. DCO/`Signed-off-by` survives the squash.
-5. Tier C / schema → **G12** floor met (D-015).
+5. Tier C / schema → **G12** independent-approval/check floor met; adversarial cases covered.
 6. Schema PRs: serialized, migration file present (schema-guard CI check).
 
 ## Drift sensors (continuous, outside change cycles)

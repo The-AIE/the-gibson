@@ -74,15 +74,15 @@ PR: #123
 "
 ```
 
-### 5. Telemetry (Mission Control)
+### 5. Telemetry (Agent Kontrol)
 
 Claude Code lifecycle hooks are the gold standard for liveness. Wire SessionStart /
-Stop / etc. to MC ingest per Mission Control's `agents/claude-code` docs when MC is
+Stop / etc. to AK ingest per Agent Kontrol's `agents/claude-code` docs when AK is
 deployed. Until then: PR comments + honest status are the minimum.
 
 ### 6. Cost capture
 
-Claude Code reports `total_cost_usd` in JSON output — record on the MC task or PR
+Claude Code reports `total_cost_usd` in JSON output — record on the AK task or PR
 comment for the weekly cost-per-merged-PR number (docs/15).
 
 ### 7. Solo loop
