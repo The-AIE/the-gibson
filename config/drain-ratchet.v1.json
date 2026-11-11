@@ -1,0 +1,32 @@
+{
+  "schema": "gibson.drain-ratchet.v1",
+  "$comment": "Drain ratchet (#559). mode report-only never opens an issue; flipping it to enforce is an owner decision (docs/31-drain-ratchet.md). marginPct is relative: a window is below baseline when rate < baseline * (1 - marginPct/100). floorOpened is the absolute floor: a window (or its baseline) with fewer opened PRs+issues cannot breach.",
+  "mode": "report-only",
+  "windowDays": 14,
+  "baselineDays": 28,
+  "marginPct": 25,
+  "consecutiveWindows": 2,
+  "floorOpened": 8,
+  "ownerLogins": ["github-actions[bot]"],
+  "stalePrDays": 7,
+  "deadlineDays": 7,
+  "maxSuspects": 10,
+  "stopLabels": ["freeze", "stop"],
+  "stopTitlePattern": "\\bFREEZE\\b",
+  "processPaths": [
+    { "kind": "workflow", "pattern": "^\\.github/workflows/" },
+    { "kind": "agents", "pattern": "^AGENTS\\.md$" },
+    {
+      "kind": "gate",
+      "pattern": "^scripts/(gate|gate-baseline|prepush|claim|claim-[a-z-]+|release-claim|scope-overlap|pr-review-evidence|pr-size|review-findings-lint|formal-review|architecture-fitness)\\.(sh|mjs)$"
+    },
+    {
+      "kind": "sensor",
+      "pattern": "^scripts/([a-z-]*health[a-z-]*|sensor-[a-z-]+|public-hygiene|test-integrity|drain-ratchet|silent-noop|injection-scan)\\.(sh|mjs)$"
+    },
+    {
+      "kind": "review-or-size-rule",
+      "pattern": "^config/(review|pr-size|policy/|architecture-fitness|sensor-|self-gate|drain-ratchet)"
+    }
+  ]
+}

@@ -39,7 +39,7 @@ You do not review, merge, or evaluate your own work.
 
 ## How to use this
 
-**Fleet / Mission Control:** dispatch with the issue number and target repo path.
+**Fleet / Agent Kontrol:** dispatch with the issue number and target repo path.
 
 **Claude Code (interactive):**
 ```bash
@@ -215,7 +215,7 @@ node <path-to-gibson>/scripts/gibson-verify.mjs report --agent <agent-id> --pr <
 
 ### 6. Hand off — do not review yourself
 
-Report status to Mission Control / PR. Builder is done when the PR is open and green
+Report status to Agent Kontrol / PR. Builder is done when the PR is open and green
 locally. Reviewer, test-engineer, and ux-evaluator are **other hats**.
 
 ## Done means
