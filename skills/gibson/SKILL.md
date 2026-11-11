@@ -59,8 +59,11 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
   docs/11's fresh-context adversarial pass (a different session, never the
   authoring one). Tier C still needs the G12 floor (one independent approval at
   the exact head plus required checks, D-015): that fresh-context reviewer can
-  supply it, the authoring session cannot — and the digest
-  must say that degraded mode was used. On the supervisor path this is
+  supply the approval, the authoring session cannot. The approval is only half
+  the floor: every required check must also pass, and where `review-evidence`
+  is a required check a same-vendor review does not turn it green, so that PR
+  stays parked until a reviewer the check accepts has passed the exact head.
+  The digest must say that degraded mode was used. On the supervisor path this is
   machine-enforced: `loop.sh` will not hand a branch to Devin without a completed
   distinct-vendor review of the exact SHA being handed off, and a missing, stale,
   or failed review blocks the handoff (the branch stays queued in loop-state).

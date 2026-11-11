@@ -170,7 +170,10 @@ touch /path/to/target/gibson/HALT
   whose `commit_id` equals the PR's current head. A comment is not bound to a
   commit and does not count, and `release-preflight.sh` does not verify this yet
   (#636), so its READY is not proof of it. A push after the approval makes it
-  stale. Without a current one: park the PR, **do not merge**.
+  stale. The same review must show the Tier C adversarial cases (Law 7): its
+  body names the abuse or failure cases it tried against the changed surface. An
+  approval that does not show them does not meet the floor. Without a current
+  approval that does: park the PR, **do not merge**.
 - If human-gated (e.g. G6 billing/pricing/payment code, schema, an explicit owner
   hold) and the owner has not recorded an explicit approval of the PR's current
   head: queue for Mark, set next issue triage, **do not merge**. A decline, a
