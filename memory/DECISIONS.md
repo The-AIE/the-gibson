@@ -418,8 +418,12 @@ head plus the repository's required checks under the current #623 contract):
   App reviewer identity in the config, or is listed twice, so the allowance
   cannot be dead text or a typo.
 - Unvendored commits are unchanged: a Codex pass never clears an owner-identity
-  commit with no `Agent-Vendor:` trailer; only the independent reviewer does,
-  and a Codex fail still blocks beside an independent pass.
+  commit that has neither an `Agent-Vendor:` trailer nor an applicable owner
+  attestation naming its author vendor; only the independent reviewer does. (With
+  such an attestation the commit is no longer unvendored and is judged like any
+  other commit of that vendor.) A cross-vendor Codex fail still blocks beside an
+  independent pass; on a head that also carries a Codex-authored commit a Codex
+  fail is same-vendor evidence and is excluded like any same-vendor verdict.
 - Merger and reviewer stay separate in practice and are not yet separated by
   machine. Every merge on the-gibson is performed by the owner login (25 of the
   last 25 merged PRs on 2026-10-23) by whichever session is shipping, after
