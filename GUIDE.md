@@ -154,7 +154,8 @@ Different agents (or fresh solo-loop hats):
 | Security | `playbooks/security.md` + CI | layers table on PR |
 
 Tier C clears on one independent approval at the exact head, from a review that covered
-the adversarial cases, plus green required checks (G12 floor, D-015), with no owner step. You only intervene for the
+the adversarial cases, plus green required checks (G12 floor, D-015), with no owner step unless a G6, schema
+or explicit owner hold applies. You only intervene for the
 [human gates](docs/14-human-gates.md) — for example G6 billing/pricing/payment code,
 G1 destructive schema changes, or the one-schema-merge-in-flight rule.
 
@@ -192,7 +193,7 @@ Same pipeline, one runner:
 | Start a feature | Brief → approve PLAN.md |
 | Quick fix | Issue with acceptance criteria |
 | See status | AK dashboard / digest / `gh issue list -l gibson` |
-| Tier C merge | No action: one independent approval at the exact head, from a review that covered the Tier C adversarial cases, plus required checks clear it (G12 floor, D-015) |
+| Tier C merge | No action: one independent approval at the exact head, from a review that covered the Tier C adversarial cases, plus required checks clear it (G12 floor, D-015), unless a G6, schema or explicit owner hold applies |
 | Approve a billing/pricing/payment merge | Reply on the PR (G6) |
 | Approve a schema merge | Reply on the PR (schema merges are human-gated, one in flight) |
 | Stop everything on a repo | `gibson-halt` label |

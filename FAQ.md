@@ -33,7 +33,8 @@ of billing/pricing/payment code, G6), and destructive ops stop for you
 ([docs/14](docs/14-human-gates.md)). Schema merges also stop for you (one in flight at
 a time, human-gated). Other Tier C merges do not wait for you: they
 clear on one independent approval at the exact head, from a review that covered the
-Tier C adversarial cases, plus required checks (D-015).
+Tier C adversarial cases, plus required checks (D-015). An explicit owner hold on a
+PR still holds it.
 Silence never auto-approves a gate.
 
 ## What's a "green gate"?
