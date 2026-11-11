@@ -112,6 +112,7 @@ Findings, backlogs, retros, and other history remain in `docs/`, `memory/`, and
 
 | Need | Where |
 |---|---|
+| Product definition → verified release research | [Hypothesis, ecosystem, architecture, incremental plan and example](research/product-definition-to-release/README.md) |
 | PLAN → issues sample | [examples/04-plan-to-issues-sample.md](examples/04-plan-to-issues-sample.md) |
 | UX eval sample | [examples/07-ux-eval-sample.md](examples/07-ux-eval-sample.md) |
 | AuthZ matrix sample | [examples/08-authz-matrix-sample.md](examples/08-authz-matrix-sample.md) |
