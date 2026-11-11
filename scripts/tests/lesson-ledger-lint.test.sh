@@ -1193,5 +1193,177 @@ else
   bad "incident fence (rc=$rc): $out"
 fi
 
+# Schema-shaped lesson with caller-chosen dates. The slug stays heading-legal.
+dated_entry() {
+  local n="$1" head="$2" occurred="$3" ingested="$4"
+  printf '%s\n' "## $(lid "$n") · ${head} · dated-fixture-${n}"
+  printf '%s\n' "**What happened:** fixture"
+  printf '%s\n' "**Root cause:** unknown"
+  printf '%s\n' "**Harness fix:** none shipped in this repository"
+  printf '%s\n' "**Status:** unknown (no sensor yet)"
+  printf '%s\n' "**Evidence:** unknown"
+  printf '%s\n' "**Proof:** unknown"
+  printf '%s\n' "**Reverted attempt:** unknown"
+  printf '%s\n' "**Occurred:** ${occurred}"
+  printf '%s\n' "**Ingested:** ${ingested}"
+  printf '%s\n' "**Tags:** #fixture"
+  printf '%s\n' ""
+}
+
+echo "# Occurred must equal the lesson heading date"
+MISDATE="$ROOT/occurred-mismatch"
+make_tree "$MISDATE"
+{ dated_entry 98 "2026-09-07" "2026-09-08" "2026-10-03"; } > "$MISDATE/memory/LESSONS.md"
+run_lint "$MISDATE" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Occurred 2026-09-08 does not match heading date 2026-09-07' >/dev/null; then
+  ok "occurred mismatch"
+else
+  bad "occurred mismatch (rc=$rc): $out"
+fi
+
+OLDDATE="$ROOT/occurred-mismatch-old"
+make_tree "$OLDDATE"
+{
+  printf '%s\n' "## $(lid 1) · 2026-09-04 · old-mismatch"
+  printf '%s\n' "**Status:** intake"
+  printf '%s\n' "**Occurred:** 2026-09-05"
+  printf '%s\n' "**Tags:** #fixture"
+} > "$OLDDATE/memory/LESSONS.md"
+run_lint "$OLDDATE" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Occurred 2026-09-05 does not match heading date 2026-09-04' >/dev/null; then
+  ok "old lesson occurred mismatch"
+else
+  bad "old lesson occurred mismatch (rc=$rc): $out"
+fi
+
+echo "# impossible calendar days are not YYYY-MM-DD just because the digits fit"
+FEB31="$ROOT/february-31"
+make_tree "$FEB31"
+{ dated_entry 98 "2026-02-31" "2026-02-31" "2026-10-03"; } > "$FEB31/memory/LESSONS.md"
+run_lint "$FEB31" --offline
+if [[ "$rc" -eq 1 ]] \
+    && echo "$out" | grep -F 'Occurred is not a real Gregorian day' >/dev/null \
+    && echo "$out" | grep -F 'heading date is not a real Gregorian day' >/dev/null \
+    && ! echo "$out" | grep -F 'does not match heading date' >/dev/null; then
+  ok "february 31"
+else
+  bad "february 31 (rc=$rc): $out"
+fi
+
+APR31="$ROOT/ingested-april-31"
+make_tree "$APR31"
+{ dated_entry 98 "2026-04-30" "2026-04-30" "2026-04-31"; } > "$APR31/memory/LESSONS.md"
+run_lint "$APR31" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Ingested is not a real Gregorian day' >/dev/null \
+    && ! echo "$out" | grep -F 'does not match heading date' >/dev/null; then
+  ok "ingested april 31"
+else
+  bad "ingested april 31 (rc=$rc): $out"
+fi
+
+Y1900="$ROOT/lesson-1900-02-29"
+make_tree "$Y1900"
+{ dated_entry 98 "1900-02-29" "1900-02-29" "2026-10-03"; } > "$Y1900/memory/LESSONS.md"
+run_lint "$Y1900" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Occurred is not a real Gregorian day' >/dev/null; then
+  ok "1900-02-29 is not a leap day"
+else
+  bad "1900-02-29 (rc=$rc): $out"
+fi
+
+LEAP="$ROOT/lesson-leap-2024"
+make_tree "$LEAP"
+{ dated_entry 98 "2024-02-29" "2024-02-29" "2024-02-29"; } > "$LEAP/memory/LESSONS.md"
+run_lint "$LEAP" --offline
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -F 'OK' >/dev/null; then
+  ok "2024-02-29 passes"
+else
+  bad "2024-02-29 (rc=$rc): $out"
+fi
+
+echo "# a heading with no date has nothing to compare"
+NODATE="$ROOT/occurred-no-heading-date"
+make_tree "$NODATE"
+{
+  printf '%s\n' "## $(lid 98) · 2026-10 · not-strict"
+  printf '%s\n' "**Status:** unknown (no sensor yet)"
+  printf '%s\n' "**Evidence:** unknown"
+  printf '%s\n' "**Proof:** unknown"
+  printf '%s\n' "**Reverted attempt:** unknown"
+  printf '%s\n' "**Occurred:** 2026-10-23"
+  printf '%s\n' "**Ingested:** 2026-10-23"
+  printf '%s\n' "**Tags:** #fixture"
+} > "$NODATE/memory/LESSONS.md"
+run_lint "$NODATE" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Occurred 2026-10-23 does not match heading date (none)' >/dev/null; then
+  ok "explicit Occurred fails when the heading has no date"
+else
+  bad "heading has no date (rc=$rc): $out"
+fi
+
+write_dated_incident() {
+  local dest="$1" head="$2" occurred="$3" ingested="$4"
+  mkdir -p "$dest/memory/incidents"
+  {
+    printf '%s\n' "## I-001 · ${head} · fixture-incident"
+    printf '%s\n' "**Occurred:** ${occurred}"
+    printf '%s\n' "**Ingested:** ${ingested}"
+    printf '%s\n' "**Lesson:** $(lid 1)"
+    printf '%s\n' "**Evidence:** https://github.com/acme/app/issues/419"
+    printf '%s\n' "**Proof:** unknown"
+    printf '%s\n' "**Reverted attempt:** unknown"
+    printf '%s\n' "**Status:** unknown"
+    printf '%s\n' "**Summary:** fixture"
+  } > "$dest/memory/incidents/I-001.md"
+  printf '%s %s\n' "I-001" "$(lid 1)" > "$dest/memory/incidents/INDEX.md"
+}
+
+echo "# incident Occurred matches its heading, and both are real days"
+IMIS="$ROOT/incident-mismatch"
+make_tree "$IMIS"
+{ entry 1 "fixed"; } > "$IMIS/memory/LESSONS.md"
+write_dated_incident "$IMIS" "2026-09-07" "2026-09-08" "2026-10-03"
+run_lint "$IMIS" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Occurred 2026-09-08 does not match heading date 2026-09-07' >/dev/null; then
+  ok "incident mismatch"
+else
+  bad "incident mismatch (rc=$rc): $out"
+fi
+
+IFEB="$ROOT/incident-february-31"
+make_tree "$IFEB"
+{ entry 1 "fixed"; } > "$IFEB/memory/LESSONS.md"
+write_dated_incident "$IFEB" "2026-02-31" "2026-02-31" "2026-10-03"
+run_lint "$IFEB" --offline
+if [[ "$rc" -eq 1 ]] \
+    && echo "$out" | grep -F 'Occurred is not a real Gregorian day' >/dev/null \
+    && echo "$out" | grep -F 'heading date is not a real Gregorian day' >/dev/null; then
+  ok "incident february 31"
+else
+  bad "incident february 31 (rc=$rc): $out"
+fi
+
+I1900="$ROOT/incident-ingested-1900"
+make_tree "$I1900"
+{ entry 1 "fixed"; } > "$I1900/memory/LESSONS.md"
+write_dated_incident "$I1900" "2026-09-07" "2026-09-07" "1900-02-29"
+run_lint "$I1900" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'Ingested is not a real Gregorian day' >/dev/null; then
+  ok "incident ingested 1900-02-29"
+else
+  bad "incident ingested 1900-02-29 (rc=$rc): $out"
+fi
+
+ILEAP="$ROOT/incident-leap-2024"
+make_tree "$ILEAP"
+{ entry 1 "fixed"; } > "$ILEAP/memory/LESSONS.md"
+write_dated_incident "$ILEAP" "2024-02-29" "2024-02-29" "2024-02-29"
+run_lint "$ILEAP" --offline
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -F 'OK' >/dev/null; then
+  ok "incident 2024-02-29 passes"
+else
+  bad "incident 2024-02-29 (rc=$rc): $out"
+fi
+
 echo "lesson-ledger-lint.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

@@ -31,9 +31,11 @@ From lesson number 98 upward, the heading must match that shape, and the record 
 | `**Evidence:**` | `unknown`, or a space-separated list of public refs. |
 | `**Proof:**` | `unknown`, or `<40 lowercase hex sha> <repo-relative entrypoint> <repo-relative fixture dir>`. |
 | `**Reverted attempt:**` | `unknown`, or a short public reason. |
-| `**Occurred:**` | `YYYY-MM-DD`. The heading date is the occurrence date. |
+| `**Occurred:**` | `YYYY-MM-DD`. The heading date is the occurrence date. An explicit value must equal that date. |
 | `**Ingested:**` | `YYYY-MM-DD`. When the record was written down. Not the same fact as Occurred. |
 | `**Tags:**` | Required, as before. |
+
+A `YYYY-MM-DD` value on Occurred, Ingested, or the heading must be a real Gregorian day. `2026-02-31` matches the digit shape and still fails. `2024-02-29` passes. `1900-02-29` fails. There is no time and no time zone. A heading that is not `## L-NNN · YYYY-MM-DD · slug` has no date to compare, so an explicit Occurred fails the match. The same calendar rule applies to incident headings.
 
 Lessons below number 98 may omit Evidence, Proof, Reverted attempt, Occurred, and Ingested. Omission is reported `unknown` and does not fail. An explicit value on an older lesson is checked the same way as a new one.
 

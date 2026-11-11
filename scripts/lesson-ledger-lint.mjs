@@ -19,6 +19,9 @@
  *        attempt: omission is reported `unknown` and does not fail. From
  *        L-098 on, those lines must be present (the value may be `unknown`).
  *        `unknown` is not a pass. Status `fixed` with Proof `unknown` fails.
+ *        An explicit Occurred must equal the heading date. Occurred,
+ *        Ingested, and that heading date must be real Gregorian days
+ *        (2026-02-31 and 1900-02-29 fail; 2024-02-29 passes). No time zone.
  *        A shaped Proof whose paths exist is `unverified`: this lint does
  *        not run the gate, resolve the commit, or fetch URLs. Incident files
  *        under memory/incidents/ must map 1:1 through INDEX.md to one
@@ -555,7 +558,7 @@ function ghIssueState(repo, n) {
 // Lessons at this id and after are schema records: the lines must exist.
 // Older lessons omit them; omission is reported unknown and does not fail.
 const SCHEMA_LESSON_MIN = 98;
-const STRICT_HEADING_RE = /^## L-\d{3} · \d{4}-\d{2}-\d{2} · [a-z0-9-]+$/;
+const STRICT_HEADING_RE = /^## L-\d{3} · (\d{4}-\d{2}-\d{2}) · [a-z0-9-]+$/;
 const INCIDENT_HEADING_RE = /^## (I-\d{3}) · (\d{4}-\d{2}-\d{2}) · ([a-z0-9-]+)$/;
 const INCIDENT_FILE_RE = /^I-(\d{3})\.md$/;
 const INDEX_ROW_RE = /^(I-\d{3}) (L-\d{3})$/;
@@ -591,6 +594,30 @@ function isYmd(value) {
   const month = Number(m[2]);
   const day = Number(m[3]);
   return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
+
+// Proleptic Gregorian. Not Date.UTC: years 0–99 there map to 1900–1999.
+const MONTH_LENGTHS = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+function isLeapYear(year) {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+function isCivilYmd(value) {
+  const m = DATE_RE.exec(value || "");
+  if (!m) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (month < 1 || month > 12) return false;
+  let dim = MONTH_LENGTHS[month];
+  if (month === 2 && isLeapYear(year)) dim += 1;
+  return day >= 1 && day <= dim;
+}
+
+function lessonHeadingDate(headingText) {
+  const m = STRICT_HEADING_RE.exec(headingText || "");
+  return m ? m[1] : null;
 }
 
 function isRepoRel(p) {
@@ -668,11 +695,34 @@ function collectLessonEvidence(root, entries, findings, reports, ledgerRel) {
         );
       }
     }
+    const headDate = lessonHeadingDate(e.headingText);
+    if (headDate != null && !isCivilYmd(headDate)) {
+      findings.push(
+        `${e.id} heading date is not a real Gregorian day (${ledgerRel}:${e.headingLine})`
+      );
+    }
     if (e.occurred != null && !isYmd(e.occurred)) {
       findings.push(`${e.id} Occurred is not YYYY-MM-DD (${ledgerRel}:${e.headingLine})`);
+    } else if (e.occurred != null) {
+      if (!isCivilYmd(e.occurred)) {
+        findings.push(
+          `${e.id} Occurred is not a real Gregorian day (${ledgerRel}:${e.headingLine})`
+        );
+      }
+      // Equal impossible days are a calendar failure, not a mismatch.
+      if (headDate == null || e.occurred !== headDate) {
+        const shown = headDate == null ? "(none)" : headDate;
+        findings.push(
+          `${e.id} Occurred ${e.occurred} does not match heading date ${shown} (${ledgerRel}:${e.headingLine})`
+        );
+      }
     }
     if (e.ingested != null && !isYmd(e.ingested)) {
       findings.push(`${e.id} Ingested is not YYYY-MM-DD (${ledgerRel}:${e.headingLine})`);
+    } else if (e.ingested != null && !isCivilYmd(e.ingested)) {
+      findings.push(
+        `${e.id} Ingested is not a real Gregorian day (${ledgerRel}:${e.headingLine})`
+      );
     }
     const evidence = classifyEvidence(e.evidence);
     const proof = classifyProof(e.proof);
@@ -861,6 +911,10 @@ function collectIncidents(root, byId, findings, reports) {
     if (headings[0][1] !== id) {
       findings.push(`${rel} heading ${headings[0][1]} does not match the file name`);
     }
+    const headDate = headings[0][2];
+    if (!isCivilYmd(headDate)) {
+      findings.push(`${id} heading date is not a real Gregorian day (${rel})`);
+    }
     const occurred = fieldValue(text, "Occurred");
     const ingested = fieldValue(text, "Ingested");
     const lesson = fieldValue(text, "Lesson");
@@ -870,11 +924,19 @@ function collectIncidents(root, byId, findings, reports) {
     const status = fieldValue(text, "Status");
     if (occurred == null) findings.push(`${id} is missing **Occurred:** (${rel})`);
     else if (!isYmd(occurred)) findings.push(`${id} Occurred is not YYYY-MM-DD (${rel})`);
-    else if (occurred !== headings[0][2]) {
-      findings.push(`${id} Occurred ${occurred} does not match heading date ${headings[0][2]} (${rel})`);
+    else {
+      if (!isCivilYmd(occurred)) {
+        findings.push(`${id} Occurred is not a real Gregorian day (${rel})`);
+      }
+      if (occurred !== headDate) {
+        findings.push(`${id} Occurred ${occurred} does not match heading date ${headDate} (${rel})`);
+      }
     }
     if (ingested == null) findings.push(`${id} is missing **Ingested:** (${rel})`);
     else if (!isYmd(ingested)) findings.push(`${id} Ingested is not YYYY-MM-DD (${rel})`);
+    else if (!isCivilYmd(ingested)) {
+      findings.push(`${id} Ingested is not a real Gregorian day (${rel})`);
+    }
     if (evidence == null) {
       findings.push(`${id} is missing **Evidence:** (write the word unknown) (${rel})`);
     } else {
