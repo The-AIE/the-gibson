@@ -22,7 +22,7 @@
       "forbidden": "weakening/deleting failing tests; happy-path-only on Tier C (adversarial cases required)"
     },
     "reviewer": {
-      "out": "VERDICT: APPROVE or VERDICT: REQUEST_CHANGES on the exact head; six lenses with file:line findings",
+      "out": "Native GitHub APPROVED or CHANGES_REQUESTED on the exact head; six lenses with file:line findings (legacy adapters: VERDICT: APPROVE / VERDICT: REQUEST_CHANGES)",
       "forbidden": "merging; reviewing own generation; rubber-stamp LGTM"
     },
     "ux-evaluator": {
@@ -114,18 +114,18 @@
     },
     "reviewer": {
       "outputs": [
-        "PR review with file:line findings across six lenses",
-        "final line exactly: VERDICT: APPROVE | VERDICT: REQUEST_CHANGES"
+        "One native GitHub review at the current head covering the full introduced range",
+        "Concrete file:line blockers across applicable six lenses; optional notes separate"
       ],
       "gates": [
         "never review own generation (Law 5)",
-        "cross-vendor when available (reviewer_platform ≠ builder)",
+        "one independent reviewer; cross-vendor preferred, not required",
         "fail closed: missing/broken reviewer blocks merge",
-        "Tier C: FAN-OUT + adversarial refutation pass"
+        "Tier C: adversarial cases in the same review"
       ],
       "forbidden": [
         "merging",
-        "rubber-stamp LGTM without per-lens clearance",
+        "rubber-stamp LGTM without inspecting the full introduced range",
         "writing implementation code in the builder's branch"
       ]
     },
@@ -175,9 +175,9 @@
       "gates": [
         "Closes #N present; contract checkboxes verified",
         "CI green (gate + tests + security hard-fail)",
-        "review VERDICT: APPROVE; UX eval pass when applicable",
+        "one native GitHub APPROVED review at the current head; UX eval pass when applicable",
         "DCO/Signed-off-by survives squash",
-        "Tier C / schema → G12 floor met (E3 at the exact head, required checks green)",
+        "Tier C / schema → G12 floor met (independent approval at the exact head, required checks green)",
         "one schema merge in flight fleet-wide"
       ],
       "forbidden": [

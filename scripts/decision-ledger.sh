@@ -80,8 +80,11 @@ SAFETY
   - Paths: regular-file leaf only; refuse symlink/FIFO/device/directory targets.
   - Every stored event is re-validated (schema, types, gate, secrets, control,
     recomputed id) on read/list/add. Forged ids and noncanonical JSONL fail closed.
-  - Lock before read/write (mkdir lock + ownership token). Same-directory temp +
-    atomic rename. Append preserves exact existing byte prefix (never reorders).
+  - Kernel lock before recovery/read/write; mkdir + token retains legacy owner
+    checks. Same-directory temp + atomic rename preserves the old byte prefix.
+  - The empty .lock-guard directory is permanent: never unlink it while any
+    ledger process may exist. Kernel ownership ends when its last descriptor
+    closes, including after a crash. Do not mix old and new writer versions.
   - Stale/held lock fails truthfully; never breaks another writer silently.
   - Never reclaim a symlinked lock path (victim bytes preserved).
   - Secret-like field names and values are refused.
@@ -337,6 +340,7 @@ ensure_parent_dir() {
 # ---------------------------------------------------------------------------
 LOCK_DIR=""
 LOCK_HELD=0
+LOCK_GUARD_HELD=0
 LOCK_TOKEN=""
 
 _lock_is_real_dir() {
@@ -374,6 +378,55 @@ _lock_sleep() {
   sleep "$interval" 2>/dev/null || sleep 1
 }
 
+_acquire_lock_guard() {
+  # A stable inode serializes the entire operation, including stale recovery.
+  # Never remove this directory: unlink/recreate would split waiters across
+  # different kernel locks. All participants must use this version's protocol.
+  local max_tries="$1" guard="${LOCK_DIR}-guard" interval
+  interval="${DECISION_LEDGER_LOCK_SLEEP:-0.05}"
+  if ! [[ "$interval" =~ ^[0-9]+([.][0-9]+)?$ ]]; then interval="0.05"; fi
+  mkdir "$guard" 2>/dev/null || true
+  if [[ -L "$guard" || ! -d "$guard" ]]; then
+    die_lock "ledger guard is not a real directory (refuse): $guard"
+  fi
+  # The /. suffix requires a directory; even a raced FIFO/file cannot make
+  # this open block. Python validates the opened inode against lstat below.
+  exec 9<"$guard/." || die_lock "cannot open ledger guard: $guard"
+  LOCK_GUARD_HELD=1
+  if ! python3 - "$guard" "$max_tries" "$interval" <<'PYLOCK'
+import errno, fcntl, os, stat, sys, time
+path, tries, interval = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+
+def verify():
+    opened, named = os.fstat(9), os.lstat(path)
+    if (not stat.S_ISDIR(named.st_mode) or not stat.S_ISDIR(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+            or opened.st_nlink == 0):
+        raise OSError("ledger guard identity changed")
+
+try:
+    verify()
+    for attempt in range(tries):
+        try:
+            fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            verify()
+            # flock belongs to the inherited open-file description. Bash
+            # retains descriptor 9 after this helper exits on macOS/Linux.
+            sys.exit(0)
+        except OSError as exc:
+            if exc.errno not in (errno.EAGAIN, errno.EACCES):
+                raise
+            time.sleep(interval)
+    raise OSError("ledger kernel guard held (wait budget exhausted)")
+except (OSError, ValueError, OverflowError) as exc:
+    sys.stderr.write("decision-ledger.sh: " + str(exc) + "\n")
+    sys.exit(4)
+PYLOCK
+  then
+    die_lock "cannot acquire ledger kernel guard: $guard"
+  fi
+}
+
 acquire_lock() {
   # Concurrent writers serialize here. Live holders are waited on (bounded);
   # dead pids are reclaimed only for real non-symlink lock directories we own
@@ -395,6 +448,8 @@ acquire_lock() {
   if [[ -L "$parent" ]] || [[ ! -d "$parent" ]]; then
     die_lock "lock parent is not a real directory: $parent"
   fi
+
+  _acquire_lock_guard "$max_tries"
 
   while [[ $tries -lt $max_tries ]]; do
     # Symlinked lock path: never mkdir, never cat, never rm through it.
@@ -441,7 +496,8 @@ acquire_lock() {
       opid=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
     fi
     if [[ -n "$opid" && "$opid" =~ ^[0-9]+$ ]] && ! kill -0 "$opid" 2>/dev/null; then
-      # Stale: revalidate still a real directory, remove only known files, rmdir.
+      # Stale recovery is inside the kernel guard. A second contender cannot
+      # replace this ownership between the PID observation and removal.
       if [[ -L "$LOCK_DIR" ]] || [[ ! -d "$LOCK_DIR" ]]; then
         tries=$((tries + 1))
         _lock_sleep
@@ -471,7 +527,7 @@ acquire_lock() {
   die_lock "cannot acquire ledger lock at $LOCK_DIR (held or non-reclaimable; wait budget exhausted)"
 }
 
-release_lock() {
+_release_lock_dir() {
   if [[ "$LOCK_HELD" -ne 1 || -z "$LOCK_DIR" ]]; then
     LOCK_HELD=0
     return 0
@@ -514,6 +570,15 @@ release_lock() {
   rmdir "$LOCK_DIR" 2>/dev/null || true
   LOCK_HELD=0
   LOCK_TOKEN=""
+}
+
+release_lock() {
+  _release_lock_dir
+  if [[ "$LOCK_GUARD_HELD" -eq 1 ]]; then
+    # Close only our descriptor; the stable guard directory stays in place.
+    exec 9<&-
+    LOCK_GUARD_HELD=0
+  fi
 }
 
 # ---------------------------------------------------------------------------

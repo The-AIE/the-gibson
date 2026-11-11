@@ -1543,11 +1543,10 @@ export function diffBindingPhrase(familyId, phrase, section, opts = {}) {
 function tierCKeywordHints(treat) {
   const hints = [];
   if (!/\bg12\b/i.test(treat)) hints.push("missing G12");
-  if (!/\bE3\b/.test(treat)) hints.push("missing E3");
+  if (!/one independent review/i.test(treat)) hints.push("missing independent review");
   if (!/exact head/i.test(treat)) hints.push("missing exact head");
   if (!/required checks/i.test(treat)) hints.push("missing required checks");
-  if (!/adversarial review/i.test(treat)) hints.push("missing adversarial review");
-  if (!/fan-out|fan out/i.test(treat)) hints.push("missing fan-out");
+  if (!/adversarial cases/i.test(treat)) hints.push("missing adversarial cases");
   if (/human merge/i.test(treat)) hints.push('names "human merge"');
   if (/owner merge/i.test(treat)) hints.push('names "owner merge"');
   if (/owner sign-off required/i.test(treat)) hints.push('names "owner sign-off required"');

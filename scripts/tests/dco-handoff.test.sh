@@ -64,6 +64,8 @@ cat > "$BIN/gh" <<'STUB'
 # Logs every search so a sensor can prove "zero gh calls". Answers
 # "<email>\t<login>" exactly as the walk's jq filter shapes the real response.
 [[ -z "${GH_STUB_LOG:-}" ]] || printf '%s\n' "$*" >> "$GH_STUB_LOG"
+# These fixtures have no PR yet; legacy pre-PR review remains available.
+if [[ "$1" == "pr" && "${2:-}" == "list" ]]; then printf '[]\n'; exit 0; fi
 case "$*" in
   *search/commits*)
     case "$*" in
