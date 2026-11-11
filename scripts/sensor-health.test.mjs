@@ -765,7 +765,7 @@ describe("matrix 14 + mutations + fingerprint", () => {
     });
     assert.match(body, /Budget: requests=3 pages=2/);
     assert.match(body, /sensor-health-fingerprint/);
-    assert.equal(JSON.parse(readFileSync(join(ROOT, "config/sensor-health-observation.v1.json"), "utf8")).policies.length, 9);
+    assert.equal(JSON.parse(readFileSync(join(ROOT, "config/sensor-health-observation.v1.json"), "utf8")).policies.length, 10);
   });
 });
 describe("coordinator gap controls", () => {
