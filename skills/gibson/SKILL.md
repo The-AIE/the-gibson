@@ -57,8 +57,9 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
 - Law 5: no agent reviews or merges its own work. Cross-vendor whenever any
   second vendor is alive; if truly none is, the ONLY permitted fallback is
   docs/11's fresh-context adversarial pass (a different session, never the
-  authoring one) with Tier C still parked, because a same-vendor pass cannot meet
-  the G12 floor (one independent approval at the exact head plus required checks, D-015) — and the digest
+  authoring one). Tier C still needs the G12 floor (one independent approval at
+  the exact head plus required checks, D-015): that fresh-context reviewer can
+  supply it, the authoring session cannot — and the digest
   must say that degraded mode was used. On the supervisor path this is
   machine-enforced: `loop.sh` will not hand a branch to Devin without a completed
   distinct-vendor review of the exact SHA being handed off, and a missing, stale,

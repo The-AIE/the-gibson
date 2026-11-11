@@ -163,8 +163,10 @@ touch /path/to/target/gibson/HALT
 
 - Entry: all gates green.
 - Tier C by itself is not human-gated: merge only once the G12 floor is met —
-  one independent approval at the exact head plus required checks (D-015). A
-  same-vendor pass does not meet it: park the PR, **do not merge**.
+  one independent approval at the exact head plus required checks (D-015). The
+  approval must come from a reviewer independent of the author (Law 5); a
+  same-vendor reviewer in a fresh context can meet it, the author's own pass
+  cannot. Without it: park the PR, **do not merge**.
 - If human-gated (e.g. G6 billing/pricing/payment code, schema, an explicit owner
   hold): queue for Mark, set next issue triage, **do not merge**.
 - If `RELEASE_CMD` is set: shell out to it for the actual merge, passing the PR
