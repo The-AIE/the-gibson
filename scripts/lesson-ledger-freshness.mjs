@@ -37,7 +37,7 @@
  *
  * EXIT
  *   0  observation complete (verdict GREEN or RED)
- *   1  UNKNOWN (activity, ledger, or baseline could not be evaluated)
+ *   1  UNKNOWN verdict (activity, ledger, or baseline could not be evaluated)
  *   2  usage
  */
 
@@ -61,12 +61,14 @@ function help() {
 WHAT IT DOES
   Reports freshness as healthy, stale, or unknown. Stale means commits landed
   on the ref during the window and the ledger gained no new lesson heading.
-  Unknown means activity, the ledger, or the baseline could not be evaluated.
-  Unknown is never printed as healthy. Cosmetic edits (whitespace, links,
-  wording, or a rewritten date on an existing heading id) do not reset
-  freshness. Debt is the count of lessons whose Status line contains the
-  configured marker. The count may fall against the baseline and must not
-  rise. Per-lesson age is days from a full heading date to --now.
+  Unknown freshness means activity or the ledger could not be evaluated,
+  or no window was available. A failed baseline does not by itself make
+  freshness unknown. Unknown is never printed as healthy. Cosmetic edits
+  (whitespace, links, wording, or a rewritten date on an existing heading
+  id) do not reset freshness. Debt is the count of lessons whose Status
+  line contains the configured marker. The count may fall against the
+  baseline and must not rise. Per-lesson age is days from a full heading
+  date to --now.
 
 WHY
   Law 9 has no sensor for a ledger that goes quiet while main keeps moving.
@@ -78,7 +80,9 @@ RISKS
   completed observation: verdict RED (stale or debt over baseline) and
   verdict GREEN both exit 0. Exit 1 is UNKNOWN. A green process exit is not
   a healthy ledger; read the verdict line. Live mode uses local git only.
-  Shallow history, a missing ref, or an unreadable baseline is unknown.
+  Shallow history or a missing ref is unknown freshness. An unreadable
+  baseline with --window-days can stay freshness healthy with verdict
+  UNKNOWN and exit 1. --annotate then prints no untrusted mark.
   Intake ignores body text. A heading added and then removed inside the
   window is not intake. Month-only heading dates report ageDays=unknown.
   --annotate marks lessons only when freshness is stale or unknown. This

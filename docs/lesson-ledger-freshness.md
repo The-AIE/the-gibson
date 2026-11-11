@@ -19,7 +19,7 @@ Freshness is one of three states:
 | --- | --- |
 | `healthy` | The window was observed, and either nothing landed on the ref, or a new lesson id landed. |
 | `stale` | At least one commit on the ref landed inside the window, and the ledger gained no new lesson id. |
-| `unknown` | Activity, the ledger, or the baseline could not be evaluated. Unknown is never printed as healthy. |
+| `unknown` | Activity or the ledger could not be evaluated, or no window was available. A failed baseline does not by itself make freshness unknown. Unknown is never printed as healthy. |
 
 The shipped window is 14 days (`windowDays` in the baseline). `--window-days` overrides it for one run. A smaller window is allowed. A larger window than the copy committed on the ref is a loosened ratchet.
 
@@ -29,7 +29,7 @@ A quiet window is healthy: activity was readable and zero commits fell inside it
 
 Debt is the count of lessons whose first `Status` line contains the marker `no sensor yet`. The count may fall. It must not rise above `proseOnlyCount`. The sensor does not rewrite the baseline. Age is whole UTC days from a full `YYYY-MM-DD` heading date to `--now`. A month-only heading (`YYYY-MM`) stays a lesson and reports `ageDays=unknown`.
 
-`--annotate` prints `untrusted, verify before acting` for the ledger and for each lesson when freshness is `stale` or `unknown`. When freshness is `healthy`, that phrase is absent. Annotate follows freshness only. A debt-ratchet failure with healthy freshness is in the full report and is not an annotate mark.
+`--annotate` prints `untrusted, verify before acting` for the ledger and for each lesson when freshness is `stale` or `unknown`. When freshness is `healthy`, that phrase is absent. Annotate follows freshness only. A debt-ratchet failure with healthy freshness is in the full report and is not an annotate mark. An unreadable baseline passed with `--window-days` can still report `freshness: healthy` and `verdict: UNKNOWN`. That run exits 1. `--annotate` prints no untrusted mark, so the exit status is the signal.
 
 ## Verdict and exit
 
@@ -49,7 +49,7 @@ Headings match `## L-NNN · YYYY-MM-DD · slug`, and the date may be `YYYY-MM`. 
 
 ## Baseline ratchet
 
-`config/lesson-debt-baseline.json` uses schema `gibson.lesson-debt-baseline.v1`. `proseOnlyCount` was measured on 2026-10-25 from `memory/LESSONS.md` (34 lessons whose status contains the marker). The test recomputes that count from the ledger and requires the file to match. It is not a hard-coded assumption.
+`config/lesson-debt-baseline.json` uses schema `gibson.lesson-debt-baseline.v1`. `proseOnlyCount` was measured on 2026-10-25 from `memory/LESSONS.md` (34 lessons whose status contains the marker). The test recomputes that count from the ledger and requires the file to match. It checks that `measuredOn` is a `YYYY-MM-DD` date. It does not pin a lesson id or a measurement date.
 
 On a live run the sensor also reads the baseline committed on the ref. The count in the working file may not exceed that committed count (`baseline-raised`). The window may not exceed the committed window (`window-loosened`). A file that is not on the ref yet is `committedBaseline: absent` and is not a failure. That is the state of the first pull request that adds the file. After it merges, the committed copy is the ratchet. An unexpected git failure while the ref exists is `unreadable` and the observation is `UNKNOWN`.
 

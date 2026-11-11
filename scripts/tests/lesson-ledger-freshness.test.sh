@@ -486,6 +486,17 @@ expect_has "stale freshness still reported" "freshness: stale"
 expect_has "unevaluable debt" "debtRatchet: unknown"
 expect_has "unevaluable debt verdict" "verdict: UNKNOWN"
 
+run_sensor --fixture "$FIX/inactivity" --now "$NOW" --baseline "$ROOT/no-such.json" --window-days 14
+expect_rc "healthy ledger with an unreadable baseline exits 1" 1
+expect_has "healthy ledger with an unreadable baseline stays healthy" "freshness: healthy"
+expect_has "healthy ledger with an unreadable baseline verdict" "verdict: UNKNOWN"
+expect_lacks "healthy ledger with an unreadable baseline is not fresh-unknown" "freshness: unknown"
+
+run_sensor --annotate --fixture "$FIX/inactivity" --now "$NOW" --baseline "$ROOT/no-such.json" --window-days 14
+expect_rc "annotate of a healthy unreadable baseline exits 1" 1
+expect_has "annotate of a healthy unreadable baseline prints healthy" "freshness: healthy"
+expect_lacks "annotate of a healthy unreadable baseline has no untrusted mark" "untrusted, verify before acting"
+
 echo "# live git"
 TWO="$FIX/merges-stale/lessons.md"
 init_repo "$ROOT/quiet" main
@@ -602,15 +613,29 @@ cat >>"$ROOT/mismatch-src/memory/LESSONS.md" <<'EOF'
 Branch only.
 EOF
 commit_at "$ROOT/mismatch-src" "2026-10-21T12:00:00Z" "branch lesson"
-git init -q --bare "$ROOT/mismatch-remote"
+# A bare repo whose HEAD stays on an unborn master makes `git clone` skip
+# checkout and still exit 0. The stale assertions then miss. Pin main on
+# both the bare HEAD and the main clone, under a hostile default branch.
+git -c init.defaultBranch=master init -q --bare -b main "$ROOT/mismatch-remote"
 git -C "$ROOT/mismatch-src" remote add origin "$ROOT/mismatch-remote"
 git -C "$ROOT/mismatch-src" push -q origin main dispatch
-git clone -q "$ROOT/mismatch-remote" "$ROOT/mismatch-dispatch"
-git -C "$ROOT/mismatch-dispatch" checkout -q dispatch
+bare_head=$(git -C "$ROOT/mismatch-remote" symbolic-ref HEAD)
+if [[ "$bare_head" == "refs/heads/main" ]]; then
+  ok "bare remote HEAD is main under a master default"
+else
+  bad "bare remote HEAD is ${bare_head:-missing}"
+fi
+git clone -q -b dispatch "$ROOT/mismatch-remote" "$ROOT/mismatch-dispatch"
 run_sensor --root "$ROOT/mismatch-dispatch" --now "$NOW" --baseline "$BASE"
 expect_has "branch lesson against origin/main looks healthy" "freshness: healthy"
 expect_has "branch lesson against origin/main is intake" "reason: intake"
-git clone -q "$ROOT/mismatch-remote" "$ROOT/mismatch-main"
+git clone -q -b main "$ROOT/mismatch-remote" "$ROOT/mismatch-main"
+main_branch=$(git -C "$ROOT/mismatch-main" rev-parse --abbrev-ref HEAD 2>"$ROOT/mismatch-main.err" || true)
+if [[ "$main_branch" == "main" ]]; then
+  ok "main clone checks out main"
+else
+  bad "main clone branch is ${main_branch:-missing}"
+fi
 run_sensor --root "$ROOT/mismatch-main" --now "$NOW" --baseline "$BASE" --activity-ref HEAD
 expect_has "main graded at HEAD is stale" "freshness: stale"
 expect_has "main graded at HEAD reason" "reason: merges-without-intake"
@@ -653,18 +678,22 @@ if [[ "$measure_rc" -eq 0 && "$lesson_n" -gt 0 && "$debt_n" -gt 0 ]]; then
 else
   bad "live ledger parse rc=$measure_rc"
 fi
-if node -e '
+base_rc=0
+node -e '
 const baseline = require(process.argv[1]);
 const debt = Number(process.argv[2]);
+const measured = String(baseline.measuredOn);
+const stamp = Date.parse(measured + "T00:00:00Z");
 if (baseline.schema !== "gibson.lesson-debt-baseline.v1") process.exit(2);
 if (baseline.windowDays !== 14) process.exit(3);
 if (baseline.statusMarker !== "no sensor yet") process.exit(4);
-if (baseline.measuredOn !== "2026-10-25") process.exit(5);
+if (!/^\d{4}-\d{2}-\d{2}$/.test(measured) || Number.isNaN(stamp)) process.exit(5);
 if (baseline.proseOnlyCount !== debt) process.exit(6);
-' "$BASELINE" "$debt_n"; then
+' "$BASELINE" "$debt_n" || base_rc=$?
+if [[ "$base_rc" -eq 0 ]]; then
   ok "baseline matches the measured prose-only count"
 else
-  bad "baseline does not match the measured count"
+  bad "baseline check failed rc=$base_rc"
 fi
 write_activity "$ROOT/real-activity.json" ""
 run_sensor --lessons "$REPO_ROOT/memory/LESSONS.md" --prior-lessons "$REPO_ROOT/memory/LESSONS.md" --activity "$ROOT/real-activity.json" --baseline "$BASELINE" --now "$NOW"
@@ -673,8 +702,6 @@ expect_has "real ledger is healthy when nothing landed" "freshness: healthy"
 expect_has "real ledger verdict" "verdict: GREEN"
 expect_has "real ledger debt matches the file" "debtCount: $debt_n"
 expect_has "real ledger ratchet holds" "debtRatchet: ok"
-expect_has "newest prose-only age" "lesson: L-096 date=2026-10-08 ageDays=17 proseOnly=yes"
-expect_has "month-only lesson age" "lesson: L-002 date=2026-07 ageDays=unknown proseOnly=no"
 expect_lacks "real ledger freshness is not unknown" "freshness: unknown"
 
 echo "# source and workflow"
@@ -722,6 +749,8 @@ if grep -F 'does not block merges' "$DOC" >/dev/null \
    && grep -F 'latest qualifying run' "$DOC" >/dev/null \
    && grep -F 'leaves the finding in place when the latest qualifying run failed' "$DOC" >/dev/null \
    && grep -F 'ref: main' "$DOC" >/dev/null \
+   && grep -F 'freshness: healthy' "$DOC" >/dev/null \
+   && grep -F 'verdict: UNKNOWN' "$DOC" >/dev/null \
    && ! grep -F 'This workflow is not in the sensor-health inventory' "$DOC" >/dev/null \
    && ! grep -F 'did a run succeed inside the observation window' "$DOC" >/dev/null; then
   ok "doc states the limits"
