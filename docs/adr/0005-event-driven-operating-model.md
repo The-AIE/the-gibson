@@ -31,15 +31,18 @@ inbound service or a CI-held credential able to execute on the Mini.
 2. One GitHub App webhook into Agent Kontrol is the front door, with a signed, deduplicated
    inbox and a table of deterministic reducers. Without the App, the only CI signal in this
    tree is #562's `review-ready` producer: a commit status and a `repository_dispatch` on
-   that GitHub repository. It covers "required contexts green at this head," and it reaches
-   Agent Kontrol only when a relay or an App subscription to `repository_dispatch` is
-   configured. It does not cover issue closure, decision labels, or the other catalogue rows.
-   Until that relay exists, the reviewer's fallback sweep is what finds a green head.
+   that GitHub repository. It is an advisory that `claim-isolation` and `sensors` succeeded
+   at that head. It is not proof that every required context is green, and `review-evidence`
+   can still be pending. The consumer rechecks policy, base and checks before starting a
+   review. The advisory reaches Agent Kontrol only when a relay or an App subscription to
+   `repository_dispatch` is configured. It does not cover issue closure, decision labels, or
+   the other catalogue rows. Until that relay exists, the reviewer's fallback sweep is what
+   finds the head.
 3. Consumers on the Mini hold an **outbound** long-poll to Agent Kontrol with a scoped
    credential. Agent Kontrol never executes on the Mini.
 4. A sweeper in Agent Kontrol emits absences as events: `pr-stuck`, `consumer-silent`,
    `pause-unexplained`, `pause-incomplete`, `pause-expired`, `resume-uncited`,
-   `decision-aging`.
+   `resume-not-permitted`, `decision-aging`.
 5. Pause and resume are recorded decisions: reason, citing decision, `until`, default 72
    hours maximum.
 6. Each consumer's health is three signals (alive, working, delivering). Idle is acceptable
@@ -64,13 +67,17 @@ inbound service or a CI-held credential able to execute on the Mini.
 
 ## Consequences
 
-- Latency from green to review start drops from a tick plus queue to seconds.
+- Latency from the `review-ready` advisory to review start drops from a tick plus queue
+  to seconds. The advisory is `claim-isolation` and `sensors` succeeded, not every
+  required context.
 - A dead consumer becomes a growing, visible backlog, so consumer lag and the dead-man
   switch are part of the decision, not extras.
 - At-least-once applies to an event the inbox has persisted. A webhook that never arrives
   can drop, and GitHub does not automatically redeliver it. The reconcile sweep re-reads
   current state and counts work an event should have delivered. It does not replay a
-  transition that left no trace.
+  transition that left no trace. A review obligation is deduplicated separately from that
+  delivery id, by repository, pull request number, head SHA and review generation, before
+  a review starts. A new delivery id for the same generation is not a new review.
 - Adds an inbox table, a receiver route, a long-poll route and a sweeper to Agent Kontrol
   (epic `mrhinkle/agent-kontrol#62`). Adds no gate to the Gibson.
 
