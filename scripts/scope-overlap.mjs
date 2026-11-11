@@ -908,6 +908,56 @@ function readPrClaimsOnce() {
 }
 
 /**
+ * One expiry read (#557). `stale` maps "<pr>\t<claim id>" to every claim
+ * `pr-claims.sh expiry` calls `stale` or `displaced`. FAILS CLOSED toward
+ * blocking: a failed read returns null (the caller displaces nobody), and a
+ * row that is not the nine-field shape is left out of the map, so that claim
+ * keeps blocking. `fingerprint` is the decision-relevant projection of each
+ * row, sorted: PR number, claim id, and state. effective-expires and
+ * last-push move on every push to every open claim, including claims that
+ * stay fresh and keep blocking. Folding those clocks into the fingerprint
+ * resets the admission streak on unrelated pushes and can exhaust the
+ * attempt budget. A renew or a push that revives a claim flips its state
+ * (stale → fresh) and still breaks the streak. A row that is not the
+ * nine-field shape stays raw, so a changing malformed inventory cannot
+ * look quiescent.
+ */
+function readExpirySnapshot() {
+  let out;
+  try {
+    out = execFileSync(prClaimsScriptPath(), ["expiry", opt.repo], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
+  const stale = new Map();
+  const fpLines = [];
+  for (const line of out.split("\n")) {
+    if (!line.trim()) continue;
+    const cols = line.split("\t");
+    fpLines.push(cols.length === 9 ? `${cols[0]}\t${cols[1]}\t${cols[2]}` : line);
+    if (cols.length !== 9) continue;
+    if ((cols[2] !== "stale" && cols[2] !== "displaced") || !/^\d+$/.test(cols[0])) continue;
+    stale.set(`${cols[0]}\t${cols[1]}`, {
+      number: Number(cols[0]),
+      id: cols[1],
+      expires: cols[5],
+      push: cols[6],
+      state: cols[2],
+      // Column 9 (index 8) is the raw displacer list (`id (PR #n)`,
+      // `;`-separated, no spaces). An empty field means no readable record.
+      // A short row never reaches here: the length check above drops it.
+      displacers: cols[8] || "",
+    });
+  }
+  fpLines.sort();
+  return { stale, fingerprint: fpLines.join("\n") };
+}
+
+/**
  * Space two reads apart, using a wait that CANNOT be resolved through the
  * caller's environment (#153 review round 4, P1).
  *
@@ -1148,10 +1198,15 @@ function claimIssueNumber(id) {
  * admission decision uses; unrelated churn (a body edited elsewhere, a
  * timestamp bumped) does not stop the barrier from settling.
  */
-function admitFingerprint(prClaims, ledgerClaims) {
-  // Combined claim-relevant projection of BOTH authoritative sources.
-  // Split-time views (ledger once, then PR settle, then decide) hide rivals
-  // under either interleaving; the union fingerprint must be stable together.
+function admitFingerprint(prClaims, ledgerClaims, expiryFingerprint) {
+  // Combined claim-relevant projection of BOTH authoritative sources, plus
+  // the expiry STATE from the SAME attempt (PR number, claim id, state).
+  // Scope alone stays quiet across a renew or a push (neither changes the
+  // claim id or the scope), so a fingerprint without expiry state would
+  // settle while the claim was being revived and the decision would
+  // displace it from a later, stale read. The push clock itself is not
+  // part of this projection: a push that leaves the state fresh does not
+  // change the admission decision.
   const prPart = prClaims
     .map((c) => `pr\t${c.number}\t${c.id}\t${c.scope.join(" ")}`)
     .sort()
@@ -1160,7 +1215,7 @@ function admitFingerprint(prClaims, ledgerClaims) {
     .map((c) => `led\t${c.source}\t${c.id}\t${c.scope.join(" ")}`)
     .sort()
     .join("\n");
-  return `${prPart}\n--\n${ledPart}`;
+  return `${prPart}\n--\n${ledPart}\n--\n${expiryFingerprint}`;
 }
 
 /**
@@ -1189,6 +1244,7 @@ function settleAdmissionInventory() {
   let streak = 0;
   let settledPr = null;
   let settledLedger = null;
+  let settledExpiry = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     if (attempt > 1) spaceReads(delaySeconds);
     // Combined read of both sources every attempt — never ledger-once then
@@ -1249,38 +1305,57 @@ function settleAdmissionInventory() {
         { admitPr: opt.admitPr, claimId: opt.claimId }
       );
     }
-    const fp = admitFingerprint(claims, ledgerClaims);
+    const expiry = readExpirySnapshot();
+    if (expiry == null) {
+      streak = 0;
+      prevFp = null;
+      console.error(
+        `scope-overlap: admission: cannot read claim expiry for ${opt.repo} (attempt ${attempt}/${attempts}) — refusing to settle a snapshot that has no expiry evidence`
+      );
+      continue;
+    }
+    const fp = admitFingerprint(claims, ledgerClaims, expiry.fingerprint);
     streak = streak > 0 && fp === prevFp ? streak + 1 : 1;
     prevFp = fp;
     settledPr = claims;
     settledLedger = ledgerClaims;
+    settledExpiry = expiry;
     if (streak >= stableReads) {
       if (!opt.json) {
         console.log(
-          `scope-overlap: admission: PR+ledger union quiescent for PR #${opt.admitPr} (${stableReads} consecutive matching read(s))`
+          `scope-overlap: admission: PR+ledger+expiry union quiescent for PR #${opt.admitPr} (${stableReads} consecutive matching read(s))`
         );
       }
-      return { prClaims: settledPr, ledgerClaims: settledLedger };
+      return {
+        prClaims: settledPr,
+        ledgerClaims: settledLedger,
+        staleClaims: settledExpiry.stale,
+      };
     }
     console.error(
-      `scope-overlap: admission: PR+ledger union not yet quiescent for PR #${opt.admitPr} (${streak}/${stableReads} matching read(s), attempt ${attempt}/${attempts})`
+      `scope-overlap: admission: PR+ledger+expiry union not yet quiescent for PR #${opt.admitPr} (${streak}/${stableReads} matching read(s), attempt ${attempt}/${attempts})`
     );
   }
   fail(
     `admission: could not obtain a stable combined PR+ledger claim inventory for ${opt.repo} containing this lane's own claim '${opt.claimId}' on PR #${opt.admitPr} — ${stableReads} consecutive matching read(s) required, ${attempts} attempt(s) made. An inventory that cannot see this claim, or that is still changing underneath it, cannot prove no one else holds the scope: a rival PR or ledger row created before this one may simply not have been published to the view yet. Refusing to hold a claim that is not provably registered against a settled view.`,
     { admitPr: opt.admitPr, claimId: opt.claimId }
   );
-  return { prClaims: [], ledgerClaims: [] }; // unreachable: fail() exits
+  return { prClaims: [], ledgerClaims: [], staleClaims: new Map() }; // unreachable: fail() exits
 }
 
 let prClaims;
 let settledLedgerClaims = null;
+let staleClaims = new Map();
 if (opt.admitPr != null) {
   const settled = settleAdmissionInventory();
   prClaims = settled.prClaims;
   settledLedgerClaims = settled.ledgerClaims;
+  staleClaims = settled.staleClaims;
 } else if (opt.repo) {
   prClaims = parsePrClaims(readPrClaimsOnceOrFail());
+  // Not an admission. A failed expiry read displaces nobody.
+  const expiry = readExpirySnapshot();
+  staleClaims = expiry ? expiry.stale : new Map();
 } else {
   prClaims = [];
 }
@@ -1336,7 +1411,27 @@ assertScopeTokens(opt.scopes, "proposed --scope");
 // Non-admission paths load the ledger once here (fail closed on unreadable).
 const ledgerClaims =
   settledLedgerClaims != null ? settledLedgerClaims : loadClaims();
-const live = [...ledgerClaims, ...prClaims].filter((c) => c.id !== opt.claimId);
+// An expired PR-body claim no longer blocks scope (#557): the displacement is
+// recorded below so the caller can write it to both PR bodies. It still holds
+// its ISSUE (same-issue exclusivity above is unchanged). Only an unambiguous
+// `stale` verdict displaces; every other state keeps the claim blocking.
+// On admission, `staleClaims` is the map from the quiescent snapshot — not a
+// read taken after the barrier returned.
+const displaced = [];
+const blockingPrClaims = prClaims.filter((c) => {
+  const row = staleClaims.get(`${c.number}\t${c.id}`);
+  if (!row || c.id === opt.claimId) return true;
+  // A claim displaced EARLIER is terminal: it stays non-blocking and is
+  // not emitted as a new stale displacement. If its displacer is one of
+  // the stale claims this admission is taking (or a predecessor of those)
+  // and the scopes overlap, the walk below emits it as a predecessor so
+  // the new claim is recorded on that body too. The old Displaced-by line
+  // stays, so rolling this claim back does not free the predecessor while
+  // the intermediate displacer is still a live claim.
+  if (row.state === "stale") displaced.push({ claim: c, expires: row.expires });
+  return false;
+});
+const live = [...ledgerClaims, ...blockingPrClaims].filter((c) => c.id !== opt.claimId);
 
 // stem / tokensOverlap: pure kernel at top of file (#181 parity with Bash).
 
@@ -1432,10 +1527,79 @@ if (opt.admitPr != null && yielded.length && !opt.json) {
   }
 }
 
+// Only an expired claim whose scope this claimant actually overlaps was
+// displaced; a stale claim on unrelated files displaced nothing. The machine
+// line is what claim.sh reads to write the displacement into both PR bodies.
+const displacedHere = displaced
+  .map((d) => ({ ...d, hits: scopesOverlap(opt.scopes, d.claim.scope) }))
+  .filter((d) => d.hits.length)
+  .map((d) => ({ claimId: d.claim.id, prNumber: d.claim.number, expires: d.expires }));
+
+// `id (PR #n)` tokens from pr-claims.sh column 9. Anything else is ignored,
+// so a malformed displacer cannot invent a successor.
+function displacerKeys(field) {
+  if (!field) return [];
+  const keys = [];
+  for (const part of String(field).split(";")) {
+    const m = part.match(/^(issue-[A-Za-z0-9-]+) \(PR #(\d+)\)$/);
+    if (m) keys.push(`${m[2]}\t${m[1]}`);
+  }
+  return keys;
+}
+
+// B displaces A, then B goes stale and C displaces B. A still says
+// "Displaced by B". When B closes, that record stops counting and a push
+// that landed while A was displaced can make A fresh on C's scope. Record
+// C on every overlapping predecessor whose displacer chain reaches a claim
+// C is displacing now. The old line is left in place: if C rolls back, B
+// still holds A.
+const directKeys = new Set(displacedHere.map((d) => `${d.prNumber}\t${d.claimId}`));
+const predecessorKeys = new Set();
+if (directKeys.size) {
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const c of prClaims) {
+      if (c.id === opt.claimId || !Number.isInteger(c.number)) continue;
+      const key = `${c.number}\t${c.id}`;
+      if (directKeys.has(key) || predecessorKeys.has(key)) continue;
+      const row = staleClaims.get(key);
+      if (!row || row.state !== "displaced") continue;
+      if (!scopesOverlap(opt.scopes, c.scope).length) continue;
+      const parents = displacerKeys(row.displacers);
+      if (!parents.some((p) => directKeys.has(p) || predecessorKeys.has(p))) continue;
+      predecessorKeys.add(key);
+      grew = true;
+    }
+  }
+}
+const displacedPredecessors = [...predecessorKeys]
+  .map((key) => staleClaims.get(key))
+  .filter((row) => row)
+  .map((row) => ({ claimId: row.id, prNumber: row.number, expires: row.expires }))
+  .sort((a, b) => a.prNumber - b.prNumber || a.claimId.localeCompare(b.claimId));
+
+if (!opt.json) {
+  for (const d of displacedHere) {
+    console.log(
+      `scope-overlap: displaced expired claim ${d.claimId} (PR #${d.prNumber}, expired ${d.expires}) — its scope no longer blocks`
+    );
+    console.log(`scope-overlap: displaced-claim ${d.claimId} ${d.prNumber} ${d.expires}`);
+  }
+  for (const d of displacedPredecessors) {
+    console.log(
+      `scope-overlap: displaced predecessor ${d.claimId} (PR #${d.prNumber}, expired ${d.expires}) — recording this claim on it so the intermediate displacer closing cannot revive it`
+    );
+    console.log(`scope-overlap: displaced-predecessor ${d.claimId} ${d.prNumber} ${d.expires}`);
+  }
+}
+
 ok({
   liveClaims: live.length,
   proposed: opt.scopes,
   ref: ref.trim(),
+  displaced: displacedHere,
+  displacedPredecessors,
   ...(opt.admitPr != null
     ? {
         admitPr: opt.admitPr,
