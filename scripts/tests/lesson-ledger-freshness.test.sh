@@ -582,6 +582,40 @@ expect_rc "missing main exits 1" 1
 expect_has "missing main reason" "reason: activity-ref-missing"
 expect_lacks "missing main is not healthy" "freshness: healthy"
 
+# A dispatch checkout of a branch that added a lesson, graded against origin/main,
+# reports healthy while main itself had merges and no intake. The workflow
+# checks out main and passes --activity-ref HEAD so that pairing cannot happen.
+init_repo "$ROOT/mismatch-src" main
+mkdir -p "$ROOT/mismatch-src/memory"
+cp "$TWO" "$ROOT/mismatch-src/memory/LESSONS.md"
+commit_at "$ROOT/mismatch-src" "2026-09-01T00:00:00Z" "prior ledger"
+printf '\ncosmetic\n' >>"$ROOT/mismatch-src/memory/LESSONS.md"
+commit_at "$ROOT/mismatch-src" "2026-10-20T12:00:00Z" "merge without intake"
+git -C "$ROOT/mismatch-src" branch dispatch
+git -C "$ROOT/mismatch-src" checkout -q dispatch
+cat >>"$ROOT/mismatch-src/memory/LESSONS.md" <<'EOF'
+
+## L-012 · 2026-10-20 · branch-only
+**Status:** fixed
+**Tags:** #fixture
+
+Branch only.
+EOF
+commit_at "$ROOT/mismatch-src" "2026-10-21T12:00:00Z" "branch lesson"
+git init -q --bare "$ROOT/mismatch-remote"
+git -C "$ROOT/mismatch-src" remote add origin "$ROOT/mismatch-remote"
+git -C "$ROOT/mismatch-src" push -q origin main dispatch
+git clone -q "$ROOT/mismatch-remote" "$ROOT/mismatch-dispatch"
+git -C "$ROOT/mismatch-dispatch" checkout -q dispatch
+run_sensor --root "$ROOT/mismatch-dispatch" --now "$NOW" --baseline "$BASE"
+expect_has "branch lesson against origin/main looks healthy" "freshness: healthy"
+expect_has "branch lesson against origin/main is intake" "reason: intake"
+git clone -q "$ROOT/mismatch-remote" "$ROOT/mismatch-main"
+run_sensor --root "$ROOT/mismatch-main" --now "$NOW" --baseline "$BASE" --activity-ref HEAD
+expect_has "main graded at HEAD is stale" "freshness: stale"
+expect_has "main graded at HEAD reason" "reason: merges-without-intake"
+expect_lacks "main graded at HEAD is not healthy" "freshness: healthy"
+
 mkdir -p "$ROOT/not-a-repo"
 run_sensor --root "$ROOT/not-a-repo" --now "$NOW" --baseline "$BASE"
 expect_has "a directory without git is unknown" "reason: activity-ref-missing"
@@ -667,7 +701,9 @@ if [[ -f "$WORKFLOW" ]] \
    && grep -F 'fetch-depth: 0' "$WORKFLOW" >/dev/null \
    && grep -F 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2' "$WORKFLOW" >/dev/null \
    && grep -F 'set -euo pipefail' "$WORKFLOW" >/dev/null \
-   && grep -F 'node scripts/lesson-ledger-freshness.mjs --root .' "$WORKFLOW" >/dev/null \
+   && grep -F 'node scripts/lesson-ledger-freshness.mjs --root . --activity-ref HEAD' "$WORKFLOW" >/dev/null \
+   && grep -F 'ref: main' "$WORKFLOW" >/dev/null \
+   && grep -F 'persist-credentials: false' "$WORKFLOW" >/dev/null \
    && grep -F 'cancel-in-progress: false' "$WORKFLOW" >/dev/null \
    && grep -F 'timeout-minutes: 10' "$WORKFLOW" >/dev/null; then
   ok "workflow is report-only and full-history"
@@ -682,10 +718,27 @@ fi
 if grep -F 'does not block merges' "$DOC" >/dev/null \
    && grep -F 'untrusted, verify before acting' "$DOC" >/dev/null \
    && grep -F 'sensor-health-observation.v1.json' "$DOC" >/dev/null \
-   && grep -F 'fetch-depth: 0' "$DOC" >/dev/null; then
+   && grep -F 'fetch-depth: 0' "$DOC" >/dev/null \
+   && grep -F 'latest qualifying run' "$DOC" >/dev/null \
+   && grep -F 'leaves the finding in place when the latest qualifying run failed' "$DOC" >/dev/null \
+   && grep -F 'ref: main' "$DOC" >/dev/null \
+   && ! grep -F 'This workflow is not in the sensor-health inventory' "$DOC" >/dev/null \
+   && ! grep -F 'did a run succeed inside the observation window' "$DOC" >/dev/null; then
   ok "doc states the limits"
 else
   bad "doc is missing a limit"
+fi
+policy=$(python3 - "$REPO_ROOT/config/sensor-health-observation.v1.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+rows = [p for p in doc["policies"] if p["path"] == ".github/workflows/lesson-ledger-freshness.yml"]
+print(json.dumps(rows))
+PY
+)
+if [[ "$policy" == '[{"path": ".github/workflows/lesson-ledger-freshness.yml", "mode": "freshness", "events": ["schedule", "workflow_dispatch"], "windowDays": 2}]' ]]; then
+  ok "sensor-health registers the workflow as freshness"
+else
+  bad "sensor-health policy for lesson-ledger-freshness.yml: $policy"
 fi
 
 echo "# mutations"

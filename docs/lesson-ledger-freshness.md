@@ -57,9 +57,9 @@ On a live run the sensor also reads the baseline committed on the ref. The count
 
 `.github/workflows/lesson-ledger-freshness.yml` runs on a daily schedule and on `workflow_dispatch`. It requests `contents: read`. It does not post issues, does not merge, and does not add a supervisor. L-096 says a supervision job has to name a failure the gates would miss; this job only reports. The job copies stdout into the step summary with `tee`. The script itself does not write that file.
 
-L-092 says a sensor must not grade its own latest non-success. This workflow is not in the sensor-health inventory. A later wiring has to use freshness mode (did a run succeed inside the observation window), not latest-non-success, and it has to accept this limit: a stale ledger exits 0, so a freshness-mode observer that only checks job success will not fail on `verdict: RED`. `UNKNOWN` exits 1, so a run that cannot evaluate fails the job. Promoting `RED` to a failing job, or teaching sensor-health to read the verdict line, is a separate change. Neither is done here.
+The checkout step sets `ref: main`, `fetch-depth: 0`, and `persist-credentials: false`. The run passes `--activity-ref HEAD`. After that checkout, HEAD is `main`, so the working-tree ledger and the activity history are the same commit. A manual dispatch that selected another branch still reports `main`. A branch-only lesson therefore cannot make a stale `main` ledger look healthy. When `--activity-ref` is omitted, the sensor still resolves `origin/main` and then `main`. HEAD is used only because this workflow passes it.
 
-A coordinator registration for `config/sensor-health-observation.v1.json` would add:
+`config/sensor-health-observation.v1.json` registers this workflow in the same tree:
 
 ```json
 {
@@ -70,7 +70,11 @@ A coordinator registration for `config/sensor-health-observation.v1.json` would 
 }
 ```
 
-`windowDays` 2 there is the observation window used by the daily sensor-health job. It is not the 14-day ledger window. This document does not add that row. Adding the workflow file without the row makes the sensor-health inventory test report an unconfigured workflow. Adding the row without the file reports the workflow missing. Both have to land in the same tree.
+`windowDays` 2 is the observation window used by the daily sensor-health job. It is the 2-day run window, separate from the 14-day ledger window. A workflow file with no row is `unconfigured-workflow`. A row with no file is `configured-workflow-missing`.
+
+`scripts/sensor-health-lib.mjs` grades this freshness row from the latest qualifying run. The row is OK when that latest run succeeded. An earlier success inside the observation window leaves the finding in place when the latest qualifying run failed (`latest-non-success`). The self-path exception, where a completed failure still counts as a finished run, applies to `.github/workflows/sensor-health.yml` alone (L-092).
+
+A stale ledger exits 0. Job success can still be `verdict: RED`. `UNKNOWN` exits 1, so a run that cannot evaluate fails the job and can mark this row failing. Promoting `RED` to a failing job, or teaching sensor-health to read the verdict line, is a separate change.
 
 ## Limits
 

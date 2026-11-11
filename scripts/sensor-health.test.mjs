@@ -121,6 +121,7 @@ const RISK_PATH = "dynamic/github-code-scanning/code-security-risk-assessment";
 const REVIEW_READY_PATH = ".github/workflows/review-ready.yml";
 const DRAIN_PATH = ".github/workflows/drain-ratchet.yml";
 const EVAL_PATH = ".github/workflows/eval-gate.yml";
+const LEDGER_PATH = ".github/workflows/lesson-ledger-freshness.yml";
 const WFS = [
   { id: 1, name: "Gibson self-gate", path: ".github/workflows/gibson-self-gate.yml", state: "active" },
   { id: 2, name: "Sensor health", path: ".github/workflows/sensor-health.yml", state: "active" },
@@ -131,7 +132,11 @@ const WFS = [
   { id: 7, name: "Drain ratchet", path: DRAIN_PATH, state: "active" },
   { id: 8, name: "review-ready", path: REVIEW_READY_PATH, state: "active" },
   { id: 9, name: "gibson-eval-gate", path: EVAL_PATH, state: "active" },
+  { id: 10, name: "Lesson ledger freshness", path: LEDGER_PATH, state: "active" },
 ];
+function fixtureRunEvent(id) {
+  return id === 2 || id === 5 || id === 7 || id === 8 || id === 9 || id === 10 ? "schedule" : "dynamic";
+}
 function head(sha = HEAD, has_pages = true) {
   return [
     {
@@ -196,7 +201,7 @@ function greenCoreHandlers(has_pages, workflows = WFS, { emptyPages = false } = 
       respond: () => res(200, { jobs: [job({ id: 77, name: "sensors" })] }),
     },
     {
-      match: (u) => /\/workflows\/[2-9]\/runs\?/.test(u),
+      match: (u) => /\/workflows\/(?:[2-9]|10)\/runs\?/.test(u),
       respond: (u) => {
         const id = Number(u.match(/workflows\/(\d+)/)[1]);
         if (emptyPages && id === 4) {
@@ -206,7 +211,7 @@ function greenCoreHandlers(has_pages, workflows = WFS, { emptyPages = false } = 
           workflow_runs: [
             run({
               id: 400 + id,
-              event: id === 2 || id === 5 || id === 7 || id === 8 || id === 9 ? "schedule" : "dynamic",
+              event: fixtureRunEvent(id),
               updated_at: "2026-08-30T10:00:00Z",
             }),
           ],
@@ -419,6 +424,29 @@ describe("matrix 6-9 pr-sample / freshness", () => {
     assert.equal(row.state, STATES.FAILING);
     assert.equal(row.reasonClass, REASON.LATEST_NON_SUCCESS);
   });
+  it("9c freshness: an earlier success does not clear a later non-success", () => {
+    const ledger = {
+      path: ".github/workflows/lesson-ledger-freshness.yml",
+      mode: "freshness",
+      events: ["schedule", "workflow_dispatch"],
+      windowDays: 2,
+    };
+    const runs = [
+      run({ id: 94, event: "schedule", conclusion: "success", updated_at: "2026-08-29T10:00:00Z" }),
+      run({ id: 95, event: "workflow_dispatch", conclusion: "failure", updated_at: "2026-08-30T11:00:00Z" }),
+    ];
+    const row = classifySensor({
+      name: "ledger",
+      path: ledger.path,
+      policy: ledger,
+      runs,
+      ctx: ctx(),
+      evidenceComplete: true,
+    });
+    assert.equal(row.state, STATES.FAILING);
+    assert.equal(row.reasonClass, REASON.LATEST_NON_SUCCESS);
+    assert.equal(row.selectedRunId, 95);
+  });
   it("9 freshness outside window => IDLE", () => {
     const row = classifySensor({
       name: "s",
@@ -512,14 +540,14 @@ describe("matrix 10-13 audit integration", () => {
         respond: () => res(200, { jobs: [job({ id: 77, name: "sensors" })] }),
       },
       {
-        match: (u) => /\/workflows\/[2-9]\/runs\?/.test(u),
+        match: (u) => /\/workflows\/(?:[2-9]|10)\/runs\?/.test(u),
         respond: (u) => {
           const id = Number(u.match(/workflows\/(\d+)/)[1]);
           return res(200, {
             workflow_runs: [
               run({
                 id: 400 + id,
-                event: id === 2 || id === 5 || id === 7 || id === 8 || id === 9 ? "schedule" : "dynamic",
+                event: fixtureRunEvent(id),
                 updated_at: "2026-08-30T10:00:00Z",
               }),
             ],
@@ -763,7 +791,13 @@ describe("matrix 14 + mutations + fingerprint", () => {
     });
     assert.match(body, /Budget: requests=3 pages=2/);
     assert.match(body, /sensor-health-fingerprint/);
-    assert.equal(JSON.parse(readFileSync(join(ROOT, "config/sensor-health-observation.v1.json"), "utf8")).policies.length, 9);
+    const registry = JSON.parse(readFileSync(join(ROOT, "config/sensor-health-observation.v1.json"), "utf8"));
+    assert.equal(registry.policies.length, 10);
+    const ledger = registry.policies.find((p) => p.path === ".github/workflows/lesson-ledger-freshness.yml");
+    assert.deepEqual(
+      { mode: ledger?.mode, events: ledger?.events, windowDays: ledger?.windowDays },
+      { mode: "freshness", events: ["schedule", "workflow_dispatch"], windowDays: 2 }
+    );
   });
 });
 describe("coordinator gap controls", () => {
@@ -838,7 +872,7 @@ describe("coordinator gap controls", () => {
       token: "t",
       repository: "The-AIE/the-gibson",
       // Five-workflow fixture: this test pins the run-page cap, not workflow-list paging.
-      registry: { ...reg(), policies: reg().policies.filter((p) => p.path !== RISK_PATH && p.path !== DRAIN_PATH && p.path !== REVIEW_READY_PATH && p.path !== EVAL_PATH) },
+      registry: { ...reg(), policies: reg().policies.filter((p) => p.path !== RISK_PATH && p.path !== DRAIN_PATH && p.path !== REVIEW_READY_PATH && p.path !== EVAL_PATH && p.path !== LEDGER_PATH) },
       observationTime: OBS,
       runPageCap: 3,
       perPage: 2,
@@ -855,7 +889,7 @@ describe("coordinator gap controls", () => {
         if (/\/actions\/workflows\?/.test(u)) {
           const page = Number(new URL(u).searchParams.get("page") || 1);
           const pp = Number(new URL(u).searchParams.get("per_page") || 100);
-          return res(200, { workflows: WFS.filter((w) => w.path !== RISK_PATH && w.path !== DRAIN_PATH && w.path !== REVIEW_READY_PATH && w.path !== EVAL_PATH).slice((page - 1) * pp, page * pp) });
+          return res(200, { workflows: WFS.filter((w) => w.path !== RISK_PATH && w.path !== DRAIN_PATH && w.path !== REVIEW_READY_PATH && w.path !== EVAL_PATH && w.path !== LEDGER_PATH).slice((page - 1) * pp, page * pp) });
         }
         if (/\/workflows\/2\/runs\?/.test(u)) {
           return res(200, {
