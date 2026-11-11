@@ -228,7 +228,7 @@ const RATCHET_NOTICE =
   "The ratchet may tighten autonomously; it may only loosen with the owner's sign-off.";
 const DELIVERY_CONTROL_NOTICE =
   "audit first (read-only), then dry-run, then explicit human apply";
-const FLOOR_REQUIRES = ["E3-exact-head", "required-checks"];
+const FLOOR_REQUIRES = ["independent-approval-exact-head", "required-checks"];
 const VIEW_IDS = ["gates", "tiers", "roles"];
 const VIEW_OPEN_RE = /^<!-- pv:(gates|tiers|roles) d=([0-9a-f]{12}) -->$/;
 const VIEW_CLOSE = "<!-- /pv -->";
@@ -1324,7 +1324,7 @@ const RI_SEMANTIC_PINS = {
     expect: {
       tierId: "B",
       minimumRelationship: "independent-approve",
-      preferredRelationship: "two-fresh-context-approve",
+      preferredRelationship: "cross-vendor",
     },
     // Tier B has no human-gate floor and no generator role pin.
     forbid: ["humanGateId", "generatorMustNotEqual"],
@@ -1333,11 +1333,11 @@ const RI_SEMANTIC_PINS = {
     code: "E_RI_TIER_C",
     expect: {
       tierId: "C",
-      minimumRelationship: "cross-vendor",
+      minimumRelationship: "independent-approve",
       preferredRelationship: "cross-vendor",
       humanGateId: "G12",
     },
-    // Tier C floor is E3 cross-vendor at the exact head + required checks (D-015).
+    // Tier C floor: one independent approval at the exact head + required checks (#622).
     // generatorMustNotEqual is Law 5's pin.
     forbid: ["generatorMustNotEqual"],
   },
@@ -1762,7 +1762,7 @@ export function validateCandidate(candidate, options = {}) {
           push(
             err(
               "E_GATE_REQUIRES",
-              "G12 requires must be [E3-exact-head, required-checks] in that order",
+              "G12 requires must be [independent-approval-exact-head, required-checks] in that order",
               "humanGates"
             )
           );
@@ -1879,7 +1879,7 @@ export function validateCandidate(candidate, options = {}) {
     // Evidence minimum monotonicity (D-015):
     // A: solo, no adversarial, no human merge
     // B: full-lens, no adversarial, no human merge
-    // C: fan-out, adversarial, humanMergeGate false, G12 review floor,
+    // C: one full-lens reviewer, adversarial, humanMergeGate false, G12 review floor,
     //    serialize when stateful
     const a = tierById.get("A");
     const b = tierById.get("B");
@@ -1910,11 +1910,11 @@ export function validateCandidate(candidate, options = {}) {
     }
     if (cTier?.evidenceMinimums) {
       const e = /** @type {Record<string, unknown>} */ (cTier.evidenceMinimums);
-      if (e.reviewDepth !== "fan-out" || e.adversarialReview !== true || e.humanMergeGate !== false) {
+      if (e.reviewDepth !== "full-lens" || e.adversarialReview !== true || e.humanMergeGate !== false) {
         push(
           err(
             "E_TIER_EVIDENCE_CONTRADICTION",
-            "Tier C evidence must be fan-out, adversarialReview=true, humanMergeGate=false (D-015 review floor, not a human merge)",
+            "Tier C evidence must be full-lens, adversarialReview=true, humanMergeGate=false (D-015 review floor, not a human merge)",
             "riskTiers"
           )
         );

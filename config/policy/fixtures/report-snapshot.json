@@ -6,7 +6,7 @@
     "authority": "generated-views",
     "generatorVersion": "1.0.0",
     "manifestId": "gibson.core.policy",
-    "manifestVersion": "1.1.0",
+    "manifestVersion": "1.2.0",
     "schemaId": "gibson.policy.manifest.schema.v1",
     "schemaVersion": "1.0.0",
     "status": "canonical",
