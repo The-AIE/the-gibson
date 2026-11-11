@@ -61,6 +61,7 @@ const LIMITS = [
   "Each gate invocation is capped at 5 seconds. A timeout, spawn failure, or missing commit is unknown.",
   "The commit must already exist in the local repository. This checker does not fetch.",
   "The checker does not read fixture bytes. The entrypoint decides what the bad directory means.",
+  "Replay copies only the entrypoint blob and the fixture tree into a temporary directory. A relative import or source of another repository file is not available. When the file still parses, both runs exit non-zero and the row is unproven, not unknown.",
   "A gate process receives PATH, HOME, TMPDIR, and locale only.",
   "A complete report exits 0. --strict exits non-zero when any closure is not proven, including unknown.",
   "Gate stdout and stderr are not copied into the report.",
@@ -281,6 +282,11 @@ function parseLedger(text) {
       continue;
     }
     current.cont = null;
+  }
+  if (fence || htmlComment) {
+    const err = new Error("ledger ends inside a fenced block or HTML comment");
+    err.code = "ledger-unterminated-block";
+    throw err;
   }
   flush();
   for (const e of entries) {
@@ -759,8 +765,11 @@ function main() {
   let entries;
   try {
     entries = parseLedger(read.text);
-  } catch {
-    incomplete("ledger-parse-failed", opt.strict, opt.json);
+  } catch (err) {
+    const reason = err && err.code === "ledger-unterminated-block"
+      ? "ledger-unterminated-block"
+      : "ledger-parse-failed";
+    incomplete(reason, opt.strict, opt.json);
   }
   const idCounts = new Map();
   for (const entry of entries) {

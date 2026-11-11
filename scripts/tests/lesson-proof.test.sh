@@ -517,7 +517,9 @@ else
 fi
 limits=$(header_field "$BIG_JSON" limits)
 if printf '%s\n' "$limits" | grep -F 'does not read fixture bytes' >/dev/null \
-  && printf '%s\n' "$limits" | grep -F 'including unknown' >/dev/null; then
+  && printf '%s\n' "$limits" | grep -F 'including unknown' >/dev/null \
+  && printf '%s\n' "$limits" | grep -F 'copies only the entrypoint blob and the fixture tree' >/dev/null \
+  && printf '%s\n' "$limits" | grep -F 'unproven, not unknown' >/dev/null; then
   ok "limits are in the report"
 else
   bad "limits missing from the report"
@@ -654,6 +656,50 @@ if [[ "$rc" -eq 0 ]] \
   ok "a non-lesson level-2 heading does not donate Status or Proof"
 else
   bad "section boundary rc=$rc ($(cat "$RUN_OUT"))"
+fi
+
+echo "# unterminated fence or html comment is an incomplete run"
+UNTERM="$ROOT/unterm-fence.md"
+{
+  printf '## %s · 2026-10-25 · before open fence\n' "$(lid 960)"
+  printf '**Status:** fixed\n'
+  printf '**Proof:** %s gates/enforcing.sh tree-good\n' "$SHA"
+  printf '```\n'
+  printf '## %s · 2026-10-25 · after open fence\n' "$(lid 961)"
+  printf '**Status:** fixed\n'
+  printf '**Proof:** %s gates/enforcing.sh tree-good\n' "$SHA"
+} > "$UNTERM"
+run_sensor "$UNTERM" --strict
+if [[ "$rc" -eq 1 ]] \
+  && grep -F 'run incomplete reason=ledger-unterminated-block' "$RUN_OUT" >/dev/null \
+  && ! grep -F 'verdict=proven' "$RUN_OUT" >/dev/null \
+  && [[ "$(header_field "$RUN_JSON" runStatus)" == "incomplete" ]] \
+  && [[ "$(header_field "$RUN_JSON" runReason)" == "ledger-unterminated-block" ]] \
+  && [[ "$(header_field "$RUN_JSON" counts.proven)" == "0" ]]; then
+  ok "unterminated fence is incomplete, not a pass"
+else
+  bad "unterminated fence rc=$rc ($(cat "$RUN_OUT"))"
+fi
+UNTERM_HTML="$ROOT/unterm-html.md"
+{
+  printf '## %s · 2026-10-25 · before open comment\n' "$(lid 962)"
+  printf '**Status:** fixed\n'
+  printf '<!--\n'
+  printf '## %s · 2026-10-25 · inside open comment\n' "$(lid 963)"
+  printf '**Status:** fixed\n'
+  printf '**Proof:** %s gates/enforcing.sh tree-good\n' "$SHA"
+} > "$UNTERM_HTML"
+run_sensor "$UNTERM_HTML"
+if [[ "$rc" -eq 1 ]] \
+  && grep -F 'run incomplete reason=ledger-unterminated-block' "$RUN_OUT" >/dev/null \
+  && ! grep -F 'verdict=proven' "$RUN_OUT" >/dev/null \
+  && [[ "$(header_field "$RUN_JSON" runStatus)" == "incomplete" ]] \
+  && [[ "$(header_field "$RUN_JSON" runReason)" == "ledger-unterminated-block" ]] \
+  && [[ "$(header_field "$RUN_JSON" counts.proven)" == "0" ]] \
+  && [[ "$(header_field "$RUN_JSON" lessons.length)" == "0" ]]; then
+  ok "unterminated html comment is incomplete, not a pass"
+else
+  bad "unterminated html comment rc=$rc ($(cat "$RUN_OUT"))"
 fi
 
 SUMMARY="$ROOT/summary.md"
@@ -881,7 +927,14 @@ if grep -F '**Authority:** Non-normative' "$DOC" >/dev/null \
   && grep -F '30 consecutive' "$DOC" >/dev/null \
   && grep -F 'repository owner of The-AIE/the-gibson' "$DOC" >/dev/null \
   && grep -F 'not implemented' "$DOC" >/dev/null \
-  && grep -F 'does not block a merge' "$DOC" >/dev/null; then
+  && grep -F 'does not block a merge' "$DOC" >/dev/null \
+  && grep -F 'exactly one space' "$DOC" >/dev/null \
+  && grep -F 'path cannot contain a space' "$DOC" >/dev/null \
+  && grep -F 'copies only the entrypoint blob and the fixture tree' "$DOC" >/dev/null \
+  && grep -F 'unproven, not unknown' "$DOC" >/dev/null \
+  && grep -F 'proposed criteria' "$DOC" >/dev/null \
+  && grep -F 'not a binding gate' "$DOC" >/dev/null \
+  && grep -F 'does not treat every closure without a landed fix as unproven' "$DOC" >/dev/null; then
   ok "doc states the promotion bar and the advisory limit"
 else
   bad "doc is missing a promotion or authority line"

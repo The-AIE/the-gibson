@@ -20,11 +20,17 @@ A closure with no Proof line is unproven. That row is a downgrade candidate in t
 
 The Proof value `unknown` means the replay cannot be evaluated. That row is unknown, which is not a pass.
 
-Any other Proof value must be one line: a 40-character lowercase hex commit, a repository-relative entrypoint, and a repository-relative fixture directory. A missing piece, an uppercase digest, an absolute path, or a `..` segment is unproven.
+Any other Proof value must be one line of exactly three fields, separated by one space:
+
+`**Proof:** <sha> <entrypoint> <fixture-dir>`
+
+`<sha>` is 40 lowercase hex characters. `<entrypoint>` and `<fixture-dir>` are repository-relative paths with no absolute path and no `..` segment. The fields are separated by exactly one space, and a path cannot contain a space. A missing piece, a second space, an uppercase digest, an absolute path, or a `..` segment is unproven.
 
 ## Replay
 
 For a bound proof the checker loads that commit from the local repository. It does not fetch. It runs the entrypoint blob from that commit, not a stand-in, as `entrypoint --fixture <directory>`. The fixture directory must contain `bad/` and `valid/`.
+
+Replay copies only the entrypoint blob and the fixture tree into a temporary directory. It does not check out the rest of the commit. A relative import or source of another repository file is not available. When the file still parses, both runs exit non-zero and the row is unproven, not unknown. Use a standalone entrypoint.
 
 Three results are required before a fix closure can be proven:
 
@@ -54,11 +60,11 @@ A protection that lives in an imported library, with no enforce line in the entr
 
 A full-suite entrypoint that needs more than 5 seconds, or needs a credential, is unknown. The checker does not call a private runner and does not wrap the blob in another harness.
 
-Replays of a closure with no landed fix are unproven. The shapes covered are: no Proof line, a gate that exits 0 on the bad directory, and a bad directory the gate accepts. Those are the shapes behind the old closures on issues 2, 4, and 9. The checker does not special-case an issue number.
+The checker does not treat every closure without a landed fix as unproven. The three shapes exercised here are unproven: no Proof line, a gate that exits 0 on the bad directory, and a bad directory the gate accepts. A gate that rejects the directory name, and flips that reject when the flag is off, can still be reported proven. Those three shapes are the ones behind the old closures on issues 2, 4, and 9. The checker does not special-case an issue number.
 
 ## Promotion
 
-Promotion to a blocking check is not implemented. A later change may pass `--strict` from a required workflow only after all of the following are recorded on the promotion issue:
+Promotion to a blocking check is not implemented. The list below is proposed criteria for a later change that might pass `--strict` from a required workflow. It is not a binding gate. This page adds no rule. The proposed record on the promotion issue is:
 
 - Named owner: the repository owner of The-AIE/the-gibson, a person. This checker does not add a supervisor role.
 - Measured false-positive rate at or below 2 percent across 30 consecutive report-only runs. A false positive is a proven verdict whose bad fixture does not represent the incident, or an unproven verdict the owner overturns in that review. An unknown verdict is unevaluated. It is not counted as a false positive, and any unknown closure blocks promotion on its own.
