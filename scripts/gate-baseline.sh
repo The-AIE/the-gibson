@@ -9,8 +9,11 @@ gate-baseline.sh — snapshot green-gate failure counts at branch point
 WHAT IT DOES
   Runs the target repo's generate/typecheck/lint/test/build commands (from
   .agents/gate.json, package.json scripts, or env overrides) and writes
-  .gibson-baseline.json with failure counts / exit codes AND test-suite
+  .gibson-baseline.json with failure counts / exit codes, versioned diagnostic identities AND test-suite
   metrics (total / skipped / todo) for the test-integrity sensor (issue #70).
+  Diagnostic format/compatibility: see gate.sh --help. Opaque failing output is
+  stored as null and can never authorize a failing candidate. Legacy counts
+  remain report-only; a baseline is local evidence, never merge authority.
 
 WHY
   The green gate is "zero NEW failures vs. branch point" (docs/06). Without a
@@ -74,6 +77,44 @@ info() { echo "gate-baseline.sh: $*" >&2; }
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TI="$SCRIPT_DIR/test-integrity.mjs"
 command -v node >/dev/null || die "node is required"
+# Freeze the parser before configured commands can rewrite its source on disk.
+DIAGNOSTIC_JS=$(bash "$SCRIPT_DIR/gate.sh" --diagnostic-parser-source) \
+  || die "cannot freeze diagnostic parser"
+diagnostic_tool() { node -e "$DIAGNOSTIC_JS" "$@"; }
+
+# Validate bytes before Bash command substitution can discard NULs. The final
+# status footer comes from the trusted parent shell, not the captured payload.
+# Parser failure after partial stdout must never become valid capture evidence.
+capture_text() {
+  local capture_status
+  if ! command -v node >/dev/null; then
+    printf '%s\n' 'gate-baseline.sh: ERROR: node is required for validated diagnostic capture; install Node.js and make node available on PATH.' >&2
+    return 125
+  fi
+  "$@" 2>&1 | node -e "$DIAGNOSTIC_JS" capture-text
+  capture_status=("${PIPESTATUS[@]}")
+  printf '\nGIBSON_CAPTURE_STATUS_V1:%s:%s' "${capture_status[0]}" "${capture_status[1]}"
+}
+
+decode_text_capture() {
+  local capture_frame="$1" capture_dest="$2" capture_ec_dest="$3"
+  local capture_footer capture_payload capture_producer capture_parser
+  capture_footer=${capture_frame##*$'\n'}
+  if [[ ! "$capture_footer" =~ ^GIBSON_CAPTURE_STATUS_V1:([0-9]+):([0-9]+)$ ]]; then
+    return 1
+  fi
+  capture_producer=${BASH_REMATCH[1]}
+  capture_parser=${BASH_REMATCH[2]}
+  [[ "$capture_parser" -eq 0 ]] || return 1
+  capture_payload=${capture_frame%$'\n'*}
+  case "$capture_payload" in
+    GIBSON_CAPTURE_TEXT_V1) capture_payload="" ;;
+    GIBSON_CAPTURE_TEXT_V1$'\n'*) capture_payload=${capture_payload#GIBSON_CAPTURE_TEXT_V1$'\n'} ;;
+    *) return 1 ;;
+  esac
+  printf -v "$capture_dest" '%s' "$capture_payload"
+  printf -v "$capture_ec_dest" '%s' "$capture_producer"
+}
 
 # ---------------------------------------------------------------------------
 # Path identity + parent-chain authority (Bash 3.2, macOS + Linux)
@@ -412,8 +453,10 @@ PRIOR_OUT_PRESENT=0
 PRIOR_OUT_BYTES=""
 if [[ -f "$OUT" && ! -L "$OUT" ]]; then
   PRIOR_OUT_PRESENT=1
-  # shellcheck disable=SC2002
-  PRIOR_OUT_BYTES=$(cat -- "$OUT") || die "cannot read prior baseline: $OUT"
+  PRIOR_OUT_BYTES=$(capture_text cat -- "$OUT") || die "cannot read prior baseline: $OUT"
+  decode_text_capture "$PRIOR_OUT_BYTES" PRIOR_OUT_BYTES PRIOR_READ_EC \
+    || die "prior baseline has invalid text capture (NUL/UTF-8/parser)"
+  [[ "$PRIOR_READ_EC" -eq 0 ]] || die "cannot read prior baseline: $OUT"
 fi
 
 # In-memory step results (no pathname visible to configured commands).
@@ -427,6 +470,10 @@ FC_TEST=0
 FC_BUILD=0
 TEST_CAPTURE=""
 TEST_CAPTURED=0
+DI_TYPECHECK='[]'
+DI_LINT='[]'
+DI_TEST='[]'
+DI_BUILD='[]'
 
 # ---------------------------------------------------------------------------
 # Configured-command isolation (issue #70)
@@ -452,7 +499,7 @@ run_configured_child() {
 run_count_failures() {
   local step="$1"
   local cmd="$2"
-  local out ec fc
+  local out ec fc diagnostics capture_rc
   if [[ -z "$cmd" ]]; then
     case "$step" in
       typecheck) EC_TYPECHECK=0; FC_TYPECHECK=0 ;;
@@ -466,12 +513,23 @@ run_count_failures() {
   set +e
   # Command substitution is already a subshell; still route through the
   # isolation helper so no branch-configured string is eval'd in parent.
-  out=$(run_configured_child "$cmd" 2>&1)
-  ec=$?
+  out=$(capture_text run_configured_child "$cmd")
+  capture_rc=$?
   set -e
+  if [[ "$capture_rc" -ne 0 ]] || ! decode_text_capture "$out" out ec; then
+    die "$step invalid text capture (NUL/UTF-8/parser; fail closed)"
+  fi
   if [[ ${#out} -gt $MAX_CAPTURE_CHARS ]]; then
     die "captured $step output exceeds size cap (${MAX_CAPTURE_CHARS} chars; fail closed)"
   fi
+  diagnostics=$(printf '%s' "$out" | diagnostic_tool record "$step" "$ec") \
+    || die "$step diagnostic evidence is contradictory"
+  case "$step" in
+    typecheck) DI_TYPECHECK=$diagnostics ;;
+    lint) DI_LINT=$diagnostics ;;
+    test) DI_TEST=$diagnostics ;;
+    build) DI_BUILD=$diagnostics ;;
+  esac
   case "$step" in
     typecheck) EC_TYPECHECK=$ec ;;
     lint) EC_LINT=$ec ;;
@@ -708,6 +766,13 @@ atomic_write "$OUT" "$OUT_PARENT_SNAP" <<EOF
     "lint": $ec_li,
     "test": $ec_te,
     "build": $ec_bu
+  },
+  "diagnostics": {
+    "version": 1,
+    "typecheck": $DI_TYPECHECK,
+    "lint": $DI_LINT,
+    "test": $DI_TEST,
+    "build": $DI_BUILD
   },
   "test_metrics": $METRICS_EMBED
 }

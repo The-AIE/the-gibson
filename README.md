@@ -22,6 +22,7 @@ you can audit.
 >   [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) — customize in
 >   `local/`, keep getting upstream improvements.
 > - 🤖 **"I'm an agent."** Load [AGENTS.md](AGENTS.md) (always mandatory). If a role is dispatched, also load that role playbook. If no role is named, you are a builder and must load [playbooks/builder.md](playbooks/builder.md). If a job is dispatched, also load that job's dispatch prompt. `docs/` is on-demand and non-normative.
+> - 🧭 **"What even is this?"** The [five-minute plain-English overview](docs/32-plain-english.md).
 > - 📚 **Reading order by audience:** [docs/00-INDEX.md](docs/00-INDEX.md) ·
 >   [FAQ.md](FAQ.md) · [docs/00-glossary.md](docs/00-glossary.md)
 >
@@ -60,9 +61,9 @@ Three layers:
 | **Enforcement** | Deterministic gates that don't care who wrote the code | `ci/`, `scripts/`, target-repo CI |
 | **Memory** | Versioned lessons, decisions, incidents — the self-improvement substrate | `memory/` |
 
-The Gibson is the **harness**. Mission Control, the companion project,
-remains the **runtime control plane** (task queue, telemetry, cross-vendor dispatch).
-They compose: Mission Control queues, dispatches, and tracks the work (the person or coordinating agent who files a task chooses *who* works on it, following the routing playbook); The Gibson decides *how* they work.
+The Gibson is the **harness**. [Agent Kontrol](docs/31-agent-kontrol.md) (formerly Mission Control), the companion project,
+is the **runtime control plane** (task queue, telemetry, cross-vendor dispatch).
+They compose: Agent Kontrol queues, dispatches, and tracks the work (the person or coordinating agent who files a task chooses *who* works on it, following the routing playbook); The Gibson decides *how* they work. Agent Kontrol never grants merge authority; only the Gibson's gates do. Detail: [docs/31](docs/31-agent-kontrol.md).
 
 ## The pipeline at a glance
 
@@ -102,7 +103,7 @@ flowchart LR
     DEC["DECISIONS.md"]
   end
   subgraph external["Control plane"]
-    MC["Mission Control\nqueue + telemetry"]
+    AK["Agent Kontrol\nqueue + telemetry"]
   end
   AG --> P
   PB --> B
@@ -111,15 +112,15 @@ flowchart LR
   SCR --> B
   CI --> R
   H --> LES
-  MC -.->|dispatch| B
-  MC -.->|dispatch| R
+  AK -.->|dispatch| B
+  AK -.->|dispatch| R
 ```
 
 | Piece | Job |
 |---|---|
 | Roles | planner · decomposer · builder · test-engineer · reviewer · ux-evaluator · security · release · historian — contracts in [AGENTS.md](AGENTS.md); explanation in [docs/03](docs/03-roles.md) |
-| Stores | Gibson `memory/` (durable) + MC memory table (runtime) — [docs/09](docs/09-memory-and-self-improvement.md) |
-| MC | Who works; Gibson = how they work |
+| Stores | Gibson `memory/` (durable) + AK memory table (runtime) — [docs/09](docs/09-memory-and-self-improvement.md) |
+| AK | Who works; Gibson = how they work |
 
 Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 
@@ -189,7 +190,7 @@ Synthesized from five sources, credited throughout:
 
 - **The first production target** — the battle-tested mechanics: worktree
   isolation, scope claims, green gate, tiered review, schema safety, Vercel guard.
-- **Mission Control** — cross-vendor dispatch, task
+- **Agent Kontrol** (formerly Mission Control) — cross-vendor dispatch, task
   queue, shared runtime memory, "route by task class, not loyalty."
 - **[Fowler — Harness Engineering](https://martinfowler.com/articles/harness-engineering.html)** —
   guides/sensors, computational vs. inferential controls, the self-correcting loop.

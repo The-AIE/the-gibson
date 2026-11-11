@@ -26,7 +26,7 @@ Each `adapters/<vendor>/` provides, in whatever form the runtime supports:
 1. **Doctrine loading** — get `AGENTS.md` (Gibson + target repo) into context at
    session start.
 2. **Role dispatch** — run a `playbooks/<role>.md` prompt with an issue/PR argument.
-3. **Telemetry** — deterministic liveness reporting to Mission Control (hooks or
+3. **Telemetry** — deterministic liveness reporting to Agent Kontrol (hooks or
    watcher), plus semantic reporting via MCP (`report_status`, `remember`/`recall`,
    `claim_task`).
 4. **Cost capture** — report tokens/cost per run when the runtime exposes it;
@@ -36,11 +36,11 @@ Each `adapters/<vendor>/` provides, in whatever form the runtime supports:
 
 | Runtime | Doctrine | Dispatch | Telemetry | Notes |
 |---|---|---|---|---|
-| **Claude Code** | `CLAUDE.md → @AGENTS.md`; skills mirror playbooks | `claude -p --output-format json --permission-mode acceptEdits`; skills interactively | lifecycle hooks (SessionStart/Stop/etc.) → MC ingest — the gold standard | exact `total_cost_usd`; richest adapter, still zero private rules |
+| **Claude Code** | `CLAUDE.md → @AGENTS.md`; skills mirror playbooks | `claude -p --output-format json --permission-mode acceptEdits`; skills interactively | lifecycle hooks (SessionStart/Stop/etc.) → AK ingest — the gold standard | exact `total_cost_usd`; richest adapter, still zero private rules |
 | **OpenAI Codex** | reads `AGENTS.md` natively | `codex exec --full-auto "<playbook prompt>"`; `-s read-only` for review | session watcher daemon | terminal-heavy fan-out workhorse |
-| **Grok** | `AGENTS.md` via prompt preamble | `grok -p "<playbook prompt>"`; solo loop (doc 11) | MC MCP calls + curl heartbeat | near-unlimited flat-rate pool — see doc 15 |
-| **Hermes** | persona instruction + `AGENTS.md` | **first-class runner**: cron-driven role dispatch, solo loop driver, and messaging front-end (digests, escalations, "ping Mark") | MC MCP + cron heartbeat | model-agnostic (Nous/OpenRouter/Anthropic/OpenAI); the fleet's voice *and* a worker |
-| **pi** | `AGENTS.md` natively | extension wrapping playbook dispatch | extension → MC ingest | primitives-native; good experimentation host |
+| **Grok** | `AGENTS.md` via prompt preamble | `grok -p "<playbook prompt>"`; solo loop (doc 11) | AK MCP calls + curl heartbeat | near-unlimited flat-rate pool — see doc 15 |
+| **Hermes** | persona instruction + `AGENTS.md` | **first-class runner**: cron-driven role dispatch, solo loop driver, and messaging front-end (digests, escalations, "ping Mark") | AK MCP + cron heartbeat | model-agnostic (Nous/OpenRouter/Anthropic/OpenAI); the fleet's voice *and* a worker |
+| **pi** | `AGENTS.md` natively | extension wrapping playbook dispatch | extension → AK ingest | primitives-native; good experimentation host |
 | **Goose** | Recipe `instructions` + `adapters/goose/templates/doctrine-mount.md` | `adapters/goose/session.sh` + `enforce.sh` (claim/gate/release; no goose binary required). Optional: `goose recipe validate`. **No** `goose run` until #28. **Not** a `loop.sh --runner` yet | `permission-map.yaml` Always/Ask/Never (#35) | Engine-under-the-hood; brand stays Gibson. Pin CLI v1.45.0. |
 
 ## Known asymmetries (managed, not hidden)

@@ -1,5 +1,8 @@
 ---
 name: verify-gibson
+key: gibson.verify-gibson
+category: Engineering Tools
+tags: [gibson, testing, verification]
 description: Drive The Gibson's own scripts the way an agent or operator does and capture proof (command, stdout, stderr, exit code) before claiming a change works. Use for "verify this change in the Gibson", before the first push of any change to scripts/, playbooks/ or config/, or when a PR is red on a convention probe. Gibson has no UI or server; its surface is bash and node CLIs.
 ---
 

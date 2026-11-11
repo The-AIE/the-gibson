@@ -110,6 +110,32 @@ if [[ -n "$log" ]]; then
   printf '%s\n' "$*" >> "$log"
 fi
 
+# Existing-PR discovery is independent of the halt API fixtures. An empty,
+# successful response means pre-PR work; errors must never mean no PR.
+if [[ "$1" == "pr" && "${2:-}" == "list" ]]; then
+  [[ "${GH_PR_ERROR:-0}" == "0" ]] || exit 51
+  got_repo=""; got_fields=""; prev=""
+  for a in "$@"; do
+    [[ "$prev" != "--repo" ]] || got_repo="$a"
+    [[ "$prev" != "--json" ]] || got_fields="$a"
+    prev="$a"
+  done
+  [[ -z "$expect_repo" || "$got_repo" == "$expect_repo" ]] || exit 99
+  fixture="${GH_PR_FIXTURE:-}"
+  if [[ -n "$fixture" ]]; then
+    case ",$got_fields," in *,updatedAt,*) ;; *) exit 99 ;; esac
+  fi
+  if [[ -n "${GH_PR_CALL_COUNT:-}" ]]; then
+    count=$(cat "$GH_PR_CALL_COUNT" 2>/dev/null || printf 0)
+    count=$((count + 1)); printf '%s\n' "$count" > "$GH_PR_CALL_COUNT"
+    if [[ "$count" -gt 1 && -n "${GH_PR_SECOND_FIXTURE:-}" ]]; then
+      fixture="$GH_PR_SECOND_FIXTURE"
+    fi
+  fi
+  if [[ -n "$fixture" ]]; then cat "$fixture"; else printf '[]\n'; fi
+  exit 0
+fi
+
 # Agent-Vendor walk (follow-up to #523): email → login proof through GitHub's
 # commit search. The lane identity lane@gibson.test is the owner, mrhinkle.
 case "$*" in
@@ -278,6 +304,14 @@ exit "\${STUB_DEVIN_RC:-0}"
 STUB
 
 cp "$LOOP" "$FAKE_SCRIPTS/loop.sh"
+# Stub only the authenticated evaluator boundary. Its real identity, complete
+# range and verdict semantics are covered by pr-review-evidence.test.sh.
+cat > "$FAKE_SCRIPTS/pr-review-evidence.mjs" <<'STUB'
+import fs from 'node:fs';
+if (process.env.PR_REVIEW_LOG) fs.appendFileSync(process.env.PR_REVIEW_LOG, process.argv.slice(2).join(' ') + '\n');
+if (process.env.PR_REVIEW_ERROR === '1') process.exit(51);
+process.stdout.write(fs.readFileSync(process.env.PR_REVIEW_FIXTURE, 'utf8'));
+STUB
 chmod +x "$BIN/gh" "$BIN/curl" "$FAKE_SCRIPTS/second-opinion.sh" "$FAKE_SCRIPTS/devin-supervisor.sh" "$FAKE_SCRIPTS/loop.sh"
 # BIN first so gh + curl stubs shadow any live tooling for the whole suite.
 PATH="$BIN:$PATH"
@@ -519,6 +553,10 @@ if handoff_invoked; then bad "reviewer failure must not reach devin-supervisor.s
 else ok "reviewer failure blocks the supervisor invocation"; fi
 if review_invoked; then ok "the reviewer was actually attempted"
 else bad "the reviewer was never attempted"; fi
+default_reviewers=$(awk 'previous == "--reviewers" { print; exit } { previous=$0 }' "$CALLS/second-opinion.args")
+if [[ "$default_reviewers" == "codex" && "$(wc -l < "$CALLS/second-opinion.count" | tr -d ' ')" == "1" ]]; then
+  ok "pre-PR handoff defaults to exactly one independent reviewer"
+else bad "pre-PR handoff unexpectedly fans out (reviewers=$default_reviewers)"; fi
 if still_queued; then ok "blocked handoff stays queued in loop-state"
 else bad "blocked handoff was cleared from loop-state"; fi
 if [[ -e "$REPO/gibson/pre-handoff-review.receipt" ]]; then
@@ -1078,13 +1116,63 @@ else
   bad "fixture bug: the local refs are not stale"
 fi
 
+# Existing PR approval is head-bound; a new target pin must not launder it into
+# evidence that this base/range was reviewed. Render the real supervisor message.
+HEAD_ONLY_REVIEW="$ROOT/head-only-review.json"
+printf '{"headSha":"%s","state":"success","reason":"pass"}\n' "$EXACT_HEAD" > "$HEAD_ONLY_REVIEW"
 sup_msg=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
-  --base-sha "$EXACT_BASE" --sha "$EXACT_HEAD" --task "diffstat sensor" --dry-run 2>/dev/null)
+  --base-sha "$EXACT_BASE" --sha "$EXACT_HEAD" --review-file "$HEAD_ONLY_REVIEW" \
+  --task "diffstat sensor" --dry-run 2>/dev/null)
 sup_rc=$?
 if [[ "$sup_rc" -eq 0 ]]; then
   ok "the pinned handoff rendered with both exact endpoints"
 else
   bad "the pinned handoff failed (rc=$sup_rc) even though both objects are present"
+fi
+if grep -qF "$(cat "$HEAD_ONLY_REVIEW")" <<<"$sup_msg"; then
+  ok "head-bound evidence is forwarded unchanged"
+else
+  bad "head-bound evidence was lost or rewritten as a new approval"
+fi
+if grep -qF 'current-base/range coverage UNVERIFIED' <<<"$sup_msg" &&
+   grep -qF 'leave the candidate queued and report the missing evidence' <<<"$sup_msg"; then
+  ok "head-only handoff requires range reconciliation and queues unknown coverage"
+else
+  bad "head-only handoff silently claims current-range clearance"
+fi
+if grep -qF 'Head-bound review evidence' <<<"$sup_msg" &&
+   ! grep -qF 'Head-bound PR approval' <<<"$sup_msg"; then
+  ok "a passing evidence snapshot is not relabelled as native approval"
+else
+  bad "the handoff presents generic evidence as native approval"
+fi
+# --merge changes the receiver's instructions; this script does not perform a
+# GitHub merge itself. Exercise its real rendered message, without contacting
+# Devin or GitHub, and require native approval even for a passing comment receipt.
+merge_msg=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+  --base-sha "$EXACT_BASE" --sha "$EXACT_HEAD" --review-file "$HEAD_ONLY_REVIEW" \
+  --task "native approval sensor" --merge --dry-run 2>/dev/null)
+merge_rc=$?
+if [[ "$merge_rc" -eq 0 ]] &&
+   grep -qF 'native GitHub APPROVED review' <<<"$merge_msg" &&
+   grep -qF 'current head commit' <<<"$merge_msg" &&
+   grep -qF 'independent of every author' <<<"$merge_msg"; then
+  ok "merge-enabled handoff requires native approval of the current change by an independent actor"
+else
+  bad "merge-enabled handoff can treat green checks alone as authority"
+fi
+if grep -qF 'Comment receipts and evaluator success are not native approval' <<<"$merge_msg" &&
+   grep -qF 'leave the PR unmerged' <<<"$merge_msg" &&
+   grep -qF 'expected-head guard' <<<"$merge_msg"; then
+  ok "merge-enabled handoff rejects comment-only clearance and retains the expected-head guard"
+else
+  bad "merge-enabled handoff omits evidence refusal or the final head guard"
+fi
+if grep -qF 'Reviewed against base commit:' <<<"$sup_msg" ||
+   grep -qF 'the diff that was reviewed' <<<"$sup_msg"; then
+  bad "current target pin was falsely labelled as reviewed-range evidence"
+else
+  ok "current target pin does not attest to a reviewed base"
 fi
 if grep -qF 'REMOTE-HEAD-ONLY.md' <<<"$sup_msg"; then
   ok "the diffstat contains the path committed on the reviewed head $EXACT_HEAD"
@@ -1148,10 +1236,10 @@ if grep -qF 'n/a' <<<"$unavail_msg"; then
 else
   bad "the unavailable diffstat was not reported as n/a"
 fi
-if grep -qF "Reviewed against base commit: \`$ABSENT_BASE\`" <<<"$unavail_msg"; then
-  ok "the reviewed base commit is still named, so the supervisor can rebuild the diff"
+if grep -qF "Target base commit: \`$ABSENT_BASE\`" <<<"$unavail_msg"; then
+  ok "the target base commit is still named, so the supervisor can rebuild the diff"
 else
-  bad "the message dropped the reviewed base commit $ABSENT_BASE"
+  bad "the message dropped the target base commit $ABSENT_BASE"
 fi
 if grep -qF "Branch: \`$BRANCH\`" <<<"$unavail_msg" && grep -qF 'Base: `main`' <<<"$unavail_msg"; then
   ok "the unavailable-diffstat message still names both branches"
@@ -4489,6 +4577,78 @@ unset GH_STUB_CLEAR_CALLS
 unset GH_STUB_FLIP_FILE
 unset GH_STUB_EXPECT_REPO
 unset GH_STUB_LOG
+
+# #622: an existing authenticated current-head approval is sufficient. A PR
+# with unresolved evidence must not trigger a second route or a cached pass.
+# Exercise the real loop, with hermetic GitHub/evaluator boundaries above.
+echo "existing PR review is reused without duplicate dispatch"
+for review_case in approved pending rejected unknown-evidence stale-evidence malformed-evidence lookup-error malformed-pr ambiguous-pr foreign-pr stale-head stale-base changed-during-read review-changed evaluator-error cached-rejected; do
+  setup_repo with-remote
+  write_state "$BRANCH" ""
+  if [[ "$review_case" == "cached-rejected" ]]; then
+    run_loop
+    [[ -s "$REPO/gibson/pre-handoff-review.receipt" ]] && ok "cached rejection fixture has a local pass" || bad "cached rejection fixture missing local pass"
+    : > "$CALLS/second-opinion.count"
+    : > "$CALLS/devin.cmds"
+    write_state "$BRANCH" ""
+  fi
+  sha=$(head_sha)
+  base_sha=$(git -C "$REPO" rev-parse main)
+  export GH_PR_FIXTURE="$ROOT/pr.json" GH_PR_SECOND_FIXTURE="$ROOT/pr-after.json"
+  export GH_PR_CALL_COUNT="$ROOT/pr-count" GH_PR_ERROR=0
+  export PR_REVIEW_FIXTURE="$ROOT/evidence.json" PR_REVIEW_LOG="$CALLS/evidence.log" PR_REVIEW_ERROR=0
+  export GH_STUB_EXPECT_REPO=acme/widget GH_STUB_LOG="$CALLS/gh.log"
+  printf '0\n' > "$GH_PR_CALL_COUNT"
+  : > "$PR_REVIEW_LOG"
+  node - "$review_case" "$BRANCH" "$sha" "$base_sha" <<'NODE'
+const fs = require('fs');
+const [kind, branch, head, baseSha] = process.argv.slice(2);
+const other = 'f'.repeat(40);
+const p = { number: 123, state: 'OPEN', headRefName: branch, headRefOid: head,
+  baseRefName: 'main', baseRefOid: baseSha, isCrossRepository: false, updatedAt: '2026-11-01T00:00:00Z' };
+let rows = [p], result = { headSha: head, state: 'success', reason: 'pass' };
+if (kind === 'ambiguous-pr') rows.push({ ...p, number: 124 });
+if (kind === 'foreign-pr') p.isCrossRepository = true;
+if (kind === 'stale-head') p.headRefOid = other;
+if (kind === 'stale-base') p.baseRefOid = other;
+if (kind === 'pending') result = { ...result, state: 'pending', reason: 'no-receipt-at-head' };
+if (kind === 'rejected' || kind === 'cached-rejected') result = { ...result, state: 'failure', reason: 'changes-requested' };
+if (kind === 'unknown-evidence') result = {};
+if (kind === 'stale-evidence') result.headSha = other;
+fs.writeFileSync(process.env.GH_PR_FIXTURE, kind === 'malformed-pr' ? '{' : JSON.stringify(rows));
+const after = kind === 'changed-during-read' ? [{ ...p, baseRefOid: other }]
+  : kind === 'review-changed' ? [{ ...p, updatedAt: '2026-11-01T00:00:01Z' }] : rows;
+fs.writeFileSync(process.env.GH_PR_SECOND_FIXTURE, JSON.stringify(after));
+fs.writeFileSync(process.env.PR_REVIEW_FIXTURE, kind === 'malformed-evidence' ? '{' : JSON.stringify(result));
+NODE
+  [[ "$review_case" != "lookup-error" ]] || export GH_PR_ERROR=1
+  [[ "$review_case" != "evaluator-error" ]] || export PR_REVIEW_ERROR=1
+  run_loop
+  if review_invoked; then bad "$review_case: duplicate reviewer dispatched"
+  else ok "$review_case: no duplicate reviewer dispatched"; fi
+  if [[ "$review_case" == "approved" ]]; then
+    if handoff_invoked; then ok "accepted native approval permits handoff"
+    else bad "accepted native approval did not permit handoff"; fi
+    if grep -qxF -- "--repo acme/widget --pr 123 --expected-head $sha --config $GIBSON/config/review-evidence.v1.json" "$PR_REVIEW_LOG"; then
+      ok "authenticated evaluator receives exact repository, PR and head"
+    else bad "authenticated evaluator did not receive exact PR identity"; fi
+    if [[ "$(cat "$GH_PR_CALL_COUNT")" == "2" ]]; then ok "approved PR context rechecked before handoff"
+    else bad "approved PR context was not rechecked"; fi
+    if [[ ! -e "$REPO/gibson/pre-handoff-review.receipt" ]]; then ok "native approval does not fabricate a local reviewer receipt"
+    else bad "native approval fabricated a local receipt"; fi
+    forwarded=$(arg_after "$CALLS/devin.args" --review-file)
+    if [[ "$forwarded" == "$REPO/gibson/pr-review-evidence.json" ]] && cmp -s "$PR_REVIEW_FIXTURE" <(tr -d '\n' < "$forwarded"); then
+      ok "supervisor receives the actual authenticated evidence snapshot"
+    else bad "supervisor received missing or stale local review evidence"; fi
+  else
+    if handoff_invoked; then bad "$review_case: unresolved review reached supervisor"
+    else ok "$review_case: unresolved review blocks handoff"; fi
+    if still_queued && [[ "$(journal_blocks)" -ge 1 ]]; then ok "$review_case: kept queued with a diagnostic"
+    else bad "$review_case: lost queue or diagnostic"; fi
+  fi
+  unset GH_PR_FIXTURE GH_PR_SECOND_FIXTURE GH_PR_CALL_COUNT GH_PR_ERROR
+  unset PR_REVIEW_FIXTURE PR_REVIEW_LOG PR_REVIEW_ERROR GH_STUB_EXPECT_REPO GH_STUB_LOG
+done
 
 # Final suite-wide proof: no Devin session create was attempted in any case
 # (curl.log is cumulative; every real-supervisor handoff and the mid-cycle
