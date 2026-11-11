@@ -113,6 +113,25 @@ if grep -q "$SECRET" "$ROOT/req.json" "$ROOT/o2/traces.jsonl" "$ROOT/err" 2>/dev
   bad "secret key leaked into payload, sink or output"
 else ok "secret key absent from payload, local sink and output"; fi
 grep -q 'sk-ant-abcdefghijklmnop1234' "$ROOT/req.json" "$ROOT/o2/traces.jsonl" && bad "key-shaped token not redacted" || ok "key-shaped token in a ledger row is redacted"
+# a redirecting endpoint must not get the trace body resent to its target (CodeRabbit on #635)
+cat > "$ROOT/redir.mjs" <<'JS'
+import http from "node:http";
+import { writeFileSync } from "node:fs";
+const [dump, target] = process.argv.slice(2);
+const srv = http.createServer((req, res) => {
+  req.resume();
+  req.on("end", () => { writeFileSync(dump, "hit"); res.writeHead(307, { location: `http://127.0.0.1:${target}/api/public/ingestion` }); res.end(); });
+});
+srv.listen(0, "127.0.0.1", () => console.log(srv.address().port));
+JS
+rm -f "$ROOT/req.json"
+node "$ROOT/redir.mjs" "$ROOT/redir.hit" "$PORT" > "$ROOT/rport" &
+REDIR_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s "$ROOT/rport" ]] && break; sleep 0.3; done
+out=$(LANGFUSE_PUBLIC_KEY="$PUB" LANGFUSE_SECRET_KEY="$SECRET" LANGFUSE_HOST="http://127.0.0.1:$(cat "$ROOT/rport")" \
+  node "$S/eval-trace.mjs" --ledger "$ROOT/leaky.jsonl" --out-dir "$ROOT/o2r" 2>&1); rc=$?
+kill "$REDIR_PID" 2>/dev/null || true
+if [[ -f "$ROOT/redir.hit" && ! -f "$ROOT/req.json" ]] && ! has "$out" 'shipped 1'; then ok "redirect is not followed: body never reaches the redirect target"; else bad "redirect followed rc=$rc: $out"; fi
 kill "$SRV_PID" 2>/dev/null; SRV_PID=""
 
 echo "AC1 trace — collector down must not fail the run"
@@ -228,6 +247,11 @@ G --variant base --min-pass-rate "  " >/dev/null 2>&1; [[ $? -eq 2 ]] && ok "bla
 head -n 3 "$GDS" > "$ROOT/reduced.jsonl"
 node "$S/eval-gate.mjs" --out-dir "$ROOT/r" --dataset "$ROOT/reduced.jsonl" --variant base --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "run over a different case set fails the gate" || bad "case-set mismatch passed"
 node "$S/eval-gate.mjs" --out-dir "$ROOT/r" --dataset "$ROOT/nope.jsonl" --variant base --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "unreadable expected dataset fails closed" || bad "missing expected dataset passed"
+# same ids, changed content: the run never evaluated the current cases (CodeRabbit on #635)
+node -e 'const fs=require("fs");const L=fs.readFileSync(process.argv[1],"utf8").split("\n").filter(Boolean).map((l)=>JSON.parse(l));L[0].input=JSON.stringify(L[0].input)+" changed";fs.writeFileSync(process.argv[2],L.map((o)=>JSON.stringify(o)).join("\n")+"\n")' "$GDS" "$ROOT/edited.jsonl"
+node "$S/eval-gate.mjs" --out-dir "$ROOT/r" --dataset "$ROOT/edited.jsonl" --variant base --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "same ids but changed case content fails the gate" || bad "stale run accepted after dataset content change"
+node -e 'const fs=require("fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));delete r.dataset_sha256;r.variant="nofp";fs.writeFileSync(process.argv[2],JSON.stringify(r))' "$ROOT/r/runs/base.json" "$ROOT/r/runs/nofp.json"
+G --variant nofp --min-pass-rate 0 >/dev/null 2>&1; [[ $? -eq 1 ]] && ok "run with no dataset fingerprint fails closed" || bad "unfingerprinted run accepted"
 cat > "$ROOT/envrunner.sh" <<'RUN'
 #!/bin/sh
 cat >/dev/null
@@ -253,7 +277,7 @@ done
 smoke=${wf#*Smoke run}; smoke=${smoke%%Lint the dataset*}
 has "$smoke" 'secrets.' && bad "smoke step must not see secrets" || ok "smoke step gets no secrets"
 has "$smoke" 'jq -rj .input' && has "$smoke" '--min-pass-rate 1' && ok "smoke uses the deterministic stub runner at a 100% threshold" || bad "smoke wiring"
-has "$wf" "cron:" && ok "weekly schedule present (keeps sensor-health freshness truthful)" || bad "schedule cron"
+has "$wf" "cron:" && ok "schedule present (keeps sensor-health freshness truthful)" || bad "schedule cron"
 reg=$(<"$REPO/config/sensor-health-observation.v1.json")
 has "$reg" '.github/workflows/eval-gate.yml' && ok "sensor-health inventory lists the workflow" || bad "sensor inventory row"
 row=${reg#*eval-gate.yml}; row=${row%%\}*}

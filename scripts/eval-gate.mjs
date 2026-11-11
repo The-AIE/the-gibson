@@ -27,6 +27,7 @@
  *   0 at or above threshold   1 below threshold, or evidence missing/invalid   2 usage
  */
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parseFlags } from "./lib/args.mjs";
 import { DEFAULT_OUT_DIR } from "./lib/eval-core.mjs";
@@ -98,8 +99,11 @@ if (cases.length !== run.total || counted !== run.passed) {
 
 // Bind the run to the expected case set: a 21-of-22 run must not clear the gate.
 let expectedIds;
+let expectedSha256;
 try {
-  expectedIds = readFileSync(String(args.dataset), "utf8")
+  const datasetText = readFileSync(String(args.dataset), "utf8");
+  expectedSha256 = createHash("sha256").update(datasetText, "utf8").digest("hex");
+  expectedIds = datasetText
     .split("\n")
     .filter((l) => l.trim())
     .map((l) => JSON.parse(l).id);
@@ -115,6 +119,13 @@ if (missing.length || extra.length || have.size !== cases.length) {
   console.error(
     `eval-gate: FAIL — run does not cover ${args.dataset} (missing: ${missing.join(",") || "none"}; unexpected: ${extra.join(",") || "none"})`,
   );
+  process.exit(1);
+}
+
+// Bind the run to the dataset CONTENT, not just its ids: a case whose input or expectation
+// changed under the same id was never evaluated by this run. A run with no fingerprint fails.
+if (typeof run.dataset_sha256 !== "string" || run.dataset_sha256 !== expectedSha256) {
+  console.error(`eval-gate: FAIL — run was not produced from the current ${args.dataset} (dataset fingerprint missing or different); re-run eval-run.mjs`);
   process.exit(1);
 }
 

@@ -43,6 +43,7 @@
  */
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parseFlags } from "./lib/args.mjs";
 import { DEFAULT_OUT_DIR, describeEmit, emit, envelope, redact } from "./lib/eval-core.mjs";
@@ -136,8 +137,12 @@ const variantFile = runFile(String(args.variant));
 
 /** @type {Array<{id:string,input:unknown,expect:unknown,tier:string}>} */
 let cases;
+// sha256 of the dataset bytes this run scored; eval-gate refuses a run whose dataset has since changed.
+let datasetSha256;
 try {
-  cases = readFileSync(String(args.dataset), "utf8")
+  const datasetText = readFileSync(String(args.dataset), "utf8");
+  datasetSha256 = createHash("sha256").update(datasetText, "utf8").digest("hex");
+  cases = datasetText
     .split("\n")
     .filter((l) => l.trim())
     .map((l) => JSON.parse(l));
@@ -337,6 +342,7 @@ const summary = {
   schema: "gibson.eval-run.v1",
   variant: String(args.variant),
   dataset: String(args.dataset),
+  dataset_sha256: datasetSha256,
   started_at: startedAt,
   total: results.length,
   passed,

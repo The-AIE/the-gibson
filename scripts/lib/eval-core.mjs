@@ -139,6 +139,9 @@ export async function emit(events, opts) {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Basic ${auth}` },
       body: JSON.stringify({ batch: clean }),
+      // Never follow a redirect: a 307/308 would resend the trace body to a target the host
+      // check never saw (possibly plain http). A redirect is a failed delivery, not a hop.
+      redirect: "error",
       signal: AbortSignal.timeout(15000),
     });
     // Langfuse answers 207 with per-item successes/errors.
