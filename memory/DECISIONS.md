@@ -425,9 +425,11 @@ head plus the repository's required checks under the current #623 contract):
   last 25 merged PRs on 2026-10-23) by whichever session is shipping, after
   re-running the checks and reading the diff (D-015). No fleet path merges
   through the `chatgpt-codex-connector` App; the Mini controller posts under
-  `aie-independent-review[bot]`, which cannot merge (contents: read). So the
-  GitHub identity that merges is never the identity that supplied the only
-  review. Why that is acceptable rather than fail-closed today: the evaluator
+  `aie-independent-review[bot]`, which cannot merge (contents: read). So for
+  an App-authored review the GitHub identity that merges is never the identity
+  that supplied the only review. An owner countersign is the exception: that
+  comment is posted by the owner login, which is also the login that merges, so
+  an owner-countersigned review can share the merger's GitHub identity. Why that is acceptable rather than fail-closed today: the evaluator
   runs before the merge and cannot see `merged_by`, and `delivery-receipt.mjs`
   does not record it; the independence Law 5 protects is reviewer versus
   author, and that one is enforced. A Codex session shipping a Claude-authored
