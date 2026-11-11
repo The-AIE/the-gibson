@@ -247,11 +247,15 @@ function cmdDocsNumbers(o) {
     if (m) add(m[1], "main", p);
   }
   let me = o.pr ? Number(o.pr) : null;
+  // true only when gh positively reports that this branch has no pull request; any other
+  // failed lookup is ambiguous (this branch's own PR may still be in the open list).
+  let noPr = false;
   if (me === null) {
     // This branch's pushed files are judged from the local tree, never twice (a rename of a pushed doc).
     const branch = run("git", ["branch", "--show-current"]).out.trim();
     const v = branch ? run("gh", ["pr", "view", branch, "--repo", repo, "--json", "number"]) : { rc: 1, out: "" };
     try { if (v.rc === 0 && Number.isInteger(JSON.parse(v.out).number)) me = JSON.parse(v.out).number; } catch { /* no PR yet */ }
+    noPr = !branch || (v.rc !== 0 && /no pull requests found/i.test(v.err));
   }
   const lp = run("gh", ["pr", "list", "--repo", repo, "--state", "open", "--limit", "500", "--json", "number,files"]);
   if (lp.rc !== 0) die(2, `scope-recheck: cannot list open pull requests: ${lp.err.trim().split("\n").pop()}`);
@@ -272,9 +276,13 @@ function cmdDocsNumbers(o) {
     const m = DOCS_RE.exec(f);
     if (m && !mainPaths.has(f)) mineNums.add(m[1]);
     if (!m || mainPaths.has(f)) continue;
-    // Pushed already: the open-PR list carries this same path under its own number.
+    // Own row skipped (PR known) or no PR exists: every listed path belongs to someone else,
+    // so count this branch's path as its own party even when another PR adds the same path.
+    if (me !== null || noPr) { add(m[1], me !== null ? `PR #${me}` : "this branch", f); continue; }
+    // Ambiguous lookup: this branch's PR may be in the list under its own number, so a path
+    // already listed is treated as that row rather than counted twice.
     const seen = [...(byNum.get(m[1])?.values() ?? [])].some((paths) => paths.has(f));
-    if (!seen) add(m[1], me !== null ? `PR #${me}` : "this branch", f);
+    if (!seen) add(m[1], "this branch", f);
   }
   // --mine (prepush): fail only on a number this branch adds a file under, so a lane is not
   // blocked by two OTHER pull requests colliding; those are printed as a note, not a failure.

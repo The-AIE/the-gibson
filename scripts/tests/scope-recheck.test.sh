@@ -175,8 +175,18 @@ echo '[{"number":565,"files":[{"path":"docs/30-one.md"}]}]' > "$d/fix/prlist.jso
 check "$d" docs-numbers --base HEAD <<<$'docs/32-mine.md'
 [[ "$RC" -eq 0 ]] && ok "a PR that merely edits an existing docs file is not a new claim on its number" || bad "docs edit rc=$RC out=$OUT"
 echo '[{"number":565,"files":[{"path":"docs/31-a.md"}]}]' > "$d/fix/prlist.json"
+echo '{"number":565}' > "$d/fix/prview.json"
 check "$d" docs-numbers --base HEAD <<<$'docs/31-a.md'
 [[ "$RC" -eq 0 ]] && ok "this branch's pushed file listed under its own PR is not a duplicate of itself" || bad "docs self rc=$RC out=$OUT"
+# another PR adds the very same path: still two parties on docs/31- (CodeRabbit on #582)
+echo '{"number":570}' > "$d/fix/prview.json"
+check "$d" docs-numbers --base HEAD <<<$'docs/31-a.md'
+[[ "$RC" -eq 1 && "$(jget 'JSON.stringify(j.findings[0].parties)')" == '{"PR #565":["docs/31-a.md"],"PR #570":["docs/31-a.md"]}' ]] \
+  && ok "same path added by another PR and by this PR: exit 1 naming both" || bad "docs same-path known-pr rc=$RC out=$OUT"
+rm -f "$d/fix/prview.json"
+check "$d" docs-numbers --base HEAD <<<$'docs/31-a.md'
+[[ "$RC" -eq 1 && "$(jget 'JSON.stringify(j.findings[0].parties)')" == '{"PR #565":["docs/31-a.md"],"this branch":["docs/31-a.md"]}' ]] \
+  && ok "same path added by another PR while this branch has no PR: exit 1" || bad "docs same-path no-pr rc=$RC out=$OUT"
 printf 'docs/31-a.md\n' | (cd "$d" && FIX="$d/fix" PATH="$ROOT/bin:$PATH" node scripts/scope-recheck.mjs docs-numbers --base HEAD --pr 565 >/dev/null 2>&1); [[ $? -eq 0 ]] \
   && ok "--pr excludes the current PR from the other-PR list" || bad "docs --pr"
 # a rename of an already-pushed doc is one document, not a collision with its own PR (Codex P2)
