@@ -1,7 +1,7 @@
 # Gibson reviewer role — Goose recipe mirror
 # Source of truth: playbooks/reviewer.md — do not fork doctrine text here.
 # playbook: playbooks/reviewer.md
-# playbook-sha256: 55f9c1d913da40596cfc25e258b851fa160ebddc2217cdc21e2741cd753f5366
+# playbook-sha256: 842767e76d335fbe93e3e064f39103394bba3c38eaa2912b6f8a553a9d68b26c
 #
 # Goose schema version (version field below) is the official Recipe type
 # version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe
@@ -46,12 +46,14 @@ instructions: |
      otherwise read {{ gibson }}/playbooks/reviewer.md. Never read both.
   5. Skim {{ gibson }}/memory/LESSONS.md for review/security scars matching this PR.
   6. Confirm the PR is green (CI / local gate) and you are NOT the builder who
-     produced the diff. If reviewer_platform equals builder identity, stop (Law 5).
+     produced the diff. If you generated the work, stop (Law 5). Cross-vendor is preferred, not required.
   7. Load the issue sprint contract for issue {{ issue }} and the six-lens checklist
      from playbooks/reviewer.md.
 
-  Review PR {{ pr }} against the contract. Final line of the review must be exactly:
-  VERDICT: APPROVE | VERDICT: REQUEST_CHANGES
+  Review the full introduced range of PR {{ pr }} at the current head. One independent
+  reviewer covers applicable lenses and Tier C adversarial cases. Publish a native
+  GitHub APPROVED or CHANGES_REQUESTED review; comments alone are not native approval.
+  Legacy transport vocabulary: VERDICT: APPROVE | VERDICT: REQUEST_CHANGES
 
   You are read-only on the code under review. Never merge. Never write implementation
   on the builder's branch. Fail closed if the reviewer tooling is missing.

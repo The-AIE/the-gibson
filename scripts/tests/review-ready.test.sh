@@ -7,9 +7,9 @@
 #   cannot satisfy an assertion) to pin the structure that keeps the signal safe, and
 #   (b) runs the emit step's script against a stub `gh` on PATH that serves JSON fixtures
 #   and records every write. It pins docs/32-review-ready-event.md: one commit status plus
-#   one repository_dispatch per ready head; nothing for drafts, forks, failed or foreign
-#   runs, a moved head, or a gate that is not green; nothing twice for a head; a failure to
-#   emit is explained in the job summary; the payload has exactly the documented fields.
+#   retryable repository_dispatch per eligible PR/head; nothing for drafts, forks, failed
+#   or foreign runs, a moved head, or a gate that is not green. A prior success status is
+#   reused without suppressing delivery; failures remain visible and payload fields exact.
 #
 #   The structural half is the security half: a `pull_request` workflow runs the file from
 #   the PR, so gibson-self-gate.yml must never hold statuses/contents write; the emitter
@@ -180,6 +180,8 @@ if [[ "$(cat "$STEP")" != *"\${{"* ]]; then ok "the script has no \${{ }} expres
 #   POST repos/R/statuses/SHA          -> appends "path k=v ..." to $GH_LOG/status.log
 #   POST repos/R/dispatches            -> appends the stdin body to $GH_LOG/dispatch.log
 #   FAIL_STATUSES_READ / FAIL_STATUS_POST / FAIL_DISPATCH make the matching call exit 1.
+#   PERSIST_STATUSES records successful status writes for multi-attempt recovery tests;
+#   run_step clears per-attempt logs but keeps that server state until reset_world.
 # --jq expressions run through the real jq (gh's --jq is jq -r), so the workflow's filters are under test.
 mkdir -p "$ROOT/stub-bin" "$ROOT/fixture" "$ROOT/log"
 cat > "$ROOT/stub-bin/gh" <<'STUB'
@@ -209,7 +211,11 @@ case "$path" in
     serve statuses.json ;;
   repos/*/statuses/*)
     [ -z "${FAIL_STATUS_POST:-}" ] || { echo "stub gh: status post failed" >&2; exit 1; }
-    echo "$path$fields" >> "$GH_LOG/status.log" ;;
+    echo "$path$fields" >> "$GH_LOG/status.log"
+    if [ "${PERSIST_STATUSES:-}" = 1 ]; then
+      jq '. + [{id:100,context:"review-ready",state:"success"}]' "$GH_FIXTURE/statuses.json" > "$GH_FIXTURE/statuses.next" || exit 1
+      mv "$GH_FIXTURE/statuses.next" "$GH_FIXTURE/statuses.json" || exit 1
+    fi ;;
   repos/*/dispatches)
     [ -z "${FAIL_DISPATCH:-}" ] || { echo "stub gh: dispatch failed" >&2; exit 1; }
     [ "$input" = "-" ] || { echo "stub gh: dispatch without --input -" >&2; exit 2; }
@@ -362,12 +368,46 @@ run_step "${PRT[@]}"
 if [[ $RC -eq 0 && "$STATUS_LOG" == "$want_status" && "$SUMMARY" == *"self-gate run 9001,"* ]]; then ok "a bare (unsuffixed) self-gate path is still found"; else bad "bare lookup: rc=$RC summary=$SUMMARY"; fi
 reset_world
 
-echo "# idempotent per head"
+echo "# reuse a successful status without suppressing advisory delivery"
 echo '[{"id":5,"context":"review-ready","state":"success"}]' > "$ROOT/fixture/statuses.json"
-run_step; silent "already exists" "a review-ready success already at the head: no second status, no second dispatch"
+run_step
+if [[ $RC -eq 0 && -z "$STATUS_LOG" && "$(printf '%s' "$DISPATCH_LOG" | jq -s length)" == 1 && "$SUMMARY" == *"status: reused"* ]]; then
+  ok "an existing success reuses the status and still dispatches once"
+else bad "existing status: rc=$RC s=$STATUS_LOG d=$DISPATCH_LOG sum=$SUMMARY"; fi
 echo '[{"id":6,"context":"review-ready","state":"pending"},{"id":7,"context":"other","state":"success"}]' > "$ROOT/fixture/statuses.json"
 run_step
-if [[ $RC -eq 0 && -n "$STATUS_LOG" && -n "$DISPATCH_LOG" ]]; then ok "only a review-ready SUCCESS suppresses (pending or another context does not)"; else bad "non-matching statuses: rc=$RC s=$STATUS_LOG"; fi
+if [[ $RC -eq 0 && -n "$STATUS_LOG" && -n "$DISPATCH_LOG" && "$SUMMARY" == *"status: posted"* ]]; then ok "only a review-ready SUCCESS avoids a new status write"; else bad "non-matching statuses: rc=$RC s=$STATUS_LOG sum=$SUMMARY"; fi
+reset_world
+
+echo "# partial delivery recovery: server status survives failed dispatch and later attempts"
+run_step PERSIST_STATUSES=1 FAIL_DISPATCH=1
+if [[ $RC -ne 0 && "$(count_lines "$STATUS_LOG")" == 1 && -z "$DISPATCH_LOG" && "$(jq length "$ROOT/fixture/statuses.json")" == 1 && "$SUMMARY" == *"status: posted"* && "$SUMMARY" == *"advisory_attempted_at: "* && "$SUMMARY" != *"ready_emitted_at:"* ]]; then
+  ok "first attempt records success status but reports the failed dispatch"
+else bad "partial delivery: rc=$RC s=$STATUS_LOG d=$DISPATCH_LOG sum=$SUMMARY"; fi
+run_step PERSIST_STATUSES=1
+if [[ $RC -eq 0 && -z "$STATUS_LOG" && "$(printf '%s' "$DISPATCH_LOG" | jq -s length)" == 1 && "$SUMMARY" == *"status: reused; repository_dispatch sent: yes"* ]]; then
+  ok "retry after partial failure sends the missing advisory without rewriting the status"
+else bad "partial retry: rc=$RC s=$STATUS_LOG d=$DISPATCH_LOG sum=$SUMMARY"; fi
+run_step PERSIST_STATUSES=1
+if [[ $RC -eq 0 && -z "$STATUS_LOG" && "$(printf '%s' "$DISPATCH_LOG" | jq -s length)" == 1 && "$(jq length "$ROOT/fixture/statuses.json")" == 1 ]]; then
+  ok "repeated eligible delivery permits another advisory and retains one status"
+else bad "repeat delivery: rc=$RC s=$STATUS_LOG d=$DISPATCH_LOG"; fi
+run_step PERSIST_STATUSES=1 FAIL_DISPATCH=1
+if [[ $RC -ne 0 && -z "$STATUS_LOG" && -z "$DISPATCH_LOG" && "$SUMMARY" == *"status: reused; repository_dispatch sent: no"* && "$SUMMARY" == *"repository_dispatch failed"* && "$SUMMARY" != *"ready_emitted_at:"* ]]; then
+  ok "dispatch failure after status reuse stays red and names the reused status"
+else bad "reused failure: rc=$RC s=$STATUS_LOG d=$DISPATCH_LOG sum=$SUMMARY"; fi
+run_step "${PRT[@]}" PERSIST_STATUSES=1
+if [[ $RC -eq 0 && -z "$STATUS_LOG" && "$(printf '%s' "$DISPATCH_LOG" | jq -s length)" == 1 && "$SUMMARY" == *"trigger pull_request_target"* ]]; then
+  ok "ready_for_review also retries advisory delivery with an existing success"
+else bad "ready retry: rc=$RC s=$STATUS_LOG d=$DISPATCH_LOG sum=$SUMMARY"; fi
+jq '.pull_requests = [{number:78}]' "$ROOT/fixture/run.json" > "$ROOT/r.tmp" && mv "$ROOT/r.tmp" "$ROOT/fixture/run.json"
+run_step RUN_PR_NUMBER=78 PERSIST_STATUSES=1
+if [[ $RC -eq 0 && -z "$STATUS_LOG" && "$(printf '%s' "$DISPATCH_LOG" | jq -s length)" == 1 ]] && printf '%s' "$DISPATCH_LOG" | jq -e --arg h "$HEAD" '.client_payload.pr == 78 and .client_payload.head_sha == $h' >/dev/null; then
+  ok "another eligible PR sharing the head receives its own advisory without a second status"
+else bad "shared head: rc=$RC s=$STATUS_LOG d=$DISPATCH_LOG sum=$SUMMARY"; fi
+write_pull closed false "$HEAD" example/repo
+run_step RUN_PR_NUMBER=78 PERSIST_STATUSES=1
+silent "closed" "a previously signalled PR that closes is still refused on retry"
 reset_world
 
 echo "# a failure to emit is explained and never silent"

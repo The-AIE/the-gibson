@@ -14,7 +14,7 @@ nav_order: 32
 
 When the self-gate's `claim-isolation` **and** `sensors` jobs both succeeded for the exact
 head of an open, non-draft, same-repository pull request, `.github/workflows/review-ready.yml`
-emits one event for that head, in two forms:
+records readiness at that head and attempts an advisory notification:
 
 | Form | Value |
 |---|---|
@@ -30,13 +30,38 @@ emits one event for that head, in two forms:
 | `head_sha` | the head the checks passed on; the only SHA a consumer may review |
 | `base_sha` | the pull request's base at emit time |
 | `tier-unknown` | always `true`: the workflow does not classify the PR; the consumer does |
-| `ts` | UTC emit time, `YYYY-MM-DDTHH:MM:SSZ` |
+| `ts` | UTC advisory-attempt time, `YYYY-MM-DDTHH:MM:SSZ`; not a deduplication key |
 
-Rules: one event per head (a re-run finds the existing `review-ready` success at that head
-and emits nothing, so a consumer never sees a duplicate); nothing for drafts, fork heads, a
-failed or non-pull-request run, a pull request that has since moved to a newer head or been
-closed, or events other than the two below. The status is the record of truth; if the
-dispatch call fails after the status is posted the summary says so and nothing retries.
+Delivery uses **at-least-once semantics**: each eligible execution attempts a
+`repository_dispatch`, including a rerun that finds an existing successful `review-ready`
+status. It posts a status only when no success exists at that head. The status records
+observed readiness; it is **not** proof that a dispatch or review completed. Separate PRs
+sharing a head can reuse that status, but each must independently pass the run, jobs and
+current-PR checks before receiving its own PR-numbered advisory.
+
+If status posting succeeds but dispatch fails, the run fails visibly. Rerunning it rechecks
+eligibility, reuses the status and retries the dispatch. Successful repeats can also send
+another advisory. An unreadable status list or failed status write stops before dispatch;
+a failed dispatch remains a failure even when the status was reused. No signal is emitted
+for drafts, fork heads, failed or non-pull-request runs, wrong-run associations, closed PRs,
+or stale heads. A prior status never bypasses these checks.
+
+This is retryable production of an advisory, not a durable retry queue or a guarantee that
+every notification reaches a consumer. Retries need another eligible execution, such as an
+Actions rerun; the scheduled heartbeat only checks liveness. Retain the fallback sweep.
+A successful dispatch API response confirms acceptance of the request, not consumer processing.
+
+### Consumer deduplication
+
+The consumer must deduplicate durably before starting work, using repository, PR number,
+head SHA and its applicable review generation. `base_sha` is supplied for that generation;
+the consumer must re-read current repository policy, base and checks when deciding whether
+a new review is needed. Repeated `ts` values or changed timestamps do not define new work.
+Two different PR numbers must not suppress one another merely because their head SHA matches.
+
+Duplicate and out-of-order advisories must reuse the existing obligation or completed result;
+recovery after a consumer crash must reconcile any already-started review before retrying.
+The producer does not enforce this consumer contract and does not grant review or merge approval.
 
 ## Why it is a separate workflow
 
@@ -57,8 +82,9 @@ spent"; reviewers re-verify the head.
 ## A signal, not a gate
 
 `review-ready` is not a required check and no rule may name it as one. The merge gate is
-unchanged: required checks plus two independent vendor verdicts at the exact head. A
-deliberate skip (draft, fork, stale head, gate not green, already emitted) leaves the run green.
+defined by `AGENTS.md`: required checks plus a genuine independent approval covering the
+complete change at the exact head. A deliberate skip (draft, fork, stale head, gate not green)
+leaves the run green.
 A failure to emit exits non-zero with the reason in the job summary, so that run goes red in
 Actions; there is no `continue-on-error` to hide it. Nothing waits on the run, so no pull
 request is blocked. Every failure path is a missing signal, never a false green, and the
@@ -76,17 +102,29 @@ changes it; the first live proof follows the merge.
 
 ## Who consumes it
 
-The independent-review controller (the job that posts the reviewer App's verdicts) reviews
-the named head immediately in a per-repository lane, instead of waiting for its 900 s tick.
-The tick stays as the fallback sweep. The controller holds an outbound connection to a relay;
-its host has no inbound path. Its change is tracked in #562 (item 2). Note that GitHub does
-not deliver `repository_dispatch` to a GitHub App's webhook: an App-fed relay keys on the
-`status` event for context `review-ready` (the App needs Commit statuses read and a `status`
-subscription).
+This producer slice does **not** install or activate the event consumer, relay or controller.
+The intended controller integration is tracked separately in #562 (item 2): receive an
+advisory, reconcile and deduplicate it, then review the eligible head in a per-repository lane,
+with the existing tick as fallback. Producer tests do not prove that path is live.
+
+GitHub documents [`repository_dispatch` as a GitHub App webhook event](https://docs.github.com/en/webhooks/webhook-events-and-payloads#repository_dispatch),
+with Contents read required for subscription. The selected App, subscription, transport and
+actual delivery still need separate configuration and proof; this producer does not verify them.
+
+An alternative relay based on commit `status` events needs Commit statuses read and a `status`
+subscription. Reusing an existing status does not create another status webhook, so that
+integration must reconcile PRs and retry obligations itself; it cannot assume dispatch retries
+generate fresh status events. Neither consumer path is claimed live by this source repair.
 
 ## Measurement
 
 The job summary prints `pr_opened_at`, `sensors_green_at` (the `sensors` job's completion
-time) and `ready_emitted_at`, plus the seconds between the last two. Together with the verdict
-time on the review-evidence comment this gives `open → verdict` and `sensors green → verdict`
-per PR, for the drain-rate sensor (#559).
+time), `advisory_attempted_at`, whether the status was posted or reused, and whether the
+dispatch API accepted the request. Only accepted dispatches print `ready_emitted_at` and
+`sensors green to ready emitted`. These measure producer timing, not review latency.
+
+Real consumer receipts and a genuine verdict at the matching head are needed to measure
+`open → verdict` and `sensors green → verdict` per PR (#559). Local producer regression tests
+cover status-success/dispatch-failure recovery, repeated advisories, and separate PRs sharing
+a head. They do not establish live delivery, consumer deduplication or #562's concurrent-repository
+latency criterion; those require separate integration evidence after authorized activation.
