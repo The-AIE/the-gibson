@@ -50,7 +50,7 @@ A public ref is one of:
 
 The lint checks shape only. It does not fetch the URL or resolve the commit.
 
-A Proof path is repo-relative to `--root`. It must not be absolute, must not contain `..` or a backslash, and must not be a symlink. The entrypoint must be an existing file and the fixture path an existing directory. When both exist, the report word is `unverified`. This lint does not run the gate. A missing path fails. A symlink fails and is not followed.
+A Proof path is repo-relative to `--root`. It must not be absolute, must not contain `..` or a backslash, and must not be a symlink at the leaf or at any path prefix. The entrypoint must be an existing file and the fixture path an existing directory. When both exist, the report word is `unverified`. This lint does not run the gate. A missing path fails. A symlink fails and is not followed.
 
 `**Status:**` starting with `fixed` and an explicit `**Proof:** unknown` fails. The finding says `unknown is not correct`. `fixed` with the Proof line omitted does not fail. That omission is still reported `unknown` and is not a proof. The existing lesson for issue #412 keeps its `fixed` status and has no Proof line. Adding `**Proof:** unknown` there would fail this rule, so the line is left absent.
 

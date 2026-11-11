@@ -659,13 +659,19 @@ function pathKind(root, rel) {
   const abs = resolve(root, rel);
   const rootAbs = resolve(root);
   if (abs !== rootAbs && !abs.startsWith(rootAbs + sep)) return "invalid";
+  // lstat the leaf only follows parent directories. Walk each prefix so a
+  // symlink at scripts/ext cannot make scripts/ext/run.sh look like a file.
   let st;
-  try {
-    st = lstatSync(abs);
-  } catch {
-    return "absent";
+  let cur = rootAbs;
+  for (const part of rel.split("/")) {
+    cur = join(cur, part);
+    try {
+      st = lstatSync(cur);
+    } catch {
+      return "absent";
+    }
+    if (st.isSymbolicLink()) return "symlink";
   }
-  if (st.isSymbolicLink()) return "symlink";
   if (st.isFile()) return "file";
   if (st.isDirectory()) return "dir";
   return "absent";

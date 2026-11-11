@@ -1009,6 +1009,23 @@ run_lint "$SYML" --offline
 [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'does not follow' >/dev/null \
   && ok "symlink proof path is refused" || bad "symlink proof (rc=$rc): $out"
 
+# A parent directory symlink is followed by lstat of the leaf. The target
+# file and dir exist, so the old walk reported unverified. Refuse the prefix.
+SYMLP="$ROOT/schema-symlink-parent"
+make_tree "$SYMLP"
+OUTSIDE="$ROOT/symlink-parent-outside"
+mkdir -p "$OUTSIDE/fixtures"
+printf '%s\n' 'echo ok' > "$OUTSIDE/run.sh"
+ln -s "$OUTSIDE" "$SYMLP/scripts/ext"
+{ schema_entry 98 "unknown (no sensor yet)" "unknown" "$sha scripts/ext/run.sh scripts/ext/fixtures"; } > "$SYMLP/memory/LESSONS.md"
+run_lint "$SYMLP" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F 'does not follow' >/dev/null \
+    && ! echo "$out" | grep 'proof=unverified' >/dev/null; then
+  ok "symlinked parent directory in a proof path is refused"
+else
+  bad "symlink parent proof (rc=$rc): $out"
+fi
+
 PRIV="$ROOT/schema-privacy"
 make_tree "$PRIV"
 { schema_entry 98 "unknown (no sensor yet)" "$canary $assign"; } > "$PRIV/memory/LESSONS.md"
