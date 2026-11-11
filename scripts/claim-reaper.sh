@@ -34,7 +34,7 @@ WHAT IT DOES
 
   EXPIRED PR-BODY CLAIMS (#557): protection is not forever. A PR-body claim that
   `pr-claims.sh expiry` reports `stale` (its `Claim-expires:` passed and its
-  branch has had no push for 7 days) is LABELLED `claim-expired` on its PR so a
+  branch has had no push for 7 days) or `displaced` is LABELLED `claim-expired` on its PR so a
   human or Mission Control sees it. That label is the whole action: the PR is
   never closed, the claim never released, the issue never touched, the branch
   never deleted. Dry-run prints what it would label; --apply labels. An expiry
@@ -548,6 +548,7 @@ OPEN_PR_PROTECTED_IDS="${OPEN_PR_PROTECTED_IDS:-}"
 # not turn a good ledger run into a failed one.
 EXPIRED_LABEL="claim-expired"
 EXPIRED_PR_NUMBERS=""
+FRESH_PR_NUMBERS=""
 if [[ -n "$PR_REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
   _ex_rc=0
   _RC_CAP_STDOUT=""
@@ -564,10 +565,14 @@ if [[ -n "$PR_REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
       _ex_id=$(cut -f2 <<<"$_ex_line")
       _ex_state=$(cut -f3 <<<"$_ex_line")
       _ex_eff=$(cut -f6 <<<"$_ex_line")
-      [[ "$_ex_state" == "stale" || "$_ex_state" == "displaced" ]] || continue
+      [[ "$_ex_state" == "stale" || "$_ex_state" == "displaced" || "$_ex_state" == "fresh" ]] || continue
       [[ "$_ex_n" =~ ^[0-9]+$ ]] || continue
       [[ "$_ex_id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+- ]] || continue
       if [[ "$CLAIM_ID_FILTER_SET" -eq 1 && "$_ex_id" != "$CLAIM_ID_FILTER" ]]; then
+        continue
+      fi
+      if [[ "$_ex_state" == "fresh" ]]; then
+        FRESH_PR_NUMBERS="${FRESH_PR_NUMBERS}${_ex_n}"$'\n'
         continue
       fi
       EXPIRED_PR_NUMBERS="${EXPIRED_PR_NUMBERS}${_ex_n} ${_ex_id} ${_ex_eff}"$'\n'
@@ -596,6 +601,18 @@ $EXPIRED_PR_NUMBERS
 EOF
 fi
 unset _xn _xid _xeff
+# A claim that is fresh again (a push or `claim.sh --renew`) blocks scope again,
+# so a leftover `claim-expired` label would call a live claim abandoned. Apply
+# mode clears it; the label being absent is the normal case and is not an error.
+if [[ -n "$FRESH_PR_NUMBERS" && "$APPLY" -eq 1 ]]; then
+  while read -r _fn; do
+    [[ -n "$_fn" ]] || continue
+    gh pr edit "$_fn" --repo "$PR_REPO" --remove-label "$EXPIRED_LABEL" >/dev/null 2>&1 || true
+  done <<EOF
+$FRESH_PR_NUMBERS
+EOF
+fi
+unset _fn
 
 # --- ledger ref: require successful fetch of exact remote base ------------
 # Never fall back to local main/master, cached stale origin refs after a

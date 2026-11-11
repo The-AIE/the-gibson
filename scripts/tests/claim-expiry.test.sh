@@ -77,6 +77,7 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 echo "$*" >> "${GH_LOG:?}"
 case "$1 $2" in
   "api graphql")
+    [[ -n "${GH_STALL:-}" ]] && sleep "$GH_STALL"
     joined="$*"
     shift 2
     jqexpr=""
@@ -344,6 +345,15 @@ echo "scope-overlap · an unreadable displacement record blocks (fail closed)"
 stage "$(claim_node_extra 38 issue-30-held 'components/nav/**' "$EXPIRED" "$OLD_PUSH" '- Displaced by: ???')"
 out=$(run_so --scope 'components/nav/Item.tsx' --claim-id issue-31-mine --issue 31); rc=$?
 [[ "$rc" -ne 0 ]] && ok "unreadable Displaced by blocks" || bad "unreadable displacement record revived/displaced a claim (rc=$rc): $out"
+
+echo "scope-overlap · a stalled claim read is killed at the timeout and blocks (liveness)"
+stage "$(claim_node 53 issue-52-live 'app/**' "$FRESH" "$RECENT_PUSH")"
+_t0=$(date +%s)
+out=$(GH_STALL=30 GIBSON_PR_CLAIMS_TIMEOUT_MS=1500 run_so --scope 'docs/free/**' --claim-id issue-31-mine --issue 31); rc=$?
+_dt=$(( $(date +%s) - _t0 ))
+[[ "$rc" -ne 0 ]] && ok "a stalled read refuses admission" || bad "a stalled read admitted (rc=$rc): $out"
+[[ "$_dt" -lt 20 ]] && ok "a stalled read is bounded by the timeout" || bad "a stalled read ran ${_dt}s; the timeout was not applied"
+unset _t0 _dt
 
 echo "scope-overlap · displacing a stale intermediate also names its predecessor"
 PRED='- Displaced by: issue-40-mid (PR #40)'
@@ -668,6 +678,7 @@ out=$(cd "$ROOT/reap/canon" && GIBSON_CANONICAL="$ROOT/reap/canon" bash "$REAPER
 check "dry run exits 0" "$rc" "0"
 contains "dry run says it would label" "$out" "would label claim-expired"
 lacks "dry run labels nothing" "$(cat "$GH_LOG")" "--add-label"
+lacks "dry run clears no label" "$(cat "$GH_LOG")" "--remove-label"
 contains "legacy ledger row is still judged by its own evidence (unchanged: no worktree => REFUSE)" "$out" "REFUSE issue-7-legacy-dead  issue=#7  branch=feat/7-legacy-dead  (worktree_missing_or_unreadable)"
 
 : > "$GH_LOG"
@@ -677,7 +688,9 @@ log=$(cat "$GH_LOG")
 contains "apply labels the expired claim's PR" "$log" "pr edit 51 --repo acme/app --add-label claim-expired"
 contains "a displaced claim is labelled too" "$log" "pr edit 54 --repo acme/app --add-label claim-expired"
 lacks "the unreadable-expiry claim is not labelled" "$log" "pr edit 52"
-lacks "the live claim is not labelled" "$log" "pr edit 53"
+lacks "the live claim is not labelled" "$log" "pr edit 53 --repo acme/app --add-label"
+contains "a fresh claim has a leftover claim-expired label cleared" "$log" "pr edit 53 --repo acme/app --remove-label claim-expired"
+lacks "an expired claim's label is not cleared" "$log" "pr edit 51 --repo acme/app --remove-label"
 lacks "no PR is closed" "$log" "pr close"
 lacks "no issue is closed" "$log" "issue close"
 lacks "no PR is merged" "$log" "pr merge"

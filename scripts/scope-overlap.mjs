@@ -895,12 +895,21 @@ function prClaimsScriptPath() {
 }
 
 /** One live read. Returns the raw stdout, or null when the read itself failed. */
+// Liveness: a stalled `gh` inside pr-claims.sh must not hold admission open
+// forever. On timeout the child is killed, execFileSync throws, and both readers
+// return null, which every caller already treats as fail-closed.
+const PR_CLAIMS_TIMEOUT_MS = Number(process.env.GIBSON_PR_CLAIMS_TIMEOUT_MS) > 0
+  ? Number(process.env.GIBSON_PR_CLAIMS_TIMEOUT_MS)
+  : 120_000;
+
 function readPrClaimsOnce() {
   try {
     return execFileSync(prClaimsScriptPath(), ["list", opt.repo], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 16 * 1024 * 1024,
+      timeout: PR_CLAIMS_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     });
   } catch {
     return null;
@@ -929,6 +938,8 @@ function readExpirySnapshot() {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 16 * 1024 * 1024,
+      timeout: PR_CLAIMS_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     });
   } catch {
     return null;
