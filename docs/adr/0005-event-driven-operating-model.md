@@ -10,7 +10,7 @@ nav_exclude: true
 **Status:** Proposed. Nothing here is built.
 **Owner decision required:** this record asks to amend D-018 (the 60 second ready probe) so it becomes a fallback rather than the primary path, and asks who configures the GitHub App webhook.
 **Decision record:** `memory/DECISIONS.md` would point here once decided.
-**Related:** principle 9 in `docs/01-principles.md`; `docs/33-event-driven-operating-model.md` (the full model); `docs/31-agent-kontrol.md`; D-018; #562; neuro-hermes-chief-of-staff#45; issue #600.
+**Related:** principle 9 in `docs/01-principles.md`; `docs/33-event-driven-operating-model.md` (the full model); `docs/31-agent-kontrol.md`; D-018; #562; controller repository pull request 45; issue #600.
 
 ## Context
 

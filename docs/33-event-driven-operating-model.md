@@ -15,8 +15,9 @@ nav_order: 33
 > decision with a reason and an end date, never a quiet switch.
 
 **Status:** Proposed canon, drafted 2026-10-26 from the Hermes stall triage
-([#600](https://github.com/The-AIE/the-gibson/issues/600)). Nothing here is built. The
-decision record is [ADR-0005](adr/0005-event-driven-operating-model.md). This extends
+([#600](https://github.com/The-AIE/the-gibson/issues/600)). The model itself is not built.
+The `review-ready` producer ([docs/32](32-review-ready-event.md)) is the one piece already
+in the tree. The decision record is [ADR-0005](adr/0005-event-driven-operating-model.md). This extends
 principle 9 in [`01-principles.md`](01-principles.md) ("agents push, nobody polls"), which
 states the doctrine without a mechanism.
 
@@ -30,10 +31,10 @@ the work, and every outage fits one of six causes.
 | When | What stopped | What looked healthy | Cause |
 |---|---|---|---|
 | 2026-09-18 to 09-30 | Hunter's six Friday-writer jobs | Scheduler running, host up | **A** silent pause |
-| 2026-10-03 to 10-08 | Carmack's deliveries | Every run exited cleanly; a dead lock file went unread (L-090) | **B** alive is not delivering |
+| 2026-10-03 to 10-08 | The coordinator's deliveries | Every run exited cleanly; a dead lock file went unread (L-090) | **B** alive is not delivering |
 | 2026-10-15 to 10-25 | Independent reviews on every repo | The reviewer's launchd job ran | **D** single-threaded consumer, **C** poll floor (#562, D-018) |
-| 2026-10-08 to 10-26 | Every Dependabot PR on ConferenceOS | Reviewer green; PRs skipped as `missing-vendor-hint` | **E** a policy gap that looks like a stall |
-| 2026-10-23 03:36 to 10-25 19:49 | All five Carmack jobs | Gateway, ticker, telemetry all fresh | **A** bulk pause with no reason, then a silent resume against the 10-25 decision to wait |
+| 2026-10-08 to 10-26 | Every Dependabot PR on a downstream product repository | Reviewer green; PRs skipped as `missing-vendor-hint` | **E** a policy gap that looks like a stall |
+| 2026-10-23 03:36 to 10-25 19:49 | All five coordinator jobs | Gateway, ticker, telemetry all fresh | **A** bulk pause with no reason, then a silent resume against the 10-25 decision to wait |
 | 2026-10-25 to 10-26 | Accepted delivery | 32 scheduler runs on 10-26, each a prompt of about 190,000 characters, growing | **B** and **C** |
 | ongoing | Issues "blocked" on issues already closed | Labels intact | **F** stale state nobody owns |
 
@@ -42,9 +43,8 @@ says "alive" when the outcome is "nothing delivered"; **C** a latency floor set 
 interval; **D** one consumer serving many queues; **E** a rule that blocks work silently;
 **F** state that goes stale because nothing is responsible for expiring it.
 
-*Re-verify (measured 2026-10-26):* `hermes cron status` and
-`sqlite3 ~/.hermes/profiles/carmack/cron/executions.db` on the Mini; `paused_at` in
-`~/.hermes/profiles/carmack/cron/jobs.json`.
+*Re-verify (measured 2026-10-26):* `hermes cron status` on the operator host, then the
+coordinator profile's `cron/executions.db` and `paused_at` in `cron/jobs.json`.
 
 ## The six rules
 
@@ -174,15 +174,18 @@ neither is a poll and is removed.
   design above needs neither, so the rejection does not apply to it. If the owner approves
   ADR-0005, the probe becomes the reviewer's fallback sweep and D-018 is amended, not
   deleted.
-- **#562** (CI emits `review-ready`) becomes an event producer for repos without the App
-  webhook. It needs no Mini receiver, because the event lands in a workflow or in Agent
-  Kontrol.
-- **neuro-hermes-chief-of-staff#45** (per-repository reviewer lanes and event dispatch with
-  the tick as fallback) is the consumer side of this model and conforms to it.
+- **#562** (CI emits `review-ready`) is the event producer for repos without the App
+  webhook. The producer is already in this tree ([docs/32](32-review-ready-event.md),
+  `.github/workflows/review-ready.yml`); tracking issue #562 is still open. It needs no
+  Mini receiver, because the event lands in a workflow or in Agent Kontrol.
+- **Controller repository pull request 45** (per-repository reviewer lanes and event
+  dispatch with the tick as fallback) is the consumer side of this model and conforms to
+  it. The repository slug stays out of this tree.
 
 ## Rollout
 
-1. Land #562 and #45, which are in flight and address the measured review latency.
+1. Finish #562 (the `review-ready` producer is already in the tree) and land controller
+   pull request 45. Both address the measured review latency.
 2. Agent Kontrol: the GitHub App webhook receiver and the inbox.
 3. The dispatcher and reviewer consumers move to the outbound long-poll.
 4. The sweeper, starting with `consumer-silent`, `pause-unexplained` and `pr-stuck`.
@@ -197,7 +200,7 @@ neither is a poll and is removed.
 | Green at head to review started, p90 | up to 15 min tick plus the queue ahead; 25 min seen 2026-10-25 | under 2 min |
 | Evidence posted to merged, p90 | 18 h recorded in `merge-on-green.yml`; 10 min cron sweep | under 15 min |
 | Work found by a fallback sweep that an event should have caught | not measured | under 2 percent |
-| Paused jobs with no recorded reason | 4 Carmack jobs, 10-23 to 10-25 | 0 |
+| Paused jobs with no recorded reason | 4 coordinator jobs, 10-23 to 10-25 | 0 |
 | Hours per day a consumer is idle while ready work exists | not measured; the coordinator ran 32 times with 25 open PRs | 0 |
 | Repos with a webhook | 0 of 5 | all installed |
 
@@ -214,5 +217,5 @@ receiver, inbox, long-poll consumer and sweeper belong to Agent Kontrol
    exists.
 2. The App webhook has to be configured in the GitHub App's settings, which only the owner
    can change. Use the existing `aie-independent-review` App or a new Agent Kontrol App?
-3. When the dispatcher bridge exists, is the model-driven Carmack loop retired or kept as
+3. When the dispatcher bridge exists, is the model-driven coordinator loop retired or kept as
    the exception handler only?
