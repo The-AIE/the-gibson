@@ -67,7 +67,9 @@ WHAT IT DOES
   (whitespace, links, wording, or a rewritten date on an existing heading
   id) do not reset freshness. Debt is the count of lessons whose Status
   line contains the configured marker. The count may fall against the
-  baseline and must not rise. Per-lesson age is days from a full heading
+  baseline and must not rise. A working baseline whose statusMarker
+  differs from the committed baseline is marker-changed: the two counts
+  are not the same debt. Per-lesson age is days from a full heading
   date to --now.
 
 WHY
@@ -235,14 +237,10 @@ export function ageDays(headingDate, nowMs) {
   return Math.floor(nowMs / MS_DAY) - Math.floor(parsed / MS_DAY);
 }
 
-function loadBaseline(path) {
-  const read = readText(path);
-  if (!read.ok) {
-    return { ok: false, reason: read.code === "ENOENT" ? "baseline-missing" : "baseline-unreadable" };
-  }
+function parseBaseline(text) {
   let parsed;
   try {
-    parsed = JSON.parse(read.text);
+    parsed = JSON.parse(text);
   } catch {
     return { ok: false, reason: "baseline-malformed" };
   }
@@ -268,6 +266,14 @@ function loadBaseline(path) {
     proseOnlyCount: parsed.proseOnlyCount,
     statusMarker: parsed.statusMarker,
   };
+}
+
+function loadBaseline(path) {
+  const read = readText(path);
+  if (!read.ok) {
+    return { ok: false, reason: read.code === "ENOENT" ? "baseline-missing" : "baseline-unreadable" };
+  }
+  return parseBaseline(read.text);
 }
 
 function loadActivity(path) {
@@ -387,7 +393,8 @@ function debtDecision(debtCount, baseline, committed) {
   const reasons = [];
   if (debtCount > baseline.proseOnlyCount) reasons.push("count-rose"); // MUTATION_DEBT
   if (committed && committed.ok && !committed.absent) {
-    if (baseline.proseOnlyCount > committed.proseOnlyCount) reasons.push("baseline-raised"); // MUTATION_BASELINE
+    if (baseline.statusMarker !== committed.statusMarker) reasons.push("marker-changed"); // MUTATION_MARKER
+    if (baseline.statusMarker === committed.statusMarker && baseline.proseOnlyCount > committed.proseOnlyCount) reasons.push("baseline-raised"); // MUTATION_BASELINE
     if (baseline.windowDays > committed.windowDays) reasons.push("window-loosened"); // MUTATION_WINDOW
   }
   if (reasons.length > 0) {
@@ -549,30 +556,11 @@ function loadCommittedBaseline(root, rel, ref, explicitPath) {
     if (gitPathMissing(shown)) return { checked: true, ok: true, absent: true, state: "absent" };
     return { checked: true, ok: false, absent: false, reason: "committed-baseline-unreadable", state: "unreadable" };
   }
-  const tempNote = shown.stdout;
-  let parsed;
-  try {
-    parsed = JSON.parse(tempNote);
-  } catch {
-    return { checked: true, ok: false, absent: false, reason: "baseline-malformed", state: "unreadable" };
+  const loaded = parseBaseline(shown.stdout);
+  if (!loaded.ok) {
+    return { checked: true, ok: false, absent: false, reason: loaded.reason, state: "unreadable" };
   }
-  if (!parsed || parsed.schema !== SCHEMA) {
-    return { checked: true, ok: false, absent: false, reason: "baseline-malformed", state: "unreadable" };
-  }
-  if (!Number.isInteger(parsed.windowDays) || parsed.windowDays < 1) {
-    return { checked: true, ok: false, absent: false, reason: "baseline-malformed", state: "unreadable" };
-  }
-  if (!Number.isInteger(parsed.proseOnlyCount) || parsed.proseOnlyCount < 0) {
-    return { checked: true, ok: false, absent: false, reason: "baseline-malformed", state: "unreadable" };
-  }
-  return {
-    checked: true,
-    ok: true,
-    absent: false,
-    windowDays: parsed.windowDays,
-    proseOnlyCount: parsed.proseOnlyCount,
-    state: "compared",
-  };
+  return { checked: true, ok: true, absent: false, ...loaded, state: "compared" };
 }
 
 function insideRoot(root, path) {

@@ -469,6 +469,49 @@ run_sensor --fixture "$FIX/fenced-status" --now "$NOW" --baseline "$ROOT/base-hi
 expect_has "a higher baseline count is over" "debtReason: baseline-raised"
 expect_has "a higher baseline verdict" "debtRatchet: over"
 expect_has "live debt under the new count is still over" "debtCount: 0"
+expect_lacks "a higher baseline count is not a marker change" "marker-changed"
+
+printf '%s\n' '{"schema":"gibson.lesson-debt-baseline.v1","windowDays":14,"proseOnlyCount":0,"statusMarker":"marker-not-in-ledger"}' >"$ROOT/base-swapped-marker.json"
+run_sensor --fixture "$FIX/inactivity" --now "$NOW" --baseline "$ROOT/base-swapped-marker.json" --committed-baseline "$ROOT/base-committed.json"
+expect_has "a swapped marker hides the prose-only lesson" "debtCount: 0"
+expect_has "a swapped marker is over" "debtReason: marker-changed"
+expect_has "a swapped marker ratchet" "debtRatchet: over"
+expect_has "a swapped marker stays fresh" "freshness: healthy"
+expect_has "a swapped marker verdict" "verdict: RED"
+expect_lacks "a swapped marker is not green" "verdict: GREEN"
+expect_lacks "a swapped marker did not raise the count" "baseline-raised"
+
+printf '%s\n' '{"schema":"gibson.lesson-debt-baseline.v1","windowDays":14,"proseOnlyCount":5,"statusMarker":"marker-not-in-ledger"}' >"$ROOT/base-swapped-high.json"
+run_sensor --fixture "$FIX/inactivity" --now "$NOW" --baseline "$ROOT/base-swapped-high.json" --committed-baseline "$ROOT/base-committed.json"
+expect_has "a higher count under a new marker is marker-changed" "debtReason: marker-changed"
+expect_lacks "a higher count under a new marker is not baseline-raised" "baseline-raised"
+expect_has "a higher count under a new marker verdict" "verdict: RED"
+
+init_repo "$ROOT/swapped" main
+mkdir -p "$ROOT/swapped/memory" "$ROOT/swapped/config"
+cp "$FIX/inactivity/lessons.md" "$ROOT/swapped/memory/LESSONS.md"
+cp "$ROOT/base-committed.json" "$ROOT/swapped/config/lesson-debt-baseline.json"
+commit_at "$ROOT/swapped" "2026-09-01T00:00:00Z" "matching marker"
+cp "$ROOT/base-swapped-marker.json" "$ROOT/swapped/config/lesson-debt-baseline.json"
+run_sensor --root "$ROOT/swapped" --now "$NOW" --activity-ref HEAD
+expect_has "a dirty swapped marker hides the lesson" "debtCount: 0"
+expect_has "a dirty swapped marker is over" "debtReason: marker-changed"
+expect_has "a dirty swapped marker verdict" "verdict: RED"
+expect_lacks "a dirty swapped marker is not green" "verdict: GREEN"
+expect_lacks "a dirty swapped marker did not raise the count" "baseline-raised"
+
+init_repo "$ROOT/no-marker" main
+mkdir -p "$ROOT/no-marker/memory" "$ROOT/no-marker/config"
+cp "$FIX/inactivity/lessons.md" "$ROOT/no-marker/memory/LESSONS.md"
+printf '%s\n' '{"schema":"gibson.lesson-debt-baseline.v1","windowDays":14,"proseOnlyCount":0}' >"$ROOT/no-marker/config/lesson-debt-baseline.json"
+commit_at "$ROOT/no-marker" "2026-09-01T00:00:00Z" "baseline without marker"
+cp "$ROOT/base-committed.json" "$ROOT/no-marker/config/lesson-debt-baseline.json"
+run_sensor --root "$ROOT/no-marker" --now "$NOW" --activity-ref HEAD
+expect_rc "committed baseline without a marker exits 1" 1
+expect_has "committed baseline without a marker is unknown" "debtRatchet: unknown"
+expect_has "committed baseline without a marker reason" "debtReason: baseline-malformed"
+expect_has "committed baseline without a marker verdict" "verdict: UNKNOWN"
+expect_lacks "committed baseline without a marker is not green" "verdict: GREEN"
 
 run_sensor --fixture "$FIX/inactivity" --now "$NOW" --baseline "$ROOT/no-such.json"
 expect_rc "missing baseline exits 1" 1
@@ -655,8 +698,34 @@ cp "$ROOT/base-high.json" "$ROOT/outside-baseline.json"
 run_sensor --root "$ROOT/raised" --now "$NOW" --baseline "$ROOT/outside-baseline.json"
 expect_has "outside baseline is the working count" "debtReason: baseline-raised"
 expect_has "outside baseline still reads the committed file" "committedBaseline: compared"
+expect_lacks "outside baseline keeps the committed marker" "marker-changed"
 
 echo "# measured ledger"
+# A paid-off ledger (zero prose-only lessons) is still a successful measurement.
+measurement_accepted() {
+  local rc="$1" lesson_n="$2" debt_n="$3"
+  [[ "$rc" -eq 0 && "$lesson_n" =~ ^[1-9][0-9]*$ && "$debt_n" =~ ^[0-9]+$ ]]
+}
+if measurement_accepted 0 3 0; then
+  ok "a zero prose-only count is a successful measurement"
+else
+  bad "a zero prose-only count was rejected"
+fi
+if measurement_accepted 0 3 58; then
+  ok "a positive prose-only count is a successful measurement"
+else
+  bad "a positive prose-only count was rejected"
+fi
+if measurement_accepted 0 0 0; then
+  bad "a ledger with no lessons was accepted"
+else
+  ok "a ledger with no lessons is rejected"
+fi
+if measurement_accepted 1 3 0; then
+  bad "a failed measurement was accepted"
+else
+  ok "a failed measurement is rejected"
+fi
 measured=$(SENSOR_PATH="$SENSOR" LEDGER_PATH="$REPO_ROOT/memory/LESSONS.md" node --input-type=module -e '
 import { pathToFileURL } from "node:url";
 import { readFileSync } from "node:fs";
@@ -673,10 +742,10 @@ process.stdout.write(String(parsed.lessons.length) + " " + String(debt));
 measure_rc=$?
 lesson_n=${measured%% *}
 debt_n=${measured##* }
-if [[ "$measure_rc" -eq 0 && "$lesson_n" -gt 0 && "$debt_n" -gt 0 ]]; then
+if measurement_accepted "$measure_rc" "$lesson_n" "$debt_n"; then
   ok "live ledger parses"
 else
-  bad "live ledger parse rc=$measure_rc"
+  bad "live ledger parse rc=$measure_rc lessons=${lesson_n:-missing} debt=${debt_n:-missing}"
 fi
 base_rc=0
 node -e '
@@ -751,6 +820,7 @@ if grep -F 'does not block merges' "$DOC" >/dev/null \
    && grep -F 'ref: main' "$DOC" >/dev/null \
    && grep -F 'freshness: healthy' "$DOC" >/dev/null \
    && grep -F 'verdict: UNKNOWN' "$DOC" >/dev/null \
+   && grep -F 'marker-changed' "$DOC" >/dev/null \
    && ! grep -F 'This workflow is not in the sensor-health inventory' "$DOC" >/dev/null \
    && ! grep -F 'did a run succeed inside the observation window' "$DOC" >/dev/null; then
   ok "doc states the limits"
@@ -846,10 +916,16 @@ prove window \
   --fixture "$FIX/inactivity" --now "$NOW" --baseline "$BASE" --window-days 30 --committed-baseline "$ROOT/base-committed.json"
 
 prove baseline-raise \
-  'if (baseline.proseOnlyCount > committed.proseOnlyCount) reasons.push("baseline-raised"); // MUTATION_BASELINE' \
-  'if (baseline.proseOnlyCount < committed.proseOnlyCount) reasons.push("baseline-raised"); // MUTATION_BASELINE' \
+  'if (baseline.statusMarker === committed.statusMarker && baseline.proseOnlyCount > committed.proseOnlyCount) reasons.push("baseline-raised"); // MUTATION_BASELINE' \
+  'if (baseline.statusMarker === committed.statusMarker && baseline.proseOnlyCount < committed.proseOnlyCount) reasons.push("baseline-raised"); // MUTATION_BASELINE' \
   'baseline-raised' 'debtRatchet: ok' flip \
   --fixture "$FIX/fenced-status" --now "$NOW" --baseline "$ROOT/base-high.json" --committed-baseline "$ROOT/base-committed.json"
+
+prove marker \
+  'if (baseline.statusMarker !== committed.statusMarker) reasons.push("marker-changed"); // MUTATION_MARKER' \
+  'if (baseline.statusMarker === committed.statusMarker) reasons.push("marker-changed"); // MUTATION_MARKER' \
+  'marker-changed' 'debtRatchet: ok' flip \
+  --fixture "$FIX/inactivity" --now "$NOW" --baseline "$ROOT/base-swapped-marker.json" --committed-baseline "$ROOT/base-committed.json"
 
 prove fall \
   'debtRatchet: "ok",
