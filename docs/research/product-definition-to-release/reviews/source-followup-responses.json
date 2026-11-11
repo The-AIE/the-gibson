@@ -1,0 +1,130 @@
+[
+  {
+    "index": 0,
+    "model": "z-ai/glm-5.3",
+    "id": "gen-1793376834-zppNeIoJgDugdikyqB20",
+    "provider": "Wafer",
+    "created": 1793376834,
+    "finish_reason": "stop",
+    "content": "# Delta Memo: Revisions in light of the source snapshot\n\nAdvisory only; I did not inspect code, run validators, or verify any claimed state. The snapshot shows a partially built system; my first memo assumed more greenfield than warranted.\n\n---\n\n## A. Reuse vs. smallest missing slice\n\n**Reuse, do not rebuild:** planner (PLAN.md), decomposer, issue contracts, scope/dependency validators, repo-claim/workspace, automated checks, test-integrity, local proof, and independent-review machinery. My Increment 3 (\"isolated workspace + check harness + evidence bundle\") and most of Increment 2 are substantially covered. Re-proposing them would be churn, and my Stage-1 recommendation (\"toolkit only\") is effectively reached.\n\n**Smallest missing slice — the delivery receipt.** Per finding 3, collection/deployment proof is incomplete in that slice, and the criterion-marker helper is linkage hygiene, not behavioral acceptance. So the highest-value first slice is:\n\n1. **Behavioral acceptance bridge:** map each numbered acceptance criterion to the check(s) that exercise it, distinguishing \"linked\" from \"behaviorally covered,\" with the latter defined as scenario execution plus held-out or independent review — not marker closure.\n2. **Delivery receipt closure:** exact, reproducible collection of the evidence that exists today into one portable artifact, with explicit gaps marked (e.g., \"deployment proof: absent\").\n\n**Second slice (new):** the integrated journey — finding 6 says no integrated running-user journey or comparative productivity result exists. That is now the product's central unproven claim, ahead of any new infrastructure.\n\n## B. Portable artifacts vs. transactional runtime state\n\nI retract \"all writes land in Git; the plane is never the system of record\" as stated. Agent Kontrol's documented boundary — repository gate remains authoritative for its checks, manager cannot override it, manager may stand alone — is exactly the **canonical-home-per-fact** model, and it is right. Forced Git-only state would either serialize legitimately concurrent runtime operations into commit noise or lose them.\n\nReconciled rule:\n\n- **Durable intent and evidence** (specs, accepted changes, receipts, review outcomes) live in the repository, portably, in the toolkit's formats.\n- **Ephemeral coordination and execution state** (task/fleet/progress/decisions-in-flight) lives in the manager's database, legitimately.\n- **Each runtime fact carries provenance back to its repo anchor** (issue/spec version/contract). Any manager state without an anchor is provisional by definition.\n- **The gate is the single crossing point:** runtime cannot self-certify; only repo-side checks can. This preserves my original evidence-independence concern while conceding the database.\n\nThe open design question: what is the receipt format for a *manager-driven* collection — i.e., deployment performed by Kontrol — so the bundle remains verifiable without trusting the manager's log? Unproven; I'd prototype it, not assume it.\n\n## C. Incremental integrated product plan (existing toolkit + plane)\n\n1. **Close the delivery receipt slice** (above). User benefit: the owner can distinguish \"linked,\" \"checked,\" and \"actually delivered\" for the first time.\n2. **End-to-end journey on one fixture:** owner → spec acceptance → increment → evidence → receipt, with the manager driving execution but the repo gate deciding.\n3. **Comparative pilot (my Section E):** toolkit+Kontrol vs. plain GitHub baseline on difficulty-matched tasks, third-party held-out acceptance suite, defect-escape as primary measure. Do this *before* adding features; finding 6 makes it the gating unknown.\n4. **Enterprise profile conformance mapping:** for each receipt, emit which enterprise-readiness dimensions are evidenced vs. absent. Note a real conflict: finding 4 — existing independent-review and authority requirements are binding — means my earlier \"deterministic checks as sole verification authority\" framing is too strong. Deterministic checks are necessary but not sufficient; independent review is already part of the toolkit and must remain.\n\n**Concrete first-user benefit:** an owner reads one page per release — \"criterion N: passed via check X, reviewed by Y, deployment proof absent\" — instead of reconciling issues, PRs, and manager status.\n\n**Negative acceptance case:** a criterion marked \"covered\" where the linked check is tautological (asserts the marker, not the behavior) — the receipt must render this as *linked-only*, and a planted seeded defect passing a \"covered\" receipt fails the release. Second case: a manager-side completion claim with no repo-gate evidence must appear as \"claimed, unverified.\"\n\n## D. Changes, retractions, disagreements\n\n**Change/retract:**\n- Increment plan compressed: 1–4 of my original ladder exist; the ladder now starts at behavioral-acceptance + receipt closure, then integration, then measurement, then enterprise profile.\n- \"Plane never stores truth\" → canonical homes per fact, with repo as authority for certification-relevant facts.\n- \"Deterministic-only verification\" → deterministic checks plus the existing binding independent-review machinery; my concern about model self-certification stands but is already partly mitigated.\n- Persona skepticism softens: existing validators and review machinery suggest some owner-value evidence exists, though finding 6 says productivity claims remain unproven — skepticism on *productivity* stands.\n\n**Important disagreement/uncertainty:** I would resist treating the small-fixture validator success as generalization. Finding 1 is explicit that arbitrary product completeness is unproven; the highest-risk path is scaling the planner/validators to messy real descriptions before the comparative pilot exists. **Uncertainty worth naming:** whether the manager's database and the repo anchor model stay consistent under failure (manager mid-task when repo advances) — no supplied fact covers reconciliation-on-conflict, and I would not certify any release path that depends on it until that behavior is specified and tested.",
+    "usage": {
+      "completion_tokens": 1284,
+      "completion_tokens_details": {
+        "audio_tokens": 0,
+        "image_tokens": 0,
+        "reasoning_tokens": 1
+      },
+      "cost": 0.002511989,
+      "cost_details": {
+        "upstream_inference_completions_cost": 0.0017976,
+        "upstream_inference_cost": 0.002511989,
+        "upstream_inference_prompt_cost": 0.000714389
+      },
+      "is_byok": false,
+      "prompt_tokens": 3991,
+      "prompt_tokens_details": {
+        "audio_tokens": 0,
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "video_tokens": 0
+      },
+      "total_tokens": 5275
+    }
+  },
+  {
+    "index": 1,
+    "model": "moonshotai/kimi-k3.1-pro",
+    "id": "gen-1793376834-WHlJw9PLle9UnoA2908i",
+    "provider": "Moonshot AI",
+    "created": 1793376834,
+    "finish_reason": "stop",
+    "content": "## A. Reuse existing capabilities; close the behavioral-evidence gap\n\nTreat the supplied findings as identifying existing assets, subject to normal fit verification—not as independently audited or generally proven capabilities. Reuse Gibson’s planner template, decomposer, issue contracts, scope/dependency validators, repository claim/workspace machinery, automated checks, test-integrity controls, local proof, and exact-source independent review. The first memo’s suggestions to build these file-first should be withdrawn.\n\nThe smallest missing slice is **behavioral acceptance evidence for one already-scoped increment, connected honestly to the existing delivery receipt**. Add only the missing contract or adapter that associates:\n\n- The accepted criterion and a separately meaningful behavioral scenario.\n- The exact source revision and execution environment.\n- The runner, result, and references to retained evidence.\n- Explicit limitations, including evidence not collected.\n\nCriterion-marker closure must remain linkage hygiene, not be promoted to behavioral proof. Likewise, the receipt should represent collection and deployment verification as incomplete unless separately supported. Existing independent review and applicable authority requirements remain binding; neither deterministic checks nor a new universal owner-approval step should replace them.\n\n## B. Define canonical homes per fact; do not force everything into Git\n\nThe first memo’s portability recommendation was too broad if read as “all state belongs in Git.” Use canonical homes according to state semantics:\n\n- **Git/source artifacts:** accepted intent and revisions, criterion identifiers, issue/scope/dependency contracts, exact source, and the portable receipt or manifest needed to interpret and reproduce repository-gated outcomes.\n- **Agent Kontrol’s database:** task attempts, leases or coordination state, fleet status, transient progress, operational decision lifecycle, and other transactional runtime facts.\n- **External evidence storage where appropriate:** bulky logs or artifacts, with stable identifiers or digests referenced by portable artifacts.\n\nA decision that changes accepted intent or exercises binding authority needs a durable, attributable record connected to the affected source revision; that does not require every operational decision to become a Git commit. Use explicit identifiers, revision references, and projections rather than dual writable copies. Synchronization must not create a second gate or silently rewrite accepted history.\n\nThe documented boundary should remain: Agent Kontrol may coordinate and stand alone, but cannot override the repository gate. Conversely, reproducing that gate must not require reconstructing transient manager state.\n\n## C. Integrate one thin journey before expanding either product\n\n1. **First vertical slice:** Project one accepted plan and scoped issue into Agent Kontrol using their existing identifiers. Coordinate execution through the existing toolkit, return existing gate/review outcomes, and add the single behavioral-evidence result. Display the portable receipt with incomplete delivery stages visibly incomplete.\n2. **Change slice:** Exercise one requirement revision through the same journey. Preserve the prior accepted revision and ensure stale behavioral or delivery claims are not presented as current; implement only invalidation or synchronization behavior found missing.\n3. **Evaluation before expansion:** Compare the integrated journey with a matched toolkit-only or conventional workflow, including owner and reviewer effort. Expand collection/deployment evidence, optional model support, or enterprise profiles only against separately defined evidence needs.\n\n**Concrete first-user benefit:** a nontechnical owner can see, in one place, that a specific accepted increment has behavioral evidence and exact-source review for an identified revision—while also seeing that collection or deployment remains unverified—without manually assembling these distinctions.\n\n**Negative acceptance case:** a criterion marker is present and local checks pass, but the behavioral scenario fails or was not run. The manager must not display the criterion as behaviorally satisfied or the increment as released, and no manager action may bypass the repository gate or substitute owner approval for required independent authority.\n\n## D. Revisions to the first memo and remaining uncertainty\n\nRetract the greenfield sequencing that proposed building the toolkit, workspaces, validators, and initial evidence machinery before integration. Also revise “defer the control plane”: Agent Kontrol already exists, so the appropriate step is a minimal contract-based integration and journey evaluation, not another manager or an immediate deployment merger. Retain shared contracts, toolkit portability, independent evidence, and skepticism toward blanket enterprise-readiness claims.\n\nThe important uncertainty is whether behavioral acceptance can remain portable across product types without product-specific harnesses becoming the dominant cost. The small validator fixture does not establish arbitrary product completeness, and the supplied facts establish neither an integrated running-user journey nor comparative productivity improvement.",
+    "usage": {
+      "completion_tokens": 2773,
+      "completion_tokens_details": {
+        "audio_tokens": 0,
+        "image_tokens": 0,
+        "reasoning_tokens": 1876
+      },
+      "cost": 0.035736,
+      "cost_details": {
+        "upstream_inference_completions_cost": 0.02773,
+        "upstream_inference_cost": 0.035736,
+        "upstream_inference_prompt_cost": 0.008006
+      },
+      "is_byok": false,
+      "prompt_tokens": 4003,
+      "prompt_tokens_details": {
+        "audio_tokens": 0,
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "video_tokens": 0
+      },
+      "total_tokens": 6776
+    }
+  },
+  {
+    "index": 2,
+    "model": "x-ai/grok-4.7",
+    "id": "gen-1793376834-V1pV6m1o0eItl12CGVaL",
+    "provider": "xAI",
+    "created": 1793376834,
+    "finish_reason": "stop",
+    "content": "# Delta to the first memo\n\nThese points use only the supplied public facts and bounded findings. They are not a source audit, test run, certification, activation, or release approval. No integrated user journey or productivity comparison is established.\n\n## A. Reuse, then the smallest missing slice\n\nDo not rebuild the planner, decomposer, issue contracts, scope/dependency validators, repository claim/workspace, automated checks, test-integrity, local proof, or exact-source independent review. Those already exist. Fixture success for the validators does not prove arbitrary product completeness; do not widen them first.\n\nAgent Kontrol already owns runtime tasks, fleet, decisions, and progress, including legitimate database state. Reuse that. Do not add a second control plane. Its documented boundary stays: the repository gate remains authoritative for its checks and cannot be overridden by the manager. The manager may stand alone; the toolkit stays portable.\n\nThe smallest missing slice is not new machinery. It is one owner-readable decision over artifacts that already exist: accepted plan revision, issue-contract scope, gate results, and an explicit split between criterion-marker closure and behavioral acceptance. The portable delivery receipt must keep collection/deployment proof labeled incomplete for that slice. Marker hygiene must not be displayed as behavior proved.\n\n## B. Canonical home per fact\n\nDo not force all state into Git. Do not let transactional state become the spec.\n\n| Fact | Canonical home |\n| --- | --- |\n| Accepted intent, plan, issue contracts, source, gate checks, exact-source review | Portable repository artifacts |\n| Task assignment, fleet, in-progress coordination, progress | Agent Kontrol database |\n| Release or “proved” claims about checks | Gate outputs only; manager may display, not override |\n| Collection/deployment proof | Not claimed until that receipt gap is actually closed |\n\nThe owner-facing record should reference repo identities and gate outputs. Ephemeral runtime rows may expire without rewriting accepted intent. A database decision is canonical for coordination, not for whether a check passed.\n\n## C. Incremental plan for this existing pair\n\n1. **Owner packet over current outputs.** One view or exported note for a single change: plan revision, in-scope issue contracts, gate result, independent-review status already required by the toolkit, unknowns, and the receipt’s incomplete collection/deployment proof. First benefit: the nontechnical owner can see what was accepted, what the gate checked, and what is not yet proved, without learning either system’s internals.\n2. **Negative acceptance case.** The integrated claim fails if criterion-marker closure, a closed task, or a green progress view is treated as behavioral acceptance or as deployment proof.\n3. **Only after that packet is used once:** write owner decisions back as portable artifacts when they change accepted intent; leave fleet state in the manager. Do not start with schema unification, a new sandbox, or another model panel.\n4. Enterprise readiness stays an applicable evidence profile under existing authority and independent-review requirements. This research adds neither a blanket human-approval rule nor deterministic self-certification.\n\n## D. Changes, retraction, disagreement\n\nRetract greenfield increments that specify new templates, validators, workspaces, and check binding as if absent. Retract “delay any control plane until Git-only stages prove value” as a mandate here: a manager already exists and may stand alone. Retract “all authority in Git.” Replace with per-fact homes and a non-override rule for gate checks.\n\nKeep the earlier warning that linkage is not fitness, and that attestations or local proof are not production proof. Narrow it: criterion markers are already defined as linkage/closure hygiene, and the delivery receipt already states that collection/deployment proof is incomplete.\n\n**Disagreement / uncertainty.** I would not yet treat an integrated UI as the product bet. The unresolved question is whether one honest packet over current gate and receipt outputs changes an owner decision at all. No comparative result exists. If that packet is unused, or if progress UI makes marker closure look like acceptance, stop integration and keep the separate toolkit and manager.",
+    "usage": {
+      "completion_tokens": 1823,
+      "completion_tokens_details": {
+        "audio_tokens": 0,
+        "image_tokens": 0,
+        "reasoning_tokens": 995
+      },
+      "cost": 0.020224,
+      "cost_details": {
+        "upstream_inference_completions_cost": 0.010938,
+        "upstream_inference_cost": 0.020224,
+        "upstream_inference_prompt_cost": 0.009286
+      },
+      "is_byok": false,
+      "prompt_tokens": 5507,
+      "prompt_tokens_details": {
+        "audio_tokens": 0,
+        "cache_write_tokens": 0,
+        "cached_tokens": 1152,
+        "video_tokens": 0
+      },
+      "total_tokens": 7330
+    }
+  },
+  {
+    "index": 3,
+    "model": "anthropic/claude-opus-5.5",
+    "id": "gen-1793376834-1zjOnUBOrJQVx1xrEPrW",
+    "provider": "Claude Platform on AWS",
+    "created": 1793376834,
+    "finish_reason": "content_filter",
+    "content": "# Delta to First Memo: Reusing the Existing Toolkit and Control Plane\n\n**Basis:** The supplied findings 1–6 and source links, taken as given. I have not inspected the repositories or run anything. This is advisory only and is not release approval.\n\n## A. Reuse first, then build the smallest missing slice\n\n**Reuse rather than rebuild.** Per findings 1–2, the following already exist and should be reused:\n- the PLAN.md planner template, with numbered acceptance criteria,\n- the decomposer procedure, issue contracts and scope/dependency validators,\n- claim/workspace isolation,\n- automated checks, test-integrity checks and local proof,\n- exact-source independent review.\n\nMy earlier increments 1 and 2 were largely greenfield proposals for things that already exist. **[Unknown]** Findings 1 and 6 also say these components were exercised only on a small fixture, and no integrated journey has been shown.\n\n**What is missing, per finding 3:**\n- **Behavioral acceptance.** The criterion-marker helper shows that a criterion is linked and closed. It does not show that the behavior was demonstrated.\n- **Collection/deployment proof.** The delivery receipt documentation says this part is incomplete in the current slice.\n\n**Smallest first slice:** bind one numbered PLAN.md criterion to one executable behavioral scenario.\n- The scenario runs through the existing checks and is covered by exact-source review.\n- The result appears in a receipt that keeps two states visibly apart: *linked/closed* and *behavior demonstrated at commit X*.\n- Do not complete deployment proof yet. The receipt should state honestly that it is absent.\n\n## B. Define a canonical home for each fact\n\nI retract \"Git as sole system of record\" and \"control plane as a rebuildable cache.\" Finding 5 establishes that Agent Kontrol has legitimate database-backed runtime state. Forcing leases, fleet state or progress into Git would add commit noise and race conditions without adding trust.\n\nInstead, publish a small fact-ownership contract:\n\n| Fact | Canonical home |\n|---|---|\n| Owner description, accepted PLAN, acceptance criteria, scope contracts, intent-changing decisions | Repository, versioned |\n| Behavioral scenario definitions, check/review results, receipts | Repository and gate outputs, tied to the exact source |\n| Task assignment, fleet status, progress, queued decisions, telemetry | Agent Kontrol database |\n| Decision captured at runtime that changes intent or acceptance | Raised in Agent Kontrol, authoritative only once materialized in the repository through the normal reviewed path |\n\n**Reconciliation rules:**\n- Runtime records reference repository facts by commit SHA or content hash, not by copying them.\n- The manager may display the gate's verdict but cannot override it. This is consistent with the documented boundary in finding 5.\n- The toolkit must still run with no manager present.\n\n## C. Incremental integrated plan for the existing system\n\n1. **Fact-ownership contract and shared IDs.** Document which system owns each fact, and use the same criterion and issue IDs in both.\n2. **Behavioral acceptance slice.** As described in section A.\n3. **Owner receipt view in Agent Kontrol.** Read-only, rendered from repository and gate outputs. For each criterion it shows demonstrated, not demonstrated, or unknown, together with which check and which independent review produced that status.\n4. **Changed-requirement impact.** A PLAN version diff that marks the affected criteria and scenarios as needing re-demonstration.\n5. **Delivery/deployment proof.** Complete the receipt's collection and deployment section, scoped to an explicitly applicable enterprise profile.\n\n**First-user benefit:** the nontechnical owner can see, in plain language, which promised behaviors are actually shown working on the exact source that was reviewed. They no longer have to infer this from closed issues.\n\n**Negative acceptance case:** a criterion is closed via its marker, but its behavioral scenario fails or does not exist.\n- The receipt must show \"not demonstrated.\"\n- The repository gate must not pass on behavioral acceptance.\n- Any attempt by the manager to present the item as done must be refused or shown as conflicting with the gate.\n\n## D. Changes, retractions and one uncertainty\n\n**Retract:**\n- The greenfield framing of increments 1–2.\n- Git-only state, as discussed in section B.\n- The \"read-only dashboard\" increment as a speculative build. The control plane already exists, so the question becomes how it integrates, not whether to build it.\n\n**Revise:**\n- **Authority wording.** My chain said \"owner releases; specialists sign.\" Finding 4 says the existing independent review and the *applicable* authority requirements remain binding. They should be referenced, not replaced by a new blanket human approval rule or by deterministic self-certification. I would reword the release record to say \"required authorities per applicable profile: present or missing.\"\n- **The \"non-obvious alternative.\"** The standalone evidence verifier I proposed largely describes the existing toolkit. The remaining open question is whether the missing behavioral layer, not more orchestration, delivers most of the owner value.\n\n**Keep:** the matched-baseline and held-out evaluation. It still applies unchanged, and finding 6 confirms there is no comparative result yet.\n\n**Important uncertainty:** who",
+    "usage": {
+      "completion_tokens": 2797,
+      "completion_tokens_details": {
+        "audio_tokens": 0,
+        "image_tokens": 0,
+        "reasoning_tokens": 1008
+      },
+      "cost": 0.088116,
+      "cost_details": {
+        "upstream_inference_completions_cost": 0.05594,
+        "upstream_inference_cost": 0.088116,
+        "upstream_inference_prompt_cost": 0.032176
+      },
+      "is_byok": false,
+      "prompt_tokens": 8044,
+      "prompt_tokens_details": {
+        "audio_tokens": 0,
+        "cache_write_tokens": 0,
+        "cached_tokens": 0,
+        "video_tokens": 0
+      },
+      "total_tokens": 10841
+    }
+  }
+]

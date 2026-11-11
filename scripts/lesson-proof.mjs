@@ -109,7 +109,8 @@ const HEADING_RE = /^## (L-(\d{3}))\b/;
 const LIMITS = [
   "Reads Status and Proof only. Every other ledger field is ignored.",
   "Does not edit the ledger and does not reopen issues. unproven is a downgrade candidate in this report.",
-  "A closure with no Proof line is unproven. The Proof value unknown means the replay cannot be evaluated.",
+  "A closure with no Proof line is unproven. The Proof value unknown on a closure means the replay cannot be evaluated.",
+  "A lesson that is not a closure stays not-closure when its Proof line is unknown. That line is not replayed, and --strict does not fail on it.",
   "Non-fix closures are never proven. Accepted-risk sign-off is not a cross-lane ledger field.",
   "Replay executes the entrypoint blob from the stated commit with --fixture. Only bash and node entrypoints are runnable.",
   "The disarm mutation rewrites exactly one LESSON_PROOF_ENFORCE line in that entrypoint file.",

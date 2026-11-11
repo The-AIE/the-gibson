@@ -18,7 +18,7 @@ A missing Status is unknown. Two Status lines, two Proof lines, or two headings 
 
 A closure with no Proof line is unproven. That row is a downgrade candidate in the report. The checker does not skip it and does not rewrite it.
 
-The Proof value `unknown` means the replay cannot be evaluated. That row is unknown, which is not a pass.
+The Proof value `unknown` on a closure means the replay cannot be evaluated. That row is unknown, which is not a pass. A lesson that is not a closure stays `not-closure` when its Proof line is `unknown`. That line is not replayed, and `--strict` does not fail on it.
 
 Any other Proof value must be one line of exactly three fields, separated by one space:
 

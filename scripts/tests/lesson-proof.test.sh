@@ -125,8 +125,11 @@ if (cmd === "tsv") {
         problems.push(lesson.id + " absent proof -> " + lesson.verdict + "/" + lesson.reason);
       }
     }
-    if (lesson.proof === "unknown" && !(lesson.verdict === "unknown" && lesson.reason === "proof-unknown")) {
-      problems.push(lesson.id + " proof unknown -> " + lesson.verdict + "/" + lesson.reason);
+    if (lesson.proof === "unknown" && closure && !(lesson.verdict === "unknown" && lesson.reason === "proof-unknown")) {
+      problems.push(lesson.id + " closure proof unknown -> " + lesson.verdict + "/" + lesson.reason);
+    }
+    if (lesson.proof === "unknown" && lesson.closure === "open" && !(lesson.verdict === "not-closure" && lesson.reason === "status-not-closure")) {
+      problems.push(lesson.id + " open proof unknown -> " + lesson.verdict + "/" + lesson.reason);
     }
     if (lesson.verdict === "proven" && (lesson.closure !== "fix" || !lesson.proof || !lesson.proof.sha)) {
       problems.push(lesson.id + " proven without a fix replay");
@@ -260,6 +263,7 @@ cat > "$SPEC" <<'EOF'
 937|fixed|empty|unproven|proof-malformed|fix|true
 938|fixed "x"|none|unproven|proof-absent|fix|true
 939|closed|none|unproven|proof-absent|nonfix|true
+942|unknown (no sensor yet)|word:unknown|not-closure|status-not-closure|open|false
 EOF
 
 {
@@ -584,7 +588,8 @@ limits=$(header_field "$BIG_JSON" limits)
 if printf '%s\n' "$limits" | grep -F 'does not read fixture bytes' >/dev/null \
   && printf '%s\n' "$limits" | grep -F 'including unknown' >/dev/null \
   && printf '%s\n' "$limits" | grep -F 'copies only the entrypoint blob and the fixture tree' >/dev/null \
-  && printf '%s\n' "$limits" | grep -F 'unproven, not unknown' >/dev/null; then
+  && printf '%s\n' "$limits" | grep -F 'unproven, not unknown' >/dev/null \
+  && printf '%s\n' "$limits" | grep -F 'stays not-closure when its Proof line is unknown' >/dev/null; then
   ok "limits are in the report"
 else
   bad "limits missing from the report"
@@ -1013,7 +1018,8 @@ if grep -F '**Authority:** Non-normative' "$DOC" >/dev/null \
   && grep -F 'unproven, not unknown' "$DOC" >/dev/null \
   && grep -F 'proposed criteria' "$DOC" >/dev/null \
   && grep -F 'not a binding gate' "$DOC" >/dev/null \
-  && grep -F 'does not treat every closure without a landed fix as unproven' "$DOC" >/dev/null; then
+  && grep -F 'does not treat every closure without a landed fix as unproven' "$DOC" >/dev/null \
+  && grep -F 'stays `not-closure` when its Proof line is `unknown`' "$DOC" >/dev/null; then
   ok "doc states the promotion bar and the advisory limit"
 else
   bad "doc is missing a promotion or authority line"
