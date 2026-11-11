@@ -2,7 +2,7 @@
   "schemaId": "gibson.policy.manifest.schema.v1",
   "schemaVersion": "1.0.0",
   "manifestId": "gibson.core.policy",
-  "manifestVersion": "1.1.0",
+  "manifestVersion": "1.2.0",
   "status": "canonical",
   "authority": "generated-views",
   "activated": true,
@@ -22,7 +22,7 @@
         "id": "src.agents-contract",
         "path": "AGENTS.md",
         "digestAlgorithm": "sha256",
-        "digest": "b4de2d130408b9a26255a83b8d8467366a0414dc080a066f5f6b0644ee9343d0",
+        "digest": "01dc630d7db1ce7b4642053a9964009cbb093faadd73e9eb7baf36ad88bc98b1",
         "role": "human-readable-contract"
       },
       {
@@ -36,7 +36,7 @@
         "id": "src.quality-gates",
         "path": "docs/06-quality-gates.md",
         "digestAlgorithm": "sha256",
-        "digest": "6b406bf905f8267cac7d75fe6378c1b06990b772eba2092215c380f8a01ae96e",
+        "digest": "bb25a8c3b02b0ec598dd9d5ce564e329871dd5c9d48d000cea6a5f368fd035a0",
         "role": "explanatory-history"
       },
       {
@@ -151,7 +151,7 @@
       "kind": "human-stop",
       "stop": true,
       "category": "scope-judgment",
-      "summary": "Work grew beyond claimed scope (>2× estimate or undeclared Tier C surface).",
+      "summary": "Work grew beyond claimed scope (>2\u00d7 estimate or undeclared Tier C surface).",
       "severity": false
     },
     {
@@ -159,12 +159,12 @@
       "kind": "review-floor",
       "stop": false,
       "requires": [
-        "E3-exact-head",
+        "independent-approval-exact-head",
         "required-checks"
       ],
       "decision": "D-015",
       "category": "scope-judgment",
-      "summary": "Tier C review floor (D-015): E3 at the exact head + required checks.",
+      "summary": "Tier C review floor: one independent approval at the exact head + required checks.",
       "severity": false,
       "relatedTierIds": [
         "C"
@@ -230,9 +230,9 @@
     {
       "id": "C",
       "definition": "Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data.",
-      "treatment": "Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful.",
+      "treatment": "One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful.",
       "evidenceMinimums": {
-        "reviewDepth": "fan-out",
+        "reviewDepth": "full-lens",
         "adversarialReview": true,
         "humanMergeGate": false,
         "humanGateIds": [
@@ -271,8 +271,8 @@
     },
     {
       "id": "reviewer",
-      "summary": "Multi-lens review with APPROVE or REQUEST_CHANGES; never own generation.",
-      "out": "`VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES` on the exact head; **six lenses** with **file:line** findings",
+      "summary": "One independent read-only review covering applicable risks; never own generation.",
+      "out": "Native GitHub APPROVED or CHANGES_REQUESTED on the exact head; **six lenses** with **file:line** findings (legacy adapters: `VERDICT: APPROVE` / `VERDICT: REQUEST_CHANGES`)",
       "forbidden": "merging; reviewing own generation; rubber-stamp LGTM"
     },
     {
@@ -290,7 +290,7 @@
     {
       "id": "release",
       "summary": "Merge approved green work, verify deploy, clean claim; never rotate secrets.",
-      "out": "merge, verify deploy, smoke, cleanup; **delivery-control** audit → dry-run → human-apply when asked",
+      "out": "merge, verify deploy, smoke, cleanup; **delivery-control** audit \u2192 dry-run \u2192 human-apply when asked",
       "forbidden": "merging Tier C/schema before the G12 floor is met; more than one schema merge in flight; force-push main; rotating secrets (G4); silent `--apply` without dry-run"
     },
     {
@@ -306,21 +306,21 @@
       "b": "reviewer",
       "scope": "same-unit-of-work",
       "symmetric": true,
-      "rationale": "Law 5 / docs/03: builder ≠ reviewer on the same unit of work."
+      "rationale": "Law 5 / docs/03: builder \u2260 reviewer on the same unit of work."
     },
     {
       "a": "builder",
       "b": "ux-evaluator",
       "scope": "same-unit-of-work",
       "symmetric": true,
-      "rationale": "Law 5 / docs/03: builder ≠ ux-evaluator on the same unit of work."
+      "rationale": "Law 5 / docs/03: builder \u2260 ux-evaluator on the same unit of work."
     },
     {
       "a": "reviewer",
       "b": "ux-evaluator",
       "scope": "same-unit-of-work",
       "symmetric": true,
-      "rationale": "docs/03 separation: builder ≠ reviewer ≠ ux-evaluator on the same unit of work."
+      "rationale": "docs/03 separation: builder \u2260 reviewer \u2260 ux-evaluator on the same unit of work."
     }
   ],
   "reviewIndependence": [
@@ -340,16 +340,16 @@
     },
     {
       "id": "ri.tier-b",
-      "description": "Tier B: full-lens independent APPROVE; prefer two fresh-context verdicts in solo-platform mode.",
+      "description": "Tier B: one independent full-lens approval at the exact head.",
       "tierId": "B",
       "minimumRelationship": "independent-approve",
-      "preferredRelationship": "two-fresh-context-approve"
+      "preferredRelationship": "cross-vendor"
     },
     {
       "id": "ri.tier-c",
-      "description": "Tier C review floor (D-015): E3 at the exact head + required checks.",
+      "description": "Tier C: one independent approval of the full introduced range, adversarial cases, and required checks at the exact head.",
       "tierId": "C",
-      "minimumRelationship": "cross-vendor",
+      "minimumRelationship": "independent-approve",
       "preferredRelationship": "cross-vendor",
       "humanGateId": "G12"
     }
@@ -423,7 +423,7 @@
         "G6",
         "G12"
       ],
-      "rationale": "G6 is the billing/pricing/payment human merge gate (Tier C). G12 is the Tier C review floor (D-015): E3 at the exact head plus required checks, not a human merge stop. Both bind to Tier C without elevating A/B."
+      "rationale": "G6 is the billing/pricing/payment human merge gate (Tier C). G12 is the Tier C review floor: independent approval at the exact head plus required checks, not a human merge stop. Both bind to Tier C without elevating A/B."
     }
   ],
   "forkExtensions": {

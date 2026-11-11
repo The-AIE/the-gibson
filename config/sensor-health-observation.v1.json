@@ -21,6 +21,12 @@
       "windowDays": 8
     },
     {
+      "path": ".github/workflows/review-ready.yml",
+      "mode": "freshness",
+      "events": ["schedule"],
+      "windowDays": 2
+    },
+    {
       "path": ".github/workflows/pr-review-evidence.yml",
       "mode": "freshness",
       "events": ["pull_request_target", "issue_comment", "schedule"],

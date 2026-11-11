@@ -10,9 +10,7 @@ nav_order: 9
 > `docs/` are on-demand and non-normative. They must not add, drop, or weaken a
 > rule stated here.
 
-You are one agent in a fleet running the full SDLC on a target repository. This
-file is identical for every runtime. Vendor adapters (`adapters/<vendor>/`) add
-ergonomics; they never change these rules.
+Vendor adapters add ergonomics; they never change these rules.
 
 Marked blocks are generated from `config/policy/gibson-core-v1.json`. That file is not merge authority. `scripts/contract-authority.mjs` fails on drift.
 
@@ -21,15 +19,11 @@ Marked blocks are generated from `config/policy/gibson-core-v1.json`. That file 
 **Fixed mandatory human-readable load (byte-budgeted):** this file only.
 
 **Conditional session-start human-readable load:** when a role is dispatched,
-also load that role's playbook (`playbooks/<role>.md`, replaced by
-`local/playbooks/<role>.md` when present). If no role is named, the resolved
-role is `builder` and `playbooks/builder.md` is that load (including default
-assignment). When a non-role job is dispatched, also load that job's dispatch
-prompt. That playbook is part of session-start load for the session — not
-optional flavor text. Playbooks are role/job dispatch prompts and routing
-mirrors; they must not add, drop, or weaken rules in this file. Fixed load
-and conditional dispatch-prompt load are measured separately (see
-`config/policy/mandatory-read-chain.v1.json`).
+load `playbooks/<role>.md` (`local/playbooks/<role>.md` overrides it).
+Default role: `builder`; load `playbooks/builder.md`. When a non-role job is dispatched,
+load its prompt. Each role/job dispatch prompt mirrors this contract; it cannot
+add, drop or weaken its rules. Fixed and conditional load are measured separately
+in `config/policy/mandatory-read-chain.v1.json`.
 
 **Also at session start (not the fixed byte budget):**
 
@@ -44,9 +38,7 @@ and conditional dispatch-prompt load are measured separately (see
 4. Recall fleet memory (Agent Kontrol `recall`, or `memory/` grep) before
    starting — someone may have solved or claimed this already.
 
-Everything under `docs/`, helper templates, `paper/`, `HOW-IT-WORKS.md`,
-adoption guides, findings, spikes, retrospectives, and historical narrative is
-**on-demand and non-normative**. A linked explanation is not a second contract.
+Explanations, templates and history are **on-demand and non-normative**; linked prose adds no rules.
 
 Machine-readable sources (sensors; the policy manifest is not merge authority):
 
@@ -67,9 +59,7 @@ Machine-readable sources (sensors; the policy manifest is not merge authority):
 
 ## Mission
 
-Move well-scoped work through build, test, review, UX, security, merge, and
-deployment **without stopping** except at this file's human gates. Ship small
-units and leave the harness better.
+Ship small verified units **without stopping** except at the human gates.
 
 ## The Ten Laws
 
@@ -92,8 +82,9 @@ units and leave the harness better.
    the green gate and CI loop. Still never put secrets in memory files. A commit
    that mixes memory with other paths follows Law 4 in full.
 5. **Never grade your own homework.** You may not review, approve, or evaluate
-   work you generated. Review is a different agent; cross-vendor when available;
-   reviewer is read-only and inspects the **exact committed head SHA**.
+   work you generated. One independent reviewer is sufficient for every tier;
+   cross-vendor is preferred, not required. The reviewer is read-only and
+   inspects the full introduced range at the **exact committed head SHA**.
    Evaluation runs against deployed software, not your description of it.
    Missing or broken reviewer **blocks** merge (fail closed).
 6. **Acceptance criteria are the contract.** Work is done when every criterion
@@ -102,7 +93,7 @@ units and leave the harness better.
    `scripts/contract-met.mjs` is the close-keyword sensor.
 7. **Tier C is sacred.** Anything touching money, auth, consent/PII, security
    boundaries, schema, incident alerting, or production data gets adversarial
-   review and the **G12** floor (D-015).
+   cases within that same review and the **G12** floor.
 8. **Report truthfully, loudly, and in the right place.** Status goes to the
    queue (Agent Kontrol) and the PR — failures verbatim, skipped steps named.
    A silent agent is a failed agent. Never mark done what you didn't verify.
@@ -152,20 +143,20 @@ rename, weaken, or negate those obligations.
 
 **Forbidden pairs on the same unit of work** (symmetric): `builder` ≠
 `reviewer`; `builder` ≠ `ux-evaluator`; `reviewer` ≠ `ux-evaluator`.
-Cross-vendor review is the default when more than one runtime is available.
+Cross-vendor review is preferred, not required; independence is mandatory.
 
 A solo/continuous session wears hats **sequentially** with file handoffs and a
-fresh context per hat. `REVIEWER_CMD` still goes cross-vendor for Tier B/C when
+fresh context per hat. `REVIEWER_CMD` must identify an independent reviewer when
 set. Roles still apply.
 
-<!-- pv:roles d=adef63cc3855 -->
+<!-- pv:roles d=d786d4c7c7a4 -->
 | Role | Out | Forbidden |
 |---|---|---|
 | planner | `PLAN.md` with numbered testable acceptance criteria | implementation code |
 | decomposer | dependency-ordered issues, each with a sprint contract | overlapping live claims; issues without contracts |
 | builder | green-gate branch + PR; claim first | canonical checkout; merge; self-review; casual new deps |
 | test-engineer | executable check per criterion; regression test per bug | weakening/deleting failing tests; happy-path-only on Tier C (**adversarial cases required**) |
-| reviewer | `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES` on the exact head; **six lenses** with **file:line** findings | merging; reviewing own generation; rubber-stamp LGTM |
+| reviewer | Native GitHub APPROVED or CHANGES_REQUESTED on the exact head; **six lenses** with **file:line** findings (legacy adapters: `VERDICT: APPROVE` / `VERDICT: REQUEST_CHANGES`) | merging; reviewing own generation; rubber-stamp LGTM |
 | ux-evaluator | graded eval of the **live preview** | grading from the diff or the builder's description |
 | security | **eight-layer** results; adversarial pass on Tier C | softening a hard-fail layer to report-only; **destructive production testing** (DAST vs preview/staging only) |
 | release | merge, verify deploy, smoke, cleanup; **delivery-control** audit → dry-run → human-apply when asked | merging Tier C/schema before the G12 floor is met; more than one schema merge in flight; force-push main; rotating secrets (G4); silent `--apply` without dry-run |
@@ -186,9 +177,15 @@ the smell:
 5. **Performance** — N+1s, unbounded queries, payload size, cache correctness.
 6. **Maintainability** — repo idiom, no dead code, right altitude, tested.
 
-SOLO = one reviewer, all lenses. FAN-OUT (Tier C; schema/middleware/API auth;
-large diffs) = per-lens reviewers plus adversarial refutation. Verdicts end
-`VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`.
+One reviewer covers applicable lenses and Tier C adversarial cases; no mandatory
+fan-out, second reviewer or E-level ladder. Blockers need a reachable trigger,
+wrong outcome and source location or unmet criterion. Optional improvements are notes.
+Native GitHub APPROVED / CHANGES_REQUESTED is normal; legacy adapters use
+`VERDICT: APPROVE` / `VERDICT: REQUEST_CHANGES`, not native approval.
+
+Combine corrections. After two repair rounds the captain chooses finish, split,
+redesign or park. Service failures are separate. Reconcile uncertain attempts;
+preserve caps/history. No approval from sweeps or incomplete review. [Process](docs/review-protocol.md).
 
 ## Security layers (binding)
 
@@ -229,17 +226,14 @@ does not count. Hotfix uses a compressed path with the **same** gates.
 
 ## Human gates (the ONLY reasons to stop)
 
-This list is **closed**. Changing it is Tier C. If the situation is not here,
-keep working — including through test failures, flaky CI, merge conflicts,
-unclear docs, and mid-task errors.
+This list is **closed**. Changing it is Tier C. Otherwise keep working.
 
-When a gate triggers: record state, queue the owner decision, move on to other
-work if any exists. Stopping the whole fleet is last resort for ⛔ **G15** /
-**G16**. Silence on a human gate never auto-approves.
+When gated: record state, queue the decision, continue independent work.
+Only G15/G16 may halt the fleet. Silence never auto-approves.
 
 IDs and summaries (generated view):
 
-<!-- pv:gates d=4d6e02a46d57 -->
+<!-- pv:gates d=18dea4a3caa7 -->
 ### Destructive / irreversible
 
 - **G1** — Schema-destructive change, non-additive migration, or manual write against a production database.
@@ -262,7 +256,7 @@ IDs and summaries (generated view):
 
 - **G10** — Plan is ambiguous or contradictory on a decision that changes what gets built.
 - **G11** — Work grew beyond claimed scope (>2× estimate or undeclared Tier C surface).
-- **G12** — Tier C review floor (D-015): E3 at the exact head + required checks.
+- **G12** — Tier C review floor: one independent approval at the exact head + required checks.
 - **G13** — Two agents want conflicting approaches and coordination failed.
 
 ### Access & security
@@ -289,19 +283,20 @@ enough (the gates decide, not the feeling).
 
 ## Risk tiers
 
-<!-- pv:tiers d=507ba097299d -->
+<!-- pv:tiers d=9ba3819b5984 -->
 | Tier | Definition | Treatment |
 |---|---|---|
 | **A** | Routine: UI copy, isolated components, docs, tests. | Solo independent review; standard gates |
 | **B** | Elevated: shared modules, API routes, data reads, >150 lines or >6 files. | Full-lens review; UX eval if visible |
-| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Fan-out + adversarial review + **G12** floor (E3 at the exact head + required checks, D-015); serialize when stateful. |
+| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | One independent review + adversarial cases + **G12** floor (approval at the exact head + required checks); serialize when stateful. |
 <!-- /pv -->
 
 Tier is assigned at decomposition and re-checked at review. Diffs may drift
 **into** Tier C; they never drift out without a reviewer saying so.
 
-Round caps: `config/review-round-caps.json`. Independence levels (E0-E4):
-`docs/06-quality-gates.md` (#161). Min.: C=E3+checks (D-015), A/B=E2 (D-012).
+Existing runner round caps: `config/review-round-caps.json`; this process change
+does not reset them. All tiers require one independent approval of the current
+head and full introduced range, plus required checks.
 
 ## Commit, PR, and merge
 
@@ -325,10 +320,15 @@ stale review on a new head.
 1. `Closes #<issue>` present when the PR intends to close; all contract criteria
    sensor-verified (`scripts/contract-met.mjs`).
 2. CI green (gate + tests + security hard-fail layers).
-3. Review verdict `VERDICT: APPROVE`; UX eval pass when user-visible.
+3. One genuine native GitHub APPROVED review at the current head and full
+   introduced range; no unresolved blockers. UX eval pass when user-visible.
 4. DCO/`Signed-off-by` survives the squash.
-5. Tier C / schema → **G12** floor met (D-015).
+5. Tier C / schema → **G12** floor met; adversarial cases covered by that reviewer.
 6. Schema PRs: serialized (one in flight), migration file present.
+
+Expected-head merge guard required; verify the resulting target/main checks
+before counting delivery. Source integration does not release a deployment,
+migration, spending, or substantive owner hold.
 
 Purely technical, non-opinion changes need no extra owner click: a passing green
 gate plus an independent reviewer (Law 5) is authorization to merge.
@@ -355,6 +355,4 @@ Contract: `AGENTS.md`; overlay: `local/AGENTS.local.md`; dispatch prompts:
 
 ## On-demand (non-normative)
 
-Load only the area needed; these explain rather than govern. The reading map
-by topic lives in `docs/00-INDEX.md` (§ "On-demand reading by area"). This
-repo's named sensors remain the operative gates.
+Load relevant explanations via `docs/00-INDEX.md`; named sensors remain operative.

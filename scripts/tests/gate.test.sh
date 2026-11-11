@@ -2807,5 +2807,350 @@ unset -f path_dev_ino path_dev_ino_bsd_first
 
 # ---------------------------------------------------------------------------
 echo
+# ---------------------------------------------------------------------------
+echo "diagnostic identities: equal/lower counts never excuse new failures (#375)"
+# ---------------------------------------------------------------------------
+DIAG="$ROOT/diagnostic-identities"
+mkdir -p "$DIAG/.agents"
+git init -q "$DIAG"
+printf 'fixture\n' > "$DIAG/README"
+git -C "$DIAG" add README
+git -C "$DIAG" -c user.name=gibson-test -c user.email=test@gibson.invalid -c commit.gpgsign=false commit -qm base
+DIAG_A='GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","old diagnostic A"]'
+DIAG_B='GIBSON_DIAGNOSTIC_V1 ["src/b.ts",3,4,"RULE_B","old diagnostic B"]'
+DIAG_C='GIBSON_DIAGNOSTIC_V1 ["src/c.ts",5,6,"RULE_C","new diagnostic C"]'
+diag_config() {
+  node - "$DIAG/.agents/gate.json" "$1" "${2:-lint}" <<'JS'
+const fs = require("node:fs");
+const config = {generate:"",typecheck:"",lint:"",test:"",build:""};
+config[process.argv[4]] = process.argv[3];
+fs.writeFileSync(process.argv[2], JSON.stringify(config));
+JS
+}
+diag_baseline() {
+  out=$(cd "$DIAG" && bash "$BASELINE_SH" 2>&1); rc=$?
+  [[ "$rc" -eq 0 ]] || bad "diagnostic baseline setup (rc=$rc): $out"
+}
+diag_expect() {
+  local expected="$1" label="$2" reason="$3"
+  shift 3
+  out=$(cd "$DIAG" && bash "$GATE" "$@" 2>&1); rc=$?
+  if [[ "$expected" -eq 0 && "$rc" -eq 0 ]] && echo "$out" | grep 'GREEN' >/dev/null; then
+    ok "$label"
+  elif [[ "$expected" -ne 0 && "$rc" -ne 0 ]] \
+      && echo "$out" | grep -E "$reason" >/dev/null && ! echo "$out" | grep 'GREEN' >/dev/null; then
+    ok "$label"
+  else
+    bad "$label (rc=$rc): $out"
+  fi
+}
+# Actual reported scenario, using both production scripts and unstructured lint.
+diag_config 'cat output.txt; exit 1'
+printf 'error: old diagnostic\n' > "$DIAG/output.txt"
+diag_baseline
+printf 'error: different new diagnostic\n' > "$DIAG/output.txt"
+diag_expect 1 "reported one-old/one-new lint fixture cannot return GREEN" 'opaque diagnostics'
+# Same opaque output is insufficient too: summary identity is not failure identity.
+printf '1 failed\n' > "$DIAG/output.txt"
+diag_baseline
+diag_expect 1 "unchanged summary-only red baseline fails closed" 'opaque diagnostics'
+
+printf '%s\n' "$DIAG_A" "$DIAG_B" > "$DIAG/output.txt"
+diag_baseline
+cp "$DIAG/.gibson-baseline.json" "$DIAG/valid-baseline.json"
+if node - "$DIAG/.gibson-baseline.json" <<'JS'
+const b=require(process.argv[2]);
+process.exit(b.diagnostics.version===1 && b.diagnostics.lint.length===2 && b.failures.lint===1 ? 0 : 1);
+JS
+then ok "writer stores versioned complete identities even when count heuristic sees one";
+else bad "writer diagnostic envelope missing or malformed"; fi
+diag_expect 0 "unchanged named diagnostic multiset passes" ''
+printf '%s\n' "$DIAG_B" "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 0 "diagnostic order does not matter" ''
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 0 "removing a known diagnostic passes" ''
+printf '%s\n' "$DIAG_C" > "$DIAG/output.txt"
+diag_expect 1 "fixing two old errors and adding one new error fails" 'new diagnostic identity'
+printf '%s\n' "$DIAG_A" "$DIAG_C" > "$DIAG/output.txt"
+diag_expect 1 "mixed fix plus regression with equal count fails" 'new diagnostic identity'
+for changed in \
+  'GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","different detail under same header"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["src/other.ts",1,2,"RULE_A","old diagnostic A"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_NEW","old diagnostic A"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["src/a.ts",2,2,"RULE_A","old diagnostic A"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","old diagnostic A\nnew continuation detail"]'; do
+  printf '%s\n' "$changed" > "$DIAG/output.txt"
+  diag_expect 1 "changed path/code/location/message/detail is a new identity: $changed" 'new diagnostic identity'
+done
+printf '%s\n' "$DIAG_A" "$DIAG_A" > "$DIAG/output.txt"
+diag_baseline
+printf '%s\n' "$DIAG_A" "$DIAG_A" "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 1 "increasing duplicate diagnostic multiplicity fails" 'increased multiplicity'
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 0 "decreasing duplicate diagnostic multiplicity passes" ''
+cp "$DIAG/valid-baseline.json" "$DIAG/.gibson-baseline.json"
+for opaque in '' '1 failed' 'GIBSON_DIAGNOSTIC_V2 ["x",null,null,"X","unknown"]' \
+  'GIBSON_DIAGNOSTIC_V1 {"summary":"1 failed"}' \
+  'GIBSON_DIAGNOSTIC_V1 ["x",null,1,"X","bad position pair"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["x",0,1,"X","invalid line"]' \
+  'GIBSON_DIAGNOSTIC_V1 ["x",1,1,"X","message","unclassified extra"]'; do
+  printf '%s\n' "$opaque" > "$DIAG/output.txt"
+  diag_expect 1 "empty/summary/unknown/malformed failing output is opaque: $opaque" 'opaque diagnostics'
+done
+printf '%s\nadditional unclassified detail\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 1 "known header plus new unclassified detail fails closed" 'opaque diagnostics'
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_config 'cat ./output.txt; exit 1'
+diag_expect 1 "changed red command cannot borrow diagnostic evidence" 'command/exit binding changed'
+diag_config 'cat output.txt; exit 2'
+diag_expect 1 "changed nonzero exit cannot borrow diagnostic evidence" 'command/exit binding changed'
+diag_config ''
+diag_expect 1 "disabling a red baseline command is not diagnostic removal" 'command disabled'
+diag_config 'cat output.txt; exit 0'
+diag_expect 1 "explicit failure record contradicts candidate exit 0" 'contradicts exit 0'
+prior_diag_bytes=$(cat "$DIAG/.gibson-baseline.json")
+out=$(cd "$DIAG" && bash "$BASELINE_SH" 2>&1); rc=$?
+if [[ "$rc" -ne 0 && "$(cat "$DIAG/.gibson-baseline.json")" == "$prior_diag_bytes" ]] \
+    && echo "$out" | grep 'contradict' >/dev/null; then
+  ok "baseline writer rejects contradictory exit 0 without replacing authority"
+else bad "contradictory baseline accepted or authority replaced (rc=$rc): $out"; fi
+# Genuine green removal is allowed; no diagnostic oracle is needed for exit 0.
+printf 'clean\n' > "$DIAG/output.txt"
+diag_expect 0 "fully fixing known failures passes with exit 0" ''
+diag_config 'cat output.txt; exit 1'
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+node - "$DIAG/valid-baseline.json" "$DIAG/.gibson-baseline.json" <<'JS'
+const fs=require("node:fs"); const b=JSON.parse(fs.readFileSync(process.argv[2]));
+delete b.diagnostics; fs.writeFileSync(process.argv[3],JSON.stringify(b));
+JS
+diag_expect 1 "legacy count-only red baseline cannot excuse red" 'legacy baseline'
+diag_config 'true'
+diag_expect 0 "legacy baseline still allows an all-green candidate" ''
+# All present but invalid evidence is rejected before running a configured command.
+diag_config 'touch should-not-run; exit 1'
+for shape in version missing-step record position empty-red exit-binding green-record opaque-green extra-field; do
+  node - "$DIAG/valid-baseline.json" "$DIAG/.gibson-baseline.json" "$shape" <<'JS'
+const fs=require("node:fs"); const b=JSON.parse(fs.readFileSync(process.argv[2]));
+switch(process.argv[4]) {
+  case "version": b.diagnostics.version=2; break;
+  case "missing-step": delete b.diagnostics.test; break;
+  case "record": b.diagnostics.lint=[{}]; break;
+  case "position": b.diagnostics.lint[0][1]=null; break;
+  case "empty-red": b.diagnostics.lint=[]; break;
+  case "exit-binding": b.exit_codes.lint="1"; break;
+  case "green-record": b.exit_codes.lint=0; break;
+  case "opaque-green": b.diagnostics.test=null; break;
+  case "extra-field": b.diagnostics.unknown=[]; break;
+}
+fs.writeFileSync(process.argv[3],JSON.stringify(b));
+JS
+  diag_expect 1 "malformed baseline diagnostic evidence fails before commands: $shape" 'invalid baseline diagnostic evidence'
+  [[ ! -e "$DIAG/should-not-run" ]] || bad "malformed evidence ran a configured command: $shape"
+done
+# Diagnostic identity and test deletion are independent controls. A metric waiver
+# may authorize exactly the count change but must never authorize a new failure.
+diag_config 'cat output.txt; exit 1' test
+printf '%s\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' "$DIAG_A" > "$DIAG/output.txt"
+rm "$DIAG/.gibson-baseline.json"
+diag_baseline
+diag_expect 0 "unchanged structured test failure retains independent metrics" ''
+printf '%s\nGIBSON_TEST_METRICS total=9 skipped=0 todo=0\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 1 "known diagnostic cannot hide a test-count reduction" 'test-integrity'
+diag_expect 0 "exact test-removal waiver works only for unchanged diagnostics" '' --waiver-text 'Test-integrity: removed 1 for obsolete fixture'
+printf '%s\nGIBSON_TEST_METRICS total=9 skipped=0 todo=0\n' "$DIAG_C" > "$DIAG/output.txt"
+diag_expect 1 "test-removal waiver never excuses a new diagnostic" 'new diagnostic identity' --waiver-text 'Test-integrity: removed 1 for obsolete fixture'
+printf '%s\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0 extra=detail\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 1 "unclassified metric-line detail cannot hide a new failure" 'opaque diagnostics'
+# Raw output must be validated before a Bash variable or replacement UTF-8
+# decoder can change its diagnostic identity (internal advisory, #375).
+diag_config 'cat output.txt; exit 1'
+rm -f "$DIAG/.gibson-baseline.json"
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_baseline
+node - "$DIAG/output.txt" <<'JS'
+require("node:fs").writeFileSync(process.argv[2], Buffer.from('GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","old diagnostic \0A"]\n'));
+JS
+diag_expect 1 "raw NUL cannot alias a known diagnostic" 'invalid text capture'
+prior_capture_bytes=$(cat "$DIAG/.gibson-baseline.json")
+out=$(cd "$DIAG" && bash "$BASELINE_SH" 2>&1); rc=$?
+if [[ "$rc" -ne 0 && "$(cat "$DIAG/.gibson-baseline.json")" == "$prior_capture_bytes" ]] \
+    && echo "$out" | grep 'invalid text capture' >/dev/null; then
+  ok "writer refuses raw NUL without replacing prior authority"
+else bad "writer normalized NUL or replaced authority (rc=$rc): $out"; fi
+node - "$DIAG/output.txt" <<'JS'
+require("node:fs").writeFileSync(process.argv[2], 'GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","old diagnostic \ufffdA"]\n');
+JS
+diag_baseline
+diag_expect 0 "valid U+FFFD diagnostic round-trips without replacement aliasing" ''
+cp "$DIAG/.gibson-baseline.json" "$DIAG/valid-byte-baseline.json"
+node - "$DIAG/output.txt" <<'JS'
+const fs=require("node:fs");
+fs.writeFileSync(process.argv[2], Buffer.concat([Buffer.from('GIBSON_DIAGNOSTIC_V1 ["src/a.ts",1,2,"RULE_A","old diagnostic '),Buffer.from([0x80]),Buffer.from('A"]\n')]));
+JS
+diag_expect 1 "malformed UTF-8 cannot alias valid U+FFFD" 'invalid text capture'
+prior_capture_bytes=$(cat "$DIAG/.gibson-baseline.json")
+out=$(cd "$DIAG" && bash "$BASELINE_SH" 2>&1); rc=$?
+if [[ "$rc" -ne 0 && "$(cat "$DIAG/.gibson-baseline.json")" == "$prior_capture_bytes" ]] \
+    && echo "$out" | grep 'invalid text capture' >/dev/null; then
+  ok "writer refuses malformed UTF-8 without replacing prior authority"
+else bad "writer normalized UTF-8 or replaced authority (rc=$rc): $out"; fi
+# A BOM is valid UTF-8 but remains an unknown prefix; capture must not strip it.
+node - "$DIAG/output.txt" "$DIAG_A" <<'JS'
+require("node:fs").writeFileSync(process.argv[2], '\ufeff'+process.argv[3]+'\n');
+JS
+diag_expect 1 "capture preserves unknown BOM prefixes" 'opaque diagnostics'
+# Both initial baseline reads and live byte comparisons retain their authority.
+diag_config 'touch should-not-run; cat output.txt; exit 1'
+for binary_kind in nul utf8; do
+  node - "$DIAG/valid-byte-baseline.json" "$DIAG/.gibson-baseline.json" "$binary_kind" <<'JS'
+const fs=require("node:fs");let b=fs.readFileSync(process.argv[2]);
+if(process.argv[4]==="nul") b=Buffer.concat([b.subarray(0,1),Buffer.from([0]),b.subarray(1)]);
+else {const i=b.indexOf(Buffer.from('\ufffd'));b=Buffer.concat([b.subarray(0,i),Buffer.from([0x80]),b.subarray(i+3)]);}
+fs.writeFileSync(process.argv[3],b);
+JS
+  rm -f "$DIAG/should-not-run"
+  diag_expect 1 "invalid raw baseline refused before commands: $binary_kind" 'baseline capture'
+  [[ ! -e "$DIAG/should-not-run" ]] || bad "invalid baseline ran a command: $binary_kind"
+done
+rm -f "$DIAG/.gibson-baseline.json"
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+cat > "$DIAG/mutate-baseline.js" <<'JS'
+const fs=require("node:fs"); const b=fs.readFileSync('.gibson-baseline.json');
+fs.writeFileSync('.gibson-baseline.json',Buffer.concat([b.subarray(0,1),Buffer.from([0]),b.subarray(1)]));
+JS
+diag_config 'if [ -f mutate-baseline ]; then node mutate-baseline.js; fi; cat output.txt; exit 1'
+diag_baseline
+touch "$DIAG/mutate-baseline"
+diag_expect 1 "NUL-only baseline mutation is authority drift" 'authority drift'
+rm -f "$DIAG/mutate-baseline" "$DIAG/.gibson-baseline.json"
+# Producer status 125 is ordinary producer evidence, not parser failure.
+diag_config 'cat output.txt; exit 125'
+node - "$DIAG/output.txt" <<'JS'
+const id=["src/unicode.ts",null,null,"RULE_TEXT","π — GIBSON_CAPTURE_TEXT_V1\nGIBSON_CAPTURE_STATUS_V1:0:0"];
+require("node:fs").writeFileSync(process.argv[2],"GIBSON_DIAGNOSTIC_V1 "+JSON.stringify(id)+"\n");
+JS
+diag_baseline
+diag_expect 0 "Unicode and frame-like payload preserve producer exit 125" ''
+diag_config 'cat output.txt; exit 0'
+printf 'GIBSON_CAPTURE_TEXT_V1\nclean\nGIBSON_CAPTURE_STATUS_V1:125:9\n' > "$DIAG/output.txt"
+diag_expect 0 "payload footer cannot forge a nonzero producer/parser status" ''
+diag_config 'cat output.txt; exit 1'
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_baseline
+printf 'GIBSON_CAPTURE_TEXT_V1\n%s\n' "$DIAG_A" > "$DIAG/output.txt"
+diag_expect 1 "only the outer capture frame is removed" 'opaque diagnostics'
+# Even a parser that emits a valid-looking partial frame then fails must never
+# authorize GREEN or overwrite a baseline with opaque evidence.
+CAPTURE_REAL_NODE=$(command -v node)
+CAPTURE_BAD_BIN="$DIAG/capture-bad-bin"
+mkdir -p "$CAPTURE_BAD_BIN"
+cat > "$CAPTURE_BAD_BIN/node" <<'NODE_SHIM'
+#!/usr/bin/env bash
+if [[ "${3:-}" == capture-text && -n "${GIBSON_CAPTURE_SKIP_FIRST:-}" && ! -e "$GIBSON_CAPTURE_SKIP_FIRST" ]]; then
+  : > "$GIBSON_CAPTURE_SKIP_FIRST"
+  exec "$GIBSON_CAPTURE_REAL_NODE" "$@"
+fi
+if [[ "${3:-}" == capture-text ]]; then
+  cat >/dev/null
+  printf 'GIBSON_CAPTURE_TEXT_V1\nclean'
+  exit 9
+fi
+exec "$GIBSON_CAPTURE_REAL_NODE" "$@"
+NODE_SHIM
+chmod +x "$CAPTURE_BAD_BIN/node"
+diag_config 'printf clean'
+GIBSON_CAPTURE_REAL_NODE="$CAPTURE_REAL_NODE" PATH="$CAPTURE_BAD_BIN:$PATH" \
+  diag_expect 1 "partial capture from a failed parser cannot turn green exit 0 into GREEN" 'invalid text capture' --baseline absent-capture-baseline.json
+prior_capture_bytes=$(cat "$DIAG/.gibson-baseline.json")
+# Let the prior-authority read succeed so this reaches the configured lint
+# capture. Requiring its message keeps an earlier refusal from masking a bug.
+rm -f "$DIAG/capture-skip-first"
+out=$(cd "$DIAG" && GIBSON_CAPTURE_SKIP_FIRST="$DIAG/capture-skip-first" \
+  GIBSON_CAPTURE_REAL_NODE="$CAPTURE_REAL_NODE" PATH="$CAPTURE_BAD_BIN:$PATH" bash "$BASELINE_SH" 2>&1); rc=$?
+if [[ "$rc" -ne 0 && "$(cat "$DIAG/.gibson-baseline.json")" == "$prior_capture_bytes" ]] \
+    && echo "$out" | grep 'lint invalid text capture' >/dev/null; then
+  ok "failed parser partial stdout cannot replace baseline authority"
+else bad "partial parser failure replaced baseline (rc=$rc): $out"; fi
+
+# The baseline writer must parse with the oracle frozen BEFORE the command:
+# a configured step can rewrite helpers on disk despite child-shell isolation.
+mkdir -p "$DIAG/oracle"
+cp "$GATE" "$DIAG/oracle/gate.sh"
+cp "$BASELINE_SH" "$DIAG/oracle/gate-baseline.sh"
+cat > "$DIAG/poison-helper.sh" <<'POISON'
+#!/usr/bin/env bash
+printf '%s\n' '#!/usr/bin/env bash' 'printf '\''process.stdout.write("null")'\''' > oracle/gate.sh
+cat output.txt
+exit 1
+POISON
+diag_config 'bash poison-helper.sh'
+printf '%s\n' "$DIAG_A" > "$DIAG/output.txt"
+rm "$DIAG/.gibson-baseline.json"
+out=$(cd "$DIAG" && bash oracle/gate-baseline.sh 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && node - "$DIAG/.gibson-baseline.json" <<'JS'
+const b=require(process.argv[2]);
+process.exit(b.diagnostics.lint?.length===1 && b.diagnostics.lint[0][3]==="RULE_A" ? 0 : 1);
+JS
+then ok "baseline diagnostic oracle is frozen before helper rewrite";
+else bad "rewritten helper controlled diagnostic evidence (rc=$rc): $out"; fi
+
+# A missing capture dependency must identify the remedy on stderr, while the
+# real gate stays RED and never runs a captured command without byte validation.
+NO_NODE_DIR="$ROOT/no-node-capture"
+NO_NODE_BASH=$(command -v bash)
+mkdir -p "$NO_NODE_DIR/bin" "$NO_NODE_DIR/work"
+for capture_tool in bash cat dirname env git grep sed stat tr wc; do
+  capture_tool_path=$(command -v "$capture_tool")
+  ln -s "$capture_tool_path" "$NO_NODE_DIR/bin/$capture_tool"
+done
+out=$(cd "$NO_NODE_DIR/work" && PATH="$NO_NODE_DIR/bin" \
+  GIBSON_GENERATE=: GIBSON_TYPECHECK='printf unsafe > should-not-run' \
+  GIBSON_LINT=: GIBSON_TEST=: GIBSON_BUILD=: \
+  "$NO_NODE_BASH" "$GATE" --no-baseline-ok --baseline absent.json \
+  2>"$NO_NODE_DIR/stderr"); rc=$?
+if [[ "$rc" -ne 0 ]] && ! printf '%s' "$out" | grep 'GREEN' >/dev/null \
+    && [[ ! -e "$NO_NODE_DIR/work/should-not-run" ]]; then
+  ok "missing node keeps the real gate RED without running unvalidated commands"
+else bad "missing node ran a command or passed (rc=$rc): $out"; fi
+if grep 'node is required' "$NO_NODE_DIR/stderr" >/dev/null \
+    && grep 'install Node.js' "$NO_NODE_DIR/stderr" >/dev/null \
+    && ! printf '%s' "$out" | grep 'install Node.js' >/dev/null; then
+  ok "missing node names the dependency and installation remedy on stderr"
+else bad "missing node did not report its stderr installation remedy (rc=$rc): $(cat "$NO_NODE_DIR/stderr")"; fi
+
+# The writer starts with Node available, reads the existing baseline, then
+# generate removes only this fixture's shim before configured-step capture.
+BASELINE_NO_NODE_DIR="$ROOT/baseline-no-node-capture"
+mkdir -p "$BASELINE_NO_NODE_DIR/bin" "$BASELINE_NO_NODE_DIR/work"
+for capture_tool in bash cat dirname env git grep rm sed stat tr wc; do
+  capture_tool_path=$(command -v "$capture_tool")
+  ln -s "$capture_tool_path" "$BASELINE_NO_NODE_DIR/bin/$capture_tool"
+done
+cat > "$BASELINE_NO_NODE_DIR/bin/node" <<'NODE_SHIM'
+#!/usr/bin/env bash
+exec "$GIBSON_BASELINE_REAL_NODE" "$@"
+NODE_SHIM
+chmod +x "$BASELINE_NO_NODE_DIR/bin/node"
+cp "$DIAG/valid-baseline.json" "$BASELINE_NO_NODE_DIR/work/.gibson-baseline.json"
+baseline_before_node_loss=$(cat "$BASELINE_NO_NODE_DIR/work/.gibson-baseline.json")
+out=$(cd "$BASELINE_NO_NODE_DIR/work" && PATH="$BASELINE_NO_NODE_DIR/bin" \
+  GIBSON_BASELINE_REAL_NODE="$CAPTURE_REAL_NODE" \
+  GIBSON_BASELINE_NODE_SHIM="$BASELINE_NO_NODE_DIR/bin/node" \
+  GIBSON_GENERATE='rm -- "$GIBSON_BASELINE_NODE_SHIM"' \
+  GIBSON_TYPECHECK='printf unsafe > should-not-run' \
+  GIBSON_LINT=: GIBSON_TEST=: GIBSON_BUILD=: \
+  "$NO_NODE_BASH" "$BASELINE_SH" 2>"$BASELINE_NO_NODE_DIR/stderr"); rc=$?
+if [[ "$rc" -ne 0 && ! -e "$BASELINE_NO_NODE_DIR/bin/node" \
+    && ! -e "$BASELINE_NO_NODE_DIR/work/should-not-run" \
+    && "$(cat "$BASELINE_NO_NODE_DIR/work/.gibson-baseline.json")" == "$baseline_before_node_loss" ]] \
+    && grep 'typecheck invalid text capture' "$BASELINE_NO_NODE_DIR/stderr" >/dev/null; then
+  ok "writer losing node after startup preserves authority and never runs an unvalidated step"
+else bad "writer node-loss path ran a step, changed authority, or missed step capture (rc=$rc): $(cat "$BASELINE_NO_NODE_DIR/stderr")"; fi
+if grep 'node is required' "$BASELINE_NO_NODE_DIR/stderr" >/dev/null \
+    && grep 'install Node.js' "$BASELINE_NO_NODE_DIR/stderr" >/dev/null \
+    && ! printf '%s' "$out" | grep 'install Node.js' >/dev/null; then
+  ok "writer losing node after startup reports the dependency and remedy on stderr"
+else bad "writer node-loss path omitted its stderr installation remedy (rc=$rc): $(cat "$BASELINE_NO_NODE_DIR/stderr")"; fi
+
 echo "gate.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
