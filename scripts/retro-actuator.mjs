@@ -159,7 +159,13 @@ function parseRfc3339(value) {
   const second = Number(match[6]);
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
   if (hour > 23 || minute > 59 || second > 60) return null;
-  let ms = Date.UTC(year, month - 1, day, hour, minute, second);
+  let fractionMs = 0;
+  if (match[7]) {
+    const msDigits = `${match[7].slice(1)}000`.slice(0, 3);
+    fractionMs = Number(msDigits);
+    if (!Number.isInteger(fractionMs)) return null;
+  }
+  let ms = Date.UTC(year, month - 1, day, hour, minute, second) + fractionMs;
   const check = new Date(ms);
   if (
     check.getUTCFullYear() !== year ||
@@ -501,7 +507,7 @@ function validateEvent(obj, lineNo) {
     "detector-status",
   ]);
   if (!kinds.has(kind)) return { ok: false, reason: `line ${lineNo} has an unknown kind` };
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(obj.repo || "")) {
+  if (typeof obj.repo !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(obj.repo)) {
     return { ok: false, reason: `line ${lineNo} has a bad repo` };
   }
   if (parseRfc3339(obj.observed_at) === null) {
@@ -961,7 +967,6 @@ function onFailure(state, event, id, nowMs, report, opts) {
   if (existing) {
     noteEvidence(existing, event);
     const fresh = addAttempt(existing, event, id);
-    if (!fresh) return;
     if (existing.state === "effective" || existing.state === "deployed") {
       if (failurePredatesDeployment(existing, event.observed_at)) return;
       const from = existing.state;
@@ -971,6 +976,7 @@ function onFailure(state, event, id, nowMs, report, opts) {
       maybeIssue(existing, nowMs, report, opts, "escape");
       return;
     }
+    if (!fresh) return;
     if (existing.state === "reopened") {
       maybeIssue(existing, nowMs, report, opts, "escape");
     }
@@ -1136,6 +1142,14 @@ function fillReport(state, report) {
       revoked_claims: inc.revoked_claims,
     }))
     .sort((a, b) => (a.incident_key < b.incident_key ? -1 : 1));
+  const unresolvedUnknown = Object.values(state.incidents).some(
+    (inc) => inc.escalation && inc.escalation.human === "unknown"
+  );
+  if (unresolvedUnknown && report.evaluation !== "UNKNOWN") {
+    report.evaluation = "UNKNOWN";
+    report.unknown_reason = "escalation human is unknown";
+    report.alerts.push({ reason: "triage-alert", detail: "escalation human is unknown" });
+  }
 }
 
 function applyIssues(state, report, persist) {
@@ -1154,25 +1168,41 @@ function applyIssues(state, report, persist) {
       if (request.status !== "planned") continue;
       request.status = "creating";
       request.body = issueBody(inc);
-      // Disk must show "creating" before gh runs. A crash after the issue
-      // exists otherwise leaves "planned" and the next --apply opens a duplicate.
-      persist();
+      // The body file exists before the save. If the save throws, remove it
+      // and leave the request unstarted. Disk must show "creating" before gh
+      // runs, or a crash after the issue exists leaves "planned" and the next
+      // --apply opens a duplicate.
       const bodyPath = join(
         tmpdir(),
         `retro-actuator-body-${process.pid}-${randomBytes(4).toString("hex")}.txt`
       );
       writeFileSync(bodyPath, request.body, { mode: 0o600 });
-      const result = spawnSync(
-        "gh",
-        ["issue", "create", "--repo", inc.repo, "--title", request.title, "--body-file", bodyPath],
-        { encoding: "utf8" }
-      );
-      report.gh_invocations += 1;
       try {
-        unlinkSync(bodyPath);
-      } catch {
-        /* temp body already gone */
+        persist();
+      } catch (error) {
+        try {
+          unlinkSync(bodyPath);
+        } catch {
+          /* temp body already gone */
+        }
+        request.status = "planned";
+        throw error;
       }
+      let result;
+      try {
+        result = spawnSync(
+          "gh",
+          ["issue", "create", "--repo", inc.repo, "--title", request.title, "--body-file", bodyPath],
+          { encoding: "utf8" }
+        );
+      } finally {
+        try {
+          unlinkSync(bodyPath);
+        } catch {
+          /* temp body already gone */
+        }
+      }
+      report.gh_invocations += 1;
       if (!result || result.error || result.status !== 0) {
         // A child that never started cannot have created an issue. A child
         // that started and then failed may have created one and lost the reply.

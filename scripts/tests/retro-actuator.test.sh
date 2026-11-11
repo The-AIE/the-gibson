@@ -730,6 +730,9 @@ write_ci "$TMP/esc.jsonl" a7 "$SHA_F" "$NOW14" "$RAW88" det-1
 check "a later run keeps the named escalation" 0 \
   'r.evaluation==="complete" && r.incidents[0].escalation.human==="duty-human" && r.incidents[0].automatic_requeue==="blocked" && r.incidents[0].real_issue_requests===2' \
   --events "$TMP/esc.jsonl" --state "$LIFE" --now "$NOW14" --root "$REPO_ROOT" --repair-budget 2
+check "a quiet replay keeps a named escalation complete" 0 \
+  'r.evaluation==="complete" && r.unknown_reason===null && r.issue_requests.length===0 && r.escalations.length===0 && r.incidents[0].escalation.human==="duty-human" && r.incidents[0].real_issue_requests===2' \
+  --events "$TMP/esc.jsonl" --state "$LIFE" --now "$NOW14" --root "$REPO_ROOT" --repair-budget 2
 
 write_override "$TMP/step.jsonl" "$LIFE" unknown "$NOW14"
 check "unknown override actor is rejected" 1 \
@@ -763,6 +766,9 @@ check "unnamed exhaustion is UNKNOWN and blocks requeue" 3 \
 write_ci "$TMP/esc.jsonl" a4 "$SHA_D" "$NOW7" "$RAW88" det-1
 check "unnamed exhaustion does not open a second issue" 3 \
   'r.incidents[0].real_issue_requests===1 && r.incidents[0].automatic_requeue==="blocked" && r.evaluation==="UNKNOWN"' \
+  --events "$TMP/esc.jsonl" --state "$B1" --now "$NOW7" --root "$REPO_ROOT" --repair-budget 1
+check "a quiet replay of an unknown escalation stays UNKNOWN" 3 \
+  'r.evaluation==="UNKNOWN" && r.unknown_reason==="escalation human is unknown" && r.issue_requests.length===0 && r.escalations.length===0 && r.incidents[0].escalation.human==="unknown" && r.incidents[0].real_issue_requests===1' \
   --events "$TMP/esc.jsonl" --state "$B1" --now "$NOW7" --root "$REPO_ROOT" --repair-budget 1
 
 printf '\n%s\n' "=== drift and locks ==="
@@ -1001,6 +1007,39 @@ expect_state "state after gh is created" "$TMP/snap-apply.json" \
 GH_MODE=ok
 unset RETRO_STATE_PATH RETRO_STATE_SNAPSHOT
 
+printf '\n%s\n' "=== failed save ==="
+check "persist-failure seed stays planned" 0 \
+  'r.issue_requests[0].action==="would-create" && r.gh_invocations===0' \
+  --events "$FIX/two-attempts.jsonl" --state "$TMP/persist-short.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+LONG_BASE=$(node -e 'process.stdout.write("p".repeat(240))')
+cp "$TMP/persist-short.json" "$TMP/$LONG_BASE"
+body_count() {
+  node --input-type=module -e '
+import { readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+const n = readdirSync(tmpdir()).filter((name) => name.startsWith("retro-actuator-body-")).length;
+process.stdout.write(String(n));
+'
+}
+bodies_before=$(body_count)
+: > "$GH_LOG"
+check "a failed save does not start gh and stays planned" 1 \
+  'r.evaluation==="UNKNOWN" && r.unknown_reason==="state could not be saved" && r.gh_invocations===0' \
+  --apply --events "$FIX/two-attempts.jsonl" --state "$TMP/$LONG_BASE" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+expect_state "disk stays planned when the save fails" "$TMP/$LONG_BASE" \
+  'const req=Object.values(s.incidents)[0].issue_requests[0]; req.status==="planned" && req.gh_url==null'
+if [[ ! -s "$GH_LOG" ]]; then
+  ok "failed save did not call gh"
+else
+  bad "failed save did not call gh"
+fi
+bodies_after=$(body_count)
+if [[ "$bodies_before" == "$bodies_after" ]]; then
+  ok "failed save removed the body file"
+else
+  bad "failed save removed the body file (before=$bodies_before after=$bodies_after)"
+fi
+
 printf '\n%s\n' "=== long incident keys ==="
 LONG_RAW=$TMP/long-raw.txt
 SIG_LIB=$REPO_ROOT/scripts/lib/retro-signature.mjs
@@ -1100,6 +1139,19 @@ if grep -q 'node scripts/retro-actuator.mjs' "$WF" \
 else
   bad "workflow invokes the actuator in dry-run"
 fi
+WF_TEXT=$(cat "$WF")
+smoke_step=${WF_TEXT#*name: Scheduled smoke}
+smoke_step=${smoke_step%%name: Dry-run*}
+dispatch_step=${WF_TEXT#*name: Dry-run the retro actuator}
+if [[ "$smoke_step" == *"github.event_name == 'schedule'"* \
+  && "$smoke_step" == *"retro-actuator-smoke.jsonl"* \
+  && "$smoke_step" != *"retro-actuator-events.jsonl"* \
+  && "$dispatch_step" == *"github.event_name == 'workflow_dispatch'"* \
+  && "$dispatch_step" == *"retro-actuator-events.jsonl"* ]]; then
+  ok "schedule evaluates a smoke event and dispatch reads the events file"
+else
+  bad "schedule evaluates a smoke event and dispatch reads the events file"
+fi
 run_apply=0
 while IFS= read -r run_line; do
   case "$run_line" in
@@ -1151,6 +1203,47 @@ write_ci "$TMP/boundary-fail.jsonl" boundary1 "$SHA_E" "2026-01-01T00:00:03Z" "$
 check "a failure at the deployment boundary reopens" 0 \
   'r.incidents[0].state==="reopened" && r.incidents[0].revoked_claims.some((c) => c.claim==="effective")' \
   --events "$TMP/boundary-fail.jsonl" --state "$HIST" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+
+SAME=$TMP/same-attempt.json
+check "same-attempt seed" 0 'r.incidents.length===1 && r.incidents[0].distinct_attempts===2' \
+  --events "$FIX/two-attempts.jsonl" --state "$SAME" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+walk_to_effective "$SAME" 2 duty-human 02
+write_ci "$TMP/same-old.jsonl" a1 "$SHA_D" "2026-01-01T00:00:02Z" "$RAW88" det-1
+check "a known attempt before deployment stays effective" 0 \
+  'r.evaluation==="complete" && r.incidents[0].state==="effective" && r.incidents[0].distinct_attempts===2 && r.issue_requests.length===0 && r.incidents[0].revoked_claims.length===0' \
+  --events "$TMP/same-old.jsonl" --state "$SAME" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_ci "$TMP/same-new.jsonl" a1 "$SHA_E" "$NOW1" "$RAW88" det-1
+check "a known attempt after deployment reopens without a new attempt" 0 \
+  'r.incidents[0].state==="reopened" && r.incidents[0].distinct_attempts===2 && r.incidents[0].revoked_claims.some((c) => c.claim==="effective")' \
+  --events "$TMP/same-new.jsonl" --state "$SAME" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+
+FRAC=$TMP/frac.json
+DEPLOY_FRAC='{"remediation_sha":"cccccccccccccccccccccccccccccccccccccccc","workers_evidence_ref":"workers-ran-sha-ref","recorded_at":"2026-01-01T00:00:03.900Z"}'
+check "fractional seed" 0 'r.incidents.length===1 && r.incidents[0].state==="detected"' \
+  --events "$FIX/two-attempts.jsonl" --state "$FRAC" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_life "$TMP/frac-life.jsonl" "$FRAC" triaged "2026-01-01T00:10:01Z" '{}'
+check "fractional walk triaged" 0 'r.incidents[0].state==="triaged"' \
+  --events "$TMP/frac-life.jsonl" --state "$FRAC" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_life "$TMP/frac-life.jsonl" "$FRAC" artifact-verified "2026-01-01T00:10:02Z" '{}'
+check "fractional walk artifact-verified" 0 'r.incidents[0].state==="artifact-verified"' \
+  --events "$TMP/frac-life.jsonl" --state "$FRAC" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_life "$TMP/frac-life.jsonl" "$FRAC" deployed "2026-01-01T00:10:03Z" "$DEPLOY_FRAC"
+check "fractional deployment is stored" 0 'r.incidents[0].state==="deployed"' \
+  --events "$TMP/frac-life.jsonl" --state "$FRAC" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_ci "$TMP/frac-before.jsonl" frac-before "$SHA_D" "2026-01-01T00:00:03.100Z" "$RAW88" det-1
+check "a failure 800ms before deployment stays deployed" 0 \
+  'r.evaluation==="complete" && r.incidents[0].state==="deployed" && r.issue_requests.length===0 && r.incidents[0].revoked_claims.length===0' \
+  --events "$TMP/frac-before.jsonl" --state "$FRAC" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_ci "$TMP/frac-equal.jsonl" frac-equal "$SHA_E" "2026-01-01T00:00:03.900Z" "$RAW88" det-1
+check "a failure at the fractional deployment boundary reopens" 0 \
+  'r.incidents[0].state==="reopened" && r.incidents[0].revoked_claims.some((c) => c.claim==="deployed")' \
+  --events "$TMP/frac-equal.jsonl" --state "$FRAC" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+
+printf '%s\n' '{"kind":"ci-failure","repo":["The-AIE/the-gibson"],"attempt_id":"a1","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","detector_version":"det-1","detector_health":"healthy","observed_at":"2026-01-01T00:00:00Z","raw_signature":"Error: smoke"}' > "$TMP/bad-repo.jsonl"
+check "a non-string repo is rejected" 3 \
+  'r.evaluation==="UNKNOWN" && r.unknown_reason==="line 1 has a bad repo"' \
+  --events "$TMP/bad-repo.jsonl" --state "$TMP/bad-repo-state.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+absent "a rejected repo writes no state" "$TMP/bad-repo-state.json"
 
 CAPH=$TMP/caph.json
 write_cap "$TMP/caph-seed.jsonl" c0 "$SHA_C" "$NOW0" "$RAW88" det-1 B 3

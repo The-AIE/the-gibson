@@ -1,6 +1,13 @@
 name: Retro actuator
 # Advisory dry-run for #569. Not a pull-request check. Never pass --apply.
 # Reviewer: this file is new. Diff it on its own before the script.
+#
+# sensor-health grades this file as freshness on the schedule event only, over
+# 8 days (a weekly cron). Freshness is OK only when that scheduled run succeeds.
+# The Monday job therefore evaluates one healthy event and exits 0. It does not
+# read retro-actuator-events.jsonl. A dispatch still reads that file and exits 3
+# when it is absent (blind, not healthy). That dispatch is not the observation,
+# so a blind dispatch does not turn the standing sensor red.
 on:
   schedule:
     - cron: "17 12 * * 1"
@@ -20,7 +27,15 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Scheduled smoke
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          set -euo pipefail
+          smoke="${RUNNER_TEMP}/retro-actuator-smoke.jsonl"
+          printf '%s\n' '{"kind":"ci-failure","repo":"The-AIE/the-gibson","attempt_id":"smoke-1","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","detector_version":"det-1","detector_health":"healthy","observed_at":"2026-01-01T00:00:00Z","raw_signature":"Error: smoke"}' > "$smoke"
+          node scripts/retro-actuator.mjs --events "$smoke" --state "${RUNNER_TEMP}/retro-actuator-state.json"
       - name: Dry-run the retro actuator
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           EVENTS_FILE: ${{ github.workspace }}/retro-actuator-events.jsonl
         run: node scripts/retro-actuator.mjs --events "$EVENTS_FILE" --state "${RUNNER_TEMP}/retro-actuator-state.json"

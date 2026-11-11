@@ -100,22 +100,27 @@ batch. A state that already has incidents but no trusted schema is refused.
 ## Mode and the workflow
 
 The default mode is dry-run. The report lists the issue the program would open.
-`--apply` is the only path that runs `gh issue create`. Before that call it
-writes the request as `creating`. If `gh` never starts, the request returns to
-`planned` and a later `--apply` may try again. If `gh` starts and fails, or
-returns success without an issue URL, the request stays `creating`. The next
-`--apply` sees that marker and does not open a second issue. The same marker
-covers a process that dies after GitHub has created the issue. Dry-run still
-writes the state file, so a second dry-run against the same `--state` path dedups.
+`--apply` is the only path that runs `gh issue create`. It writes the issue
+body to a temp file, then saves the request as `creating`, then starts `gh`.
+If that save fails, the temp file is removed and the request stays `planned`.
+If `gh` never starts, the request returns to `planned` and a later `--apply`
+may try again. If `gh` starts and fails, or returns success without an issue
+URL, the request stays `creating`. The next `--apply` sees that marker and
+does not open a second issue. The same marker covers a process that dies after
+GitHub has created the issue. Dry-run still writes the state file, so a second
+dry-run against the same `--state` path dedups.
 
 `.github/workflows/retro-actuator.yml` is a new workflow. It runs on a weekly
 schedule and on `workflow_dispatch`. It passes no `--apply`. Its state path is
-under the runner temp directory, so a scheduled run does not remember a previous
-run and will print the same plan again when the same events are still there.
-It does not create issues. The events path it reads is
+under the runner temp directory, so a run does not remember a previous run.
+It does not create issues. The scheduled job writes one healthy ci-failure
+into the runner temp directory and evaluates it, so the GitHub job can succeed.
+Sensor-health watches that `schedule`
+event only, in freshness mode, over 8 days. A dispatch reads
 `retro-actuator-events.jsonl` at the workspace root. That file is not part of
-this program. When it is absent, the run exits 3. That exit means the run is
-blind, not that the tree is healthy. The workflow is not a pull-request check.
+this program. When it is absent, the dispatch exits 3. That exit means the run
+is blind, not that the tree is healthy. A blind dispatch is not the observation.
+The workflow is not a pull-request check.
 
 The in-repo default state path, used only when `--state` is omitted, is
 `docs/retro-actuator-state.json` under `--root` (the repo root by default).
