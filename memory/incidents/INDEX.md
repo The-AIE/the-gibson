@@ -1,0 +1,27 @@
+# Incident to lesson map. This file is the only map.
+# One row: I-NNN L-NNN. Comment lines are ignored.
+
+I-001 L-099
+I-002 L-100
+I-003 L-101
+I-004 L-102
+I-005 L-103
+I-006 L-104
+I-007 L-105
+I-008 L-106
+I-009 L-107
+I-010 L-108
+I-011 L-109
+I-012 L-110
+I-013 L-111
+I-014 L-112
+I-015 L-113
+I-016 L-114
+I-017 L-115
+I-018 L-116
+I-019 L-117
+I-020 L-097
+I-021 L-118
+I-022 L-119
+I-023 L-120
+I-024 L-121
