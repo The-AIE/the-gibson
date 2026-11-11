@@ -168,7 +168,9 @@ touch /path/to/target/gibson/HALT
   same-vendor reviewer in a fresh context can meet it, the author's own pass
   cannot. Without it: park the PR, **do not merge**.
 - If human-gated (e.g. G6 billing/pricing/payment code, schema, an explicit owner
-  hold): queue for Mark, set next issue triage, **do not merge**.
+  hold) and the owner's decision is still outstanding: queue for Mark, set next
+  issue triage, **do not merge**. Once that decision is recorded on the PR, do not
+  queue it again: continue with the remaining merge checks.
 - If `RELEASE_CMD` is set: shell out to it for the actual merge, passing the PR
   number and repo path — the runner that built and/or reviewed this PR must not
   also be the one that merges it when a distinct release identity is configured.

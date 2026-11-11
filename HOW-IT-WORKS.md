@@ -384,7 +384,9 @@ AI-surface, and runtime findings.
 
 Tier C surfaces — authentication, money, consent/PII, security boundaries, schema,
 and production data — require adversarial cases in the review, one independent
-approval at the exact head, and green required checks. No owner merge step (D-015).
+approval at the exact head, and green required checks. No owner merge step on Tier C
+alone (D-015); billing/pricing/payment code (G6), schema merges and explicit owner
+holds still wait for the owner.
 
 #### 7. Merge
 

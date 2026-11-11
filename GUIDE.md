@@ -194,6 +194,7 @@ Same pipeline, one runner:
 | See status | AK dashboard / digest / `gh issue list -l gibson` |
 | Tier C merge | No action: one independent approval at the exact head plus required checks clear it (G12 floor, D-015) |
 | Approve a billing/pricing/payment merge | Reply on the PR (G6) |
+| Approve a schema merge | Reply on the PR (schema merges are human-gated, one in flight) |
 | Stop everything on a repo | `gibson-halt` label |
 | Overnight grind | `scripts/loop.sh --runner grok` |
 | Teach the fleet | PR a lesson to `memory/LESSONS.md` |

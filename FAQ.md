@@ -30,7 +30,8 @@ canary Tier A issue. Operator-facing install always uses the Ask Contract
 Routine merges of already-gated work deploy per your Vercel branch model
 ([docs/12](docs/12-vercel.md)). **First** public launches, money (including merges
 of billing/pricing/payment code, G6), and destructive ops stop for you
-([docs/14](docs/14-human-gates.md)). Other Tier C merges do not wait for you: they
+([docs/14](docs/14-human-gates.md)). Schema merges also stop for you (one in flight at
+a time, human-gated). Other Tier C merges do not wait for you: they
 clear on one independent approval at the exact head plus required checks (D-015).
 Silence never auto-approves a gate.
 
@@ -69,7 +70,7 @@ Flat-rate pools absorb volume; metered tokens buy judgment.
 Money, auth, consent/PII, security boundaries, schema, prod data — adversarial
 review + **one independent approval at the exact head plus required checks, no owner
 merge step** (D-015; [docs/06](docs/06-quality-gates.md)). Billing/pricing/payment
-code still needs your merge decision (G6).
+code still needs your merge decision (G6), and a schema merge is human-gated.
 
 ## How does the harness improve itself?
 
