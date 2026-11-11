@@ -53,6 +53,7 @@ command_not_found_handle() {
 
 command -v node >/dev/null || { echo "claim-expiry.test.sh: node required"; exit 1; }
 command -v jq   >/dev/null || { echo "claim-expiry.test.sh: jq required"; exit 1; }
+REAL_NODE=$(command -v node)
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-claim-expiry.XXXXXX")
 trap 'rm -rf -- "${ROOT:?}"' EXIT
@@ -76,6 +77,7 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 echo "$*" >> "${GH_LOG:?}"
 case "$1 $2" in
   "api graphql")
+    joined="$*"
     shift 2
     jqexpr=""
     while [[ $# -gt 0 ]]; do
@@ -84,7 +86,27 @@ case "$1 $2" in
         *) shift ;;
       esac
     done
-    nodes=$(jq -c '.[0]' "${GH_PAGES:?}") || exit 1
+    src="${GH_PAGES:?}"
+    # Optional: the first expiry query that runs only after two list queries
+    # (the old "read expiry once after settle" shape) replays GH_PAGES_LATE.
+    # Expiry reads interleaved with the settle reads keep GH_PAGES.
+    if [[ "$joined" == *claimExpiry* ]]; then
+      n=0
+      [[ -f "${GH_ROOT:?}/expiry-n" ]] && n=$(cat "$GH_ROOT/expiry-n")
+      n=$((n + 1))
+      printf '%s' "$n" > "$GH_ROOT/expiry-n"
+      lists=0
+      [[ -f "$GH_ROOT/list-n" ]] && lists=$(cat "$GH_ROOT/list-n")
+      if [[ -n "${GH_PAGES_LATE:-}" && "$lists" -ge 2 && "$n" -eq 1 ]]; then
+        src="$GH_PAGES_LATE"
+      fi
+    else
+      n=0
+      [[ -f "${GH_ROOT:?}/list-n" ]] && n=$(cat "$GH_ROOT/list-n")
+      n=$((n + 1))
+      printf '%s' "$n" > "$GH_ROOT/list-n"
+    fi
+    nodes=$(jq -c '.[0]' "$src") || exit 1
     page=$(printf '{"data":{"repository":{"pullRequests":{"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' "$nodes")
     printf '%s' "$page" | jq -r "$jqexpr"
     exit $?
@@ -124,12 +146,20 @@ export GH_PAGES="$ROOT/pages.json"
 # One staged PR node. $1 number, $2 claim id, $3 scope, $4 Claim-expires line
 # value ('' = omit the line), $5 last commit date.
 claim_node() {
-  local n="$1" id="$2" scope="$3" exp="$4" last="$5" issue body
+  local n="$1" id="$2" scope="$3" exp="$4" last="$5" issue body suites
   issue=${id#issue-}; issue=${issue%%-*}
   body="- Claim schema: gibson.claim/v2\n- Active-work claim: ${id}\n- Issue: #${issue}\n- Claim scope: ${scope}\n- Claimed: 2026-10-01T00:00:00Z"
   [[ -z "$exp" ]] || body="${body}\n- Claim-expires: ${exp}"
-  printf '{"number":%s,"body":"%s","headRefName":"feat/%s","url":"https://github.com/acme/app/pull/%s","createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-02T00:00:00Z","isCrossRepository":false,"commits":{"nodes":[{"commit":{"committedDate":"%s"}}]}}' \
-    "$n" "$body" "${id#issue-}" "$n" "$last"
+  # committedDate is ancient on purpose. A reader that treats commit metadata
+  # as the push clock fails "a push renews" below, because the check-suite
+  # time is the only clock that moves.
+  if [[ -z "$last" ]]; then
+    suites='"checkSuites":{"nodes":[]}'
+  else
+    suites=$(printf '"checkSuites":{"nodes":[{"createdAt":"%s"}]}' "$last")
+  fi
+  printf '{"number":%s,"body":"%s","headRefName":"feat/%s","url":"https://github.com/acme/app/pull/%s","createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-02T00:00:00Z","isCrossRepository":false,"commits":{"nodes":[{"commit":{"committedDate":"2020-01-01T00:00:00Z",%s}}]}}' \
+    "$n" "$body" "${id#issue-}" "$n" "$suites"
 }
 # Same node plus extra raw body lines ($6, '\n'-separated, JSON-escaped already).
 claim_node_extra() {
@@ -182,7 +212,24 @@ out=$("$PC" expiry acme/app 2>&1)
 check "duplicate Claim-expires is unknown" "$(state_of "$out" 17)" "unknown"
 stage "$(claim_node 18 issue-27-nodate 'lib/**' "$EXPIRED" '')"
 out=$("$PC" expiry acme/app 2>&1)
-check "missing head commit date is unknown" "$(state_of "$out" 18)" "unknown"
+check "missing head push time is unknown" "$(state_of "$out" 18)" "unknown"
+
+echo "pr-claims expiry · committedDate is not a push"
+recent_commit=$(iso_at -100)
+forged=$(claim_node 23 issue-29-forged 'lib/**' "$EXPIRED" "$OLD_PUSH" | sed "s/2020-01-01T00:00:00Z/${recent_commit}/")
+stage "$forged"
+out=$("$PC" expiry acme/app 2>&1)
+check "a recent committedDate with an old check suite stays stale" "$(state_of "$out" 23)" "stale"
+two=$(claim_node 24 issue-29-two 'lib/**' "$EXPIRED" "$OLD_PUSH" | sed "s/{\"createdAt\":\"${OLD_PUSH}\"}/{\"createdAt\":\"${OLD_PUSH}\"},{\"createdAt\":\"${RECENT_PUSH}\"}/")
+stage "$two"
+out=$("$PC" expiry acme/app 2>&1)
+check "the newest of two check suites renews; the older one does not keep it stale" "$(state_of "$out" 24)" "fresh"
+# The recent stamp sits only on the tail alias. A reader that ignores
+# checkSuitesTail and keeps the old suite in checkSuites reports stale.
+tailed=$(claim_node 25 issue-29-tail 'lib/**' "$EXPIRED" "$OLD_PUSH" | sed "s/\"checkSuites\":/\"checkSuitesTail\":{\"nodes\":[{\"createdAt\":\"${RECENT_PUSH}\"}]},\"checkSuites\":/")
+stage "$tailed"
+out=$("$PC" expiry acme/app 2>&1)
+check "a newer suite on the other end of the connection still renews" "$(state_of "$out" 25)" "fresh"
 
 echo "pr-claims expiry · displacement is terminal"
 DISP='- Displaced by: issue-31-mine (PR #99)'
@@ -263,6 +310,22 @@ stage "$(claim_node_extra 38 issue-30-held 'components/nav/**' "$EXPIRED" "$OLD_
 out=$(run_so --scope 'components/nav/Item.tsx' --claim-id issue-31-mine --issue 31); rc=$?
 [[ "$rc" -ne 0 ]] && ok "unreadable Displaced by blocks" || bad "unreadable displacement record revived/displaced a claim (rc=$rc): $out"
 
+echo "scope-overlap admission · expiry is part of the settled snapshot, not a later read"
+rm -f "$ROOT/expiry-n" "$ROOT/list-n"
+fresh_page="$(claim_node 100 issue-100-new 'docs/only/**' "$FRESH" "$RECENT_PUSH"),$(claim_node 90 issue-90-rival 'lib/**' "$EXPIRED" "$RECENT_PUSH")"
+stale_page="$(claim_node 100 issue-100-new 'docs/only/**' "$FRESH" "$RECENT_PUSH"),$(claim_node 90 issue-90-rival 'lib/**' "$EXPIRED" "$OLD_PUSH")"
+stage "$fresh_page"
+printf '[[%s]]' "$stale_page" > "$ROOT/pages-late.json"
+export GH_PAGES_LATE="$ROOT/pages-late.json"
+out=$(GIBSON_CLAIM_ADMIT_DELAY=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=4 \
+  run_so --scope 'lib/**' --claim-id issue-100-new --issue 100 --admit-pr 100); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a rival that is fresh in the settled expiry snapshot still blocks" ||
+  bad "admission displaced a rival from a post-settle stale read (rc=$rc): $out"
+contains "the refusal names the rival" "$out" "issue-90-rival"
+lacks "the post-settle page was not what decided" "$out" "displaced expired claim issue-90-rival"
+unset GH_PAGES_LATE
+rm -f "$ROOT/expiry-n" "$ROOT/list-n"
+
 # --- claim.sh --renew -------------------------------------------------------
 echo "claim.sh --renew moves the date"
 stage "$(claim_node 41 issue-40-renewme 'lib/**' "$EXPIRED" "$OLD_PUSH")"
@@ -300,6 +363,45 @@ out=$(GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 43 2>&1); rc=$?
 contains "the overlap is named" "$out" "issue-44-rival"
 check "the date did not move" "$(cat "$ROOT/body-44")" "$before"
 
+echo "claim.sh --renew refuses when the overlapping rival is itself stale"
+stage "$(claim_node 46 issue-45-mine 'lib/**' "$EXPIRED" "$OLD_PUSH"),$(claim_node 47 issue-46-stale 'lib/util/**' "$EXPIRED" "$OLD_PUSH")"
+printf '%b\n' "- Claim schema: gibson.claim/v2\n- Active-work claim: issue-45-mine\n- Issue: #45\n- Claim scope: lib/**\n- Claimed: 2026-10-01T00:00:00Z\n- Claim-expires: ${EXPIRED}\n\nbody text" > "$ROOT/body-46"
+before=$(cat "$ROOT/body-46")
+: > "$GH_LOG"
+out=$(GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 45 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "renew that would overlap a stale claim refuses" || bad "renew displaced or admitted a stale rival: $out"
+contains "the refusal says renew does not displace" "$out" "renew does not displace"
+check "the renewing body is untouched" "$(cat "$ROOT/body-46")" "$before"
+lacks "the stale rival is not stamped" "$(cat "$GH_LOG")" "pr edit 47"
+
+echo "claim.sh --renew re-reads the body and edits only Claim-expires"
+stage "$(claim_node 48 issue-47-reread 'lib/**' "$EXPIRED" "$OLD_PUSH")"
+printf '%b\n' "- Claim schema: gibson.claim/v2\n- Active-work claim: issue-47-reread\n- Issue: #47\n- Claim scope: lib/**\n- Claimed: 2026-10-01T00:00:00Z\n- Claim-expires: ${EXPIRED}\n\nbody text" > "$ROOT/body-48"
+cat > "$ROOT/bin/node" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *scope-overlap.mjs* && -n "\${GH_INJECT_BODY_LINE:-}" ]]; then
+  printf '%s\n' "\$GH_INJECT_BODY_LINE" >> "\${GH_INJECT_BODY_FILE:?}"
+fi
+exec ${REAL_NODE} "\$@"
+EOF
+chmod +x "$ROOT/bin/node"
+out=$(GH_INJECT_BODY_LINE="CONCURRENT NOTE" GH_INJECT_BODY_FILE="$ROOT/body-48" \
+  GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 47 2>&1); rc=$?
+check "renew survives a concurrent body line" "$rc" "0"
+contains "the concurrent line is kept" "$(cat "$ROOT/body-48")" "CONCURRENT NOTE"
+contains "the original prose is kept" "$(cat "$ROOT/body-48")" "body text"
+new=$(sed -n 's/^- Claim-expires: //p' "$ROOT/body-48")
+[[ "$new" > "$(iso_at $((7 * DAY - 300)))" ]] && ok "only Claim-expires moved ($new)" ||
+  bad "Claim-expires did not move (got '$new')"
+out=$(GH_INJECT_BODY_LINE="- Displaced by: issue-31-mine (PR #99)" GH_INJECT_BODY_FILE="$ROOT/body-48" \
+  GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 47 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a Displaced by line that lands during the check refuses the renew" ||
+  bad "renew erased or ignored a Displaced by line: $out"
+contains "the Displaced by line is still there" "$(cat "$ROOT/body-48")" "- Displaced by: issue-31-mine (PR #99)"
+check "Claim-expires was not rewritten over that line" "$(sed -n 's/^- Claim-expires: //p' "$ROOT/body-48")" "$new"
+rm -f "$ROOT/bin/node"
+unset GH_INJECT_BODY_LINE GH_INJECT_BODY_FILE
+
 echo "a Displaced-by whose displacer is not a live claim is ignored"
 stage "$(claim_node_extra 71 issue-70-stranded 'lib/**' "$EXPIRED" "$OLD_PUSH" "$DISP")"
 out=$("$PC" expiry acme/app 2>&1)
@@ -322,6 +424,14 @@ if [[ -n "$prov_line" && -n "$stamp_line" && -n "$done_line" && "$stamp_line" -g
   ok "the stamp sits after provenance verification and before CLAIM_COMPLETE"
 else
   bad "the stamp is not the last step (provenance=$prov_line stamp=$stamp_line complete=$done_line)"
+fi
+stamp_block=$(sed -n "${prov_line},${stamp_line}p" "$CLAIM")
+contains "the stamp re-reads expiry and compares before it writes" "$stamp_block" "was stale in the admission snapshot"
+reread_line=$(grep -n 'was stale in the admission snapshot' "$CLAIM" | head -1 | cut -d: -f1)
+if [[ -n "$reread_line" && "$reread_line" -lt "$stamp_line" ]]; then
+  ok "a claim that is no longer stale is refused before Displaced by is written"
+else
+  bad "the stale re-read is not before the stamp (reread=$reread_line stamp=$stamp_line)"
 fi
 
 echo "claim.sh --renew passes a literal glob scope to the sensor (no pathname expansion)"

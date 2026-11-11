@@ -908,14 +908,16 @@ function readPrClaimsOnce() {
 }
 
 /**
- * Expired PR-body claims (#557). Returns Map<"<pr>\t<claim id>", row> for every
- * claim `pr-claims.sh expiry` calls `stale`. FAILS CLOSED toward blocking: if
- * the read fails, or a row is not exactly the nine-field shape, or its state
- * is anything but the literal `stale`, that claim is NOT in the map, so it
- * keeps blocking. A claim this reader cannot judge is never displaced.
+ * One expiry read (#557). `stale` maps "<pr>\t<claim id>" to every claim
+ * `pr-claims.sh expiry` calls `stale` or `displaced`. FAILS CLOSED toward
+ * blocking: a failed read returns null (the caller displaces nobody), and a
+ * row that is not the nine-field shape is left out of the map, so that claim
+ * keeps blocking. `fingerprint` is every raw row, sorted. A renew or a push
+ * changes it even when the claim's scope does not, so admission can require
+ * the expiry evidence to be part of the quiescent snapshot instead of a
+ * later read.
  */
-function readStaleClaims() {
-  const stale = new Map();
+function readExpirySnapshot() {
   let out;
   try {
     out = execFileSync(prClaimsScriptPath(), ["expiry", opt.repo], {
@@ -924,10 +926,13 @@ function readStaleClaims() {
       maxBuffer: 16 * 1024 * 1024,
     });
   } catch {
-    return stale;
+    return null;
   }
+  const stale = new Map();
+  const fpLines = [];
   for (const line of out.split("\n")) {
     if (!line.trim()) continue;
+    fpLines.push(line);
     const cols = line.split("\t");
     if (cols.length !== 9) continue;
     if ((cols[2] !== "stale" && cols[2] !== "displaced") || !/^\d+$/.test(cols[0])) continue;
@@ -935,10 +940,12 @@ function readStaleClaims() {
       number: Number(cols[0]),
       id: cols[1],
       expires: cols[5],
+      push: cols[6],
       state: cols[2],
     });
   }
-  return stale;
+  fpLines.sort();
+  return { stale, fingerprint: fpLines.join("\n") };
 }
 
 /**
@@ -1182,10 +1189,12 @@ function claimIssueNumber(id) {
  * admission decision uses; unrelated churn (a body edited elsewhere, a
  * timestamp bumped) does not stop the barrier from settling.
  */
-function admitFingerprint(prClaims, ledgerClaims) {
-  // Combined claim-relevant projection of BOTH authoritative sources.
-  // Split-time views (ledger once, then PR settle, then decide) hide rivals
-  // under either interleaving; the union fingerprint must be stable together.
+function admitFingerprint(prClaims, ledgerClaims, expiryFingerprint) {
+  // Combined claim-relevant projection of BOTH authoritative sources, plus
+  // the expiry rows from the SAME attempt. Scope alone stays quiet across a
+  // renew or a push (neither changes the claim id or the scope), so a
+  // fingerprint without expiry would settle while the claim was being
+  // revived and the decision would displace it from a later, stale read.
   const prPart = prClaims
     .map((c) => `pr\t${c.number}\t${c.id}\t${c.scope.join(" ")}`)
     .sort()
@@ -1194,7 +1203,7 @@ function admitFingerprint(prClaims, ledgerClaims) {
     .map((c) => `led\t${c.source}\t${c.id}\t${c.scope.join(" ")}`)
     .sort()
     .join("\n");
-  return `${prPart}\n--\n${ledPart}`;
+  return `${prPart}\n--\n${ledPart}\n--\n${expiryFingerprint}`;
 }
 
 /**
@@ -1223,6 +1232,7 @@ function settleAdmissionInventory() {
   let streak = 0;
   let settledPr = null;
   let settledLedger = null;
+  let settledExpiry = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     if (attempt > 1) spaceReads(delaySeconds);
     // Combined read of both sources every attempt — never ledger-once then
@@ -1283,38 +1293,57 @@ function settleAdmissionInventory() {
         { admitPr: opt.admitPr, claimId: opt.claimId }
       );
     }
-    const fp = admitFingerprint(claims, ledgerClaims);
+    const expiry = readExpirySnapshot();
+    if (expiry == null) {
+      streak = 0;
+      prevFp = null;
+      console.error(
+        `scope-overlap: admission: cannot read claim expiry for ${opt.repo} (attempt ${attempt}/${attempts}) — refusing to settle a snapshot that has no expiry evidence`
+      );
+      continue;
+    }
+    const fp = admitFingerprint(claims, ledgerClaims, expiry.fingerprint);
     streak = streak > 0 && fp === prevFp ? streak + 1 : 1;
     prevFp = fp;
     settledPr = claims;
     settledLedger = ledgerClaims;
+    settledExpiry = expiry;
     if (streak >= stableReads) {
       if (!opt.json) {
         console.log(
-          `scope-overlap: admission: PR+ledger union quiescent for PR #${opt.admitPr} (${stableReads} consecutive matching read(s))`
+          `scope-overlap: admission: PR+ledger+expiry union quiescent for PR #${opt.admitPr} (${stableReads} consecutive matching read(s))`
         );
       }
-      return { prClaims: settledPr, ledgerClaims: settledLedger };
+      return {
+        prClaims: settledPr,
+        ledgerClaims: settledLedger,
+        staleClaims: settledExpiry.stale,
+      };
     }
     console.error(
-      `scope-overlap: admission: PR+ledger union not yet quiescent for PR #${opt.admitPr} (${streak}/${stableReads} matching read(s), attempt ${attempt}/${attempts})`
+      `scope-overlap: admission: PR+ledger+expiry union not yet quiescent for PR #${opt.admitPr} (${streak}/${stableReads} matching read(s), attempt ${attempt}/${attempts})`
     );
   }
   fail(
     `admission: could not obtain a stable combined PR+ledger claim inventory for ${opt.repo} containing this lane's own claim '${opt.claimId}' on PR #${opt.admitPr} — ${stableReads} consecutive matching read(s) required, ${attempts} attempt(s) made. An inventory that cannot see this claim, or that is still changing underneath it, cannot prove no one else holds the scope: a rival PR or ledger row created before this one may simply not have been published to the view yet. Refusing to hold a claim that is not provably registered against a settled view.`,
     { admitPr: opt.admitPr, claimId: opt.claimId }
   );
-  return { prClaims: [], ledgerClaims: [] }; // unreachable: fail() exits
+  return { prClaims: [], ledgerClaims: [], staleClaims: new Map() }; // unreachable: fail() exits
 }
 
 let prClaims;
 let settledLedgerClaims = null;
+let staleClaims = new Map();
 if (opt.admitPr != null) {
   const settled = settleAdmissionInventory();
   prClaims = settled.prClaims;
   settledLedgerClaims = settled.ledgerClaims;
+  staleClaims = settled.staleClaims;
 } else if (opt.repo) {
   prClaims = parsePrClaims(readPrClaimsOnceOrFail());
+  // Not an admission. A failed expiry read displaces nobody.
+  const expiry = readExpirySnapshot();
+  staleClaims = expiry ? expiry.stale : new Map();
 } else {
   prClaims = [];
 }
@@ -1374,7 +1403,8 @@ const ledgerClaims =
 // recorded below so the caller can write it to both PR bodies. It still holds
 // its ISSUE (same-issue exclusivity above is unchanged). Only an unambiguous
 // `stale` verdict displaces; every other state keeps the claim blocking.
-const staleClaims = opt.repo ? readStaleClaims() : new Map();
+// On admission, `staleClaims` is the map from the quiescent snapshot — not a
+// read taken after the barrier returned.
 const displaced = [];
 const blockingPrClaims = prClaims.filter((c) => {
   const row = staleClaims.get(`${c.number}\t${c.id}`);

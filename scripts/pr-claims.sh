@@ -140,7 +140,7 @@ claim.sh, release-claim.sh, claim-reaper.sh and scope-overlap.mjs all validate,
 and a ninth column would turn every one of them into a hard refusal. One row per
 open PR carrying an `- Active-work claim:` marker, tab-separated:
   number, claim id, state, claimed, claim-expires, effective-expires,
-  last-commit, reason, displacers (`;`-separated `id (PR #n)`, may be empty)
+  last-push, reason, displacers (`;`-separated `id (PR #n)`, may be empty)
 
 state is `fresh`, `stale`, `displaced` or `unknown`. `displaced` means a newer
 claim took this one's scope (`- Displaced by: <claim id> (PR #n)` in the body):
@@ -150,10 +150,16 @@ is itself a live claim (an open claim PR with that id); a displacer that closed
 or never existed is ignored and the claim keeps whatever its own expiry says. A `Displaced by` line that does not match
 that exact shape is `unknown` (the record is unreadable, so the claim blocks).
 `stale` means the claim is expired:
-  effective-expires = max(Claim-expires, last-commit + 7 days) < now
-so a push to the claim branch renews it without anyone editing the PR body.
+  effective-expires = max(Claim-expires, last-push + 7 days) < now
+`last-push` is the newest GitHub check-suite `createdAt` on the head commit.
+The query reads both ends of that connection (`first: 100` and `last: 1`) and
+keeps the max, because the connection order is not documented. That clock is
+GitHub's, set when a push triggers checks. The commit's own
+`committedDate` is author-controlled metadata and is not a push, so an
+old-dated commit pushed today stays fresh and a rewritten commit date cannot
+keep a quiet branch alive. A head commit with no check suite is `unknown`.
 It FAILS CLOSED toward "still held": a missing, duplicated or unparseable
-`- Claim-expires:` line, or a missing head-commit date, yields `unknown`, never
+`- Claim-expires:` line, or no head push time, yields `unknown`, never
 `stale` — a claim this reader cannot read is never displaced. Unlike `list` it
 does not poison the whole command over a malformed body (that is `list`'s job);
 a row it cannot judge is simply `unknown`. Only a gh/jq/pagination failure exits
@@ -334,7 +340,14 @@ list_claim_expiry() {
             nodes {
               number
               body
-              commits(last: 1) { nodes { commit { committedDate } } }
+              commits(last: 1) {
+                nodes {
+                  commit {
+                    checkSuites(first: 100) { nodes { createdAt } }
+                    checkSuitesTail: checkSuites(last: 1) { nodes { createdAt } }
+                  }
+                }
+              }
             }
             pageInfo { hasNextPage endCursor }
           }
@@ -355,9 +368,17 @@ list_claim_expiry() {
       | ($body | field("- Claimed: ")) as $claimedLines
       | (if ($claimedLines | length) == 1 then ($claimedLines[0] | sub("^- Claimed: "; "")) else "" end) as $claimed
       | (if ($expLines | length) == 1 then ($expLines[0] | sub("^- Claim-expires: "; "")) else "" end) as $expires
-      | ((.commits.nodes // [])[0].commit.committedDate // "") as $last
+      | ((.commits.nodes // [])[0].commit // null) as $commit
+      | (if $commit == null then []
+         else [(($commit.checkSuites.nodes // [])[], ($commit.checkSuitesTail.nodes // [])[])
+               | (.createdAt // "") as $raw
+               | ($raw | iso) as $ep
+               | select($ep != null)
+               | {raw: $raw, ep: $ep}]
+         end) as $pushes
+      | (if ($pushes | length) == 0 then "" else ($pushes | max_by(.ep).raw) end) as $last
+      | (if ($pushes | length) == 0 then null else ($pushes | max_by(.ep).ep) end) as $lastEpoch
       | ($expires | iso) as $expEpoch
-      | ($last | iso) as $lastEpoch
       | ($body | field("- Displaced by: ")) as $dispLines
       | (if ($dispLines | length) > 0 and ($dispLines | all(test("^- Displaced by: issue-[A-Za-z0-9-]+ \\(PR #[0-9]+\\)$"))) then
            ($dispLines | map(sub("^- Displaced by: "; "")) | join(";"))
@@ -367,7 +388,7 @@ list_claim_expiry() {
          elif ($expLines | length) == 0 then "no Claim-expires"
          elif ($expLines | length) > 1 then "duplicate Claim-expires"
          elif $expEpoch == null then "unparseable Claim-expires"
-         elif $lastEpoch == null then "no head commit date"
+         elif $lastEpoch == null then "no head push time"
          else "" end) as $reason
       | (if $reason == "" then ([$expEpoch, $lastEpoch + 604800] | max) else null end) as $eff
       | [

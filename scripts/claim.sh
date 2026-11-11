@@ -147,10 +147,13 @@ EXPIRY (#557)
   A claim whose expiry has passed AND whose branch has had no push in 7 days is
   reported `stale` by `pr-claims.sh expiry`; its scope then stops blocking new
   claims (the displacement is written into both PR bodies), and claim-reaper.sh
-  labels it `claim-expired`. Nothing is ever closed. A push to the claim branch
-  renews it; so does `claim.sh --renew <issue>`, which rewrites only the
-  `Claim-expires` line of that issue's claim PR body to now + 7 days. A missing
-  or unreadable expiry is never treated as expired.
+  labels it `claim-expired`. Nothing is ever closed. A push renews it. The push
+  clock is the head commit's newest GitHub check-suite time, not `committedDate`.
+  `claim.sh --renew <issue>` rewrites only the `Claim-expires` line, from a body
+  re-read immediately before the write. Renew does not displace another claim:
+  an overlap with a fresh or a stale claim refuses, and the owner re-claims
+  through this script so the displacement is recorded. A missing or unreadable
+  expiry is never treated as expired.
 
 REQUIREMENTS
   git, gh, and node. node is required BEFORE any mutation: scope-overlap.mjs is
@@ -241,7 +244,10 @@ if [[ "${1:-}" == "--renew" ]]; then
   fi
   _rn_pr=${_rn_hits%%$'\t'*}
   _rn_id=${_rn_hits#*$'\t'}
-  _rn_body=$(gh pr view "$_rn_pr" --repo "$_rn_repo" --json body -q .body) || {
+  # Baseline only. The write below re-reads and must not replay this copy:
+  # a Displaced by line that lands during the overlap check has to be visible
+  # in the comparison, and writing this copy back would erase it.
+  _rn_body_before=$(gh pr view "$_rn_pr" --repo "$_rn_repo" --json body -q .body) || {
     echo "claim.sh: ERROR: cannot read the body of PR #$_rn_pr" >&2
     exit 1
   }
@@ -298,8 +304,42 @@ if [[ "${1:-}" == "--renew" ]]; then
     echo "claim.sh: ERROR: could not read the claim scope of PR #$_rn_pr — refusing to renew" >&2
     exit 1
   }
-  if ! env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE node "$_rn_dir/scope-overlap.mjs" "${_rn_args[@]}"; then
+  _rn_so_rc=0
+  _rn_so_out=$(env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE node "$_rn_dir/scope-overlap.mjs" "${_rn_args[@]}") || _rn_so_rc=$?
+  [[ -z "$_rn_so_out" ]] || printf '%s\n' "$_rn_so_out"
+  if [[ "$_rn_so_rc" -ne 0 ]]; then
     echo "claim.sh: ERROR: renewing $_rn_id would overlap a live claim — not renewed; resolve the overlap or re-claim" >&2
+    exit 1
+  fi
+  # Two stale claims that overlap each both see the other as non-blocking.
+  # Renew must not turn both fresh. Displacement is the create path's job;
+  # it writes Displaced by only after the new claim has passed every gate.
+  if grep -q '^scope-overlap: displaced-claim ' <<<"$_rn_so_out"; then
+    echo "claim.sh: ERROR: renewing $_rn_id would overlap an expired claim — renew does not displace; re-claim through claim.sh so both PR bodies record it" >&2
+    exit 1
+  fi
+  # Re-read NOW. The body captured before the overlap check is stale: a
+  # Displaced by line or any other edit that landed during the check would be
+  # erased by writing that snapshot back. Only the Claim-expires line changes,
+  # and only if this fresh body is still the claim we just checked.
+  _rn_body=$(gh pr view "$_rn_pr" --repo "$_rn_repo" --json body -q .body) || {
+    echo "claim.sh: ERROR: cannot re-read the body of PR #$_rn_pr immediately before renewing — refusing to write" >&2
+    exit 1
+  }
+  _rn_before_disp=$(grep '^- Displaced by: ' <<<"$_rn_body_before" || true)
+  _rn_now_disp=$(grep '^- Displaced by: ' <<<"$_rn_body" || true)
+  if [[ "$_rn_now_disp" != "$_rn_before_disp" ]]; then
+    echo "claim.sh: ERROR: PR #$_rn_pr gained a Displaced by record while renew was checking — not renewed, and that record was left in place" >&2
+    exit 1
+  fi
+  if ! grep -qxF -- "- Active-work claim: ${_rn_id}" <<<"$_rn_body"; then
+    echo "claim.sh: ERROR: PR #$_rn_pr no longer carries ${_rn_id} — refusing to renew a claim that changed" >&2
+    exit 1
+  fi
+  _rn_scope_n=$(grep -c '^- Claim scope: ' <<<"$_rn_body" || true)
+  _rn_scope_now=$(grep -m1 '^- Claim scope: ' <<<"$_rn_body" | sed 's/^- Claim scope: //')
+  if [[ "$_rn_scope_n" -ne 1 || "$_rn_scope_now" != "$_rn_scope" ]]; then
+    echo "claim.sh: ERROR: PR #$_rn_pr scope changed while renew was checking — not renewed" >&2
     exit 1
   fi
   _rn_new=$(utc_after_ttl)
@@ -327,7 +367,18 @@ if [[ "${1:-}" == "--renew" ]]; then
     echo "claim.sh: ERROR: could not update PR #$_rn_pr" >&2
     exit 1
   }
-  rm -f "$_rn_file"
+  _rn_after=$(gh pr view "$_rn_pr" --repo "$_rn_repo" --json body -q .body) || {
+    rm -f "$_rn_file"
+    echo "claim.sh: ERROR: wrote PR #$_rn_pr but could not re-read it to confirm the Claim-expires line" >&2
+    exit 1
+  }
+  printf '%s\n' "$_rn_after" > "${_rn_file}.got"
+  if ! cmp -s "$_rn_file" "${_rn_file}.got"; then
+    rm -f "$_rn_file" "${_rn_file}.got"
+    echo "claim.sh: ERROR: PR #$_rn_pr body after renew does not match the single-line edit — refusing to claim the renew succeeded" >&2
+    exit 1
+  fi
+  rm -f "$_rn_file" "${_rn_file}.got"
   echo "claim.sh: renewed $_rn_id (PR #$_rn_pr) — Claim-expires: $_rn_new"
   exit 0
 fi
@@ -1517,8 +1568,28 @@ while IFS= read -r _dl; do
   [[ "$_dl" == "scope-overlap: displaced-claim "* ]] || continue
   read -r _ _ _d_id _d_pr _d_exp <<<"$_dl"
   [[ "$_d_id" == issue-* && "$_d_pr" =~ ^[0-9]+$ ]] || continue
+  # The admission snapshot is not a licence to stamp. Re-read expiry now and
+  # compare: a renew or a push since the snapshot means this claim is no
+  # longer the stale row we decided on. Do not write Displaced by in that case.
+  _disp_exp=$("$SCRIPT_DIR/pr-claims.sh" expiry "$REPO") ||
+    die "could not re-read expiry for ${_d_id} (PR #${_d_pr}) immediately before displacement — refusing to stamp from the admission snapshot; rolling this claim back"
+  _disp_row=$(awk -F'\t' -v n="$_d_pr" '$1 == n { print; exit }' <<<"$_disp_exp")
+  _disp_id_now=$(awk -F'\t' '{ print $2 }' <<<"$_disp_row")
+  _disp_state=$(awk -F'\t' '{ print $3 }' <<<"$_disp_row")
+  _disp_push=$(awk -F'\t' '{ print $7 }' <<<"$_disp_row")
+  if [[ "$_disp_id_now" != "$_d_id" || "$_disp_state" != "stale" ]]; then
+    die "PR #${_d_pr} (${_d_id}) was stale in the admission snapshot but is now '${_disp_state:-missing}' (id '${_disp_id_now:-missing}') — not writing Displaced by; rolling this claim back"
+  fi
   record_displacement "$_d_pr" "- Displaced by: ${CLAIM_ID} (PR #${PR_NUMBER})" ||
     die "could not durably record the displacement of ${_d_id} (PR #${_d_pr}) — without it that claim could be renewed back into overlap; rolling this claim back"
+  _disp_exp2=$("$SCRIPT_DIR/pr-claims.sh" expiry "$REPO") ||
+    die "could not re-read expiry for ${_d_id} (PR #${_d_pr}) after writing Displaced by — rolling this claim back so the stamp is not terminal"
+  _disp_row2=$(awk -F'\t' -v n="$_d_pr" '$1 == n { print; exit }' <<<"$_disp_exp2")
+  _disp_state2=$(awk -F'\t' '{ print $3 }' <<<"$_disp_row2")
+  _disp_push2=$(awk -F'\t' '{ print $7 }' <<<"$_disp_row2")
+  if [[ "$_disp_push2" != "$_disp_push" || "$_disp_state2" == "fresh" || "$_disp_state2" == "unknown" || -z "$_disp_state2" ]]; then
+    die "PR #${_d_pr} (${_d_id}) changed while Displaced by was written (state '${_disp_state2:-missing}', push '${_disp_push}' -> '${_disp_push2}') — rolling this claim back so the stamp is not terminal"
+  fi
   gh label create claim-expired --repo "$REPO" --color BFD4F2 \
     --description "PR-body claim expired or displaced (#557)" >/dev/null 2>&1 || true
   gh pr edit "$_d_pr" --repo "$REPO" --add-label claim-expired >/dev/null 2>&1 ||
