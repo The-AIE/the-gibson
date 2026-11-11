@@ -1,0 +1,17 @@
+pr,issue_or_epic,release_bucket,disposition,accountable_captain,retained_executor,initial_estimate_inclusion,next_step
+609,375,R1,finish,Codex captain,Codex-375,yes,Obtain current-head independent evidence through the existing lane; preserve draft and merge holds
+564,557,R1-supporting-backlog,redesign,Codex captain,Claude-557,only if required,Settle serialized and fenced claim transitions with existing owner; preserve blocking reservations and overlap holds
+582,568,R1-supporting-backlog,queue,Codex captain,Claude-568,only if required,Follow the settled claim contract and repair the missed Node guard within existing scope
+563,dependency-maintenance,R1-maintenance-backlog,queue,Codex captain,Dependabot,only if demonstrated blocker,Resolve the identity evidence issue in the existing maintenance lane; preserve authorship
+617,615,R2-planning-support,finish-documentation,Codex captain,Codex research,planning only,Publish release-ordered plan and estimates; skip further full documentation test runs per owner instruction
+577,572,R3-evidence-candidate,park,Codex captain,Grok-572,no,Preserve the existing unpublished date-validation fix and reconcile publication before any retry
+578,570,R3-evidence-candidate,park,Codex captain,Grok-570,no,Repair claim metadata and workflow registration together only when selected pilot needs this evidence path
+579,571,R4-operator-candidate,park,Codex captain,Grok-571,no,Reconcile published-head wording and activity references plus workflow registration and allowance disposition
+580,569,R4-recovery-candidate,park,Codex captain,Grok-569,no,Settle creating-intent and crash reconciliation before any operational activation; retain dry-run status
+601,600,R4-architecture-candidate,park,Codex captain,Claude-600,no,Prove event behavior and resolve public/private hygiene and policy decisions before promoting architecture text
+584,583,R5-measurement-candidate,park,Codex captain,Claude-583,no,Choose a real evaluation need then resolve identity/conflict/bootstrap and explicit operating permissions
+534,470,decision-hold,park,Codex captain,Claude-470,no,Resolve current-head review conflict and policy need without blocking use of the existing independent review App
+545,ADR-0004,decision-hold,park,Codex captain,Claude ADR author,no,Wait for explicit strictness policy decisions; do not begin new strictness implementation
+597,614-replacement-chain,614-replacement-chain,replace,Codex captain,Claude docs lane,no,Retain history and resolve only through surviving PR 614 without resetting the cumulative round budget
+598,614-replacement-chain,614-replacement-chain,replace,Codex captain,Claude docs lane,no,Retain history and resolve only through surviving PR 614 without resetting the cumulative round budget
+614,611,decision-hold,survivor-awaiting-disposition,Codex captain,Claude-611,no,Obtain independent disposition of the existing E3/preflight finding or a separately authorized widened repair; preserve allowance and merge hold
