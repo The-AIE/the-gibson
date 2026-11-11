@@ -1,5 +1,8 @@
 ---
 name: gibson-run
+key: gibson.gibson-run
+category: Engineering Tools
+tags: [gibson, orchestrator, fleet]
 description: "Start and supervise the Gibson development loop against a wired repo: cost-routed runners (Grok volume, Codex second/review, Claude judgment, Devin merge captain), error budgets, escalation, kill switch, and a plain-English digest for the owner. Final stage of the /gibson pipeline; also standalone ('start the loop', 'run the fleet on <repo>', 'resume gibson development')."
 ---
 

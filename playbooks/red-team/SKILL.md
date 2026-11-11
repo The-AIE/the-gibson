@@ -1,6 +1,6 @@
 ---
 name: gibson-red-team
-description: Run Gibson's repeatable red-team protocol against a target app to find security, auth, payment, PII/consent, and business-logic flaws before they ship — and before any paid third-party review. First target is TargetApp (example-org/target-app). Produces scored findings, files Critical/High as GitHub issues, and reports a readiness verdict. Use when Mark says "red team the app," "run Gibson," "run the red team," "security sweep," "attack target-app," "are we secure," or "pre-pentest check."
+description: Run Gibson's repeatable red-team protocol against a target app to find security, auth, payment, PII/consent, and business-logic flaws before they ship — and before any paid third-party review. First target is a production app that handles payments and personal data. Produces scored findings, files Critical/High as GitHub issues, and reports a readiness verdict. Use when Mark says "red team the app," "run Gibson," "run the red team," "security sweep," "attack target-app," "are we secure," or "pre-pentest check."
 ---
 
 # Gibson Red-Team

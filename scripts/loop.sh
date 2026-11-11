@@ -9,7 +9,7 @@ loop.sh — drive the solo SDLC loop (one hat, fresh context, file state)
 WHAT IT DOES
   For a target repo: check kill switch, read/update gibson/loop-state.md,
   render playbooks/loop-step.md with {{hat}} and {{loop_state}}, invoke the
-  chosen runner headless, enforce error budget, append journal, optional MC
+  chosen runner headless, enforce error budget, append journal, optional AK
   heartbeat.
 
 WHY
@@ -105,7 +105,7 @@ OPTIONS
   --dry-run           show actions without invoking runner
   --escalate-after N  after N consecutive failures, get a cross-vendor second
                       opinion before the error budget runs out (default: off)
-  --reviewers LIST    vendors for second opinion (default: codex,claude).
+  --reviewers LIST    reviewer candidates (default: one different-vendor reviewer).
                       With --solo-platform use vendor:model (e.g. grok:review).
   --solo-platform     single-vendor mode (#69): same platform supplies the
                       pre-handoff review via different model / fresh context.
@@ -156,7 +156,7 @@ STALE_BUDGET_SET=0
 FORCE_HAT=""
 DRY=0
 ESCALATE_AFTER=0
-REVIEWERS="codex,claude"
+REVIEWERS=""
 REVIEWERS_SET=0
 SOLO_PLATFORM=0
 SUPERVISOR=""
@@ -210,6 +210,12 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GIBSON="${GIBSON:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PLAYBOOK="$GIBSON/playbooks/loop-step.md"
 [[ -f "$PLAYBOOK" ]] || die "missing $PLAYBOOK"
+
+if [[ "$REVIEWERS_SET" -eq 0 && "$SOLO_PLATFORM" -eq 0 ]]; then
+  # One independent reviewer is sufficient (#622). An explicit --reviewers
+  # list remains an operator choice, never mandatory fan-out.
+  case "$RUNNER" in codex) REVIEWERS="claude" ;; *) REVIEWERS="codex" ;; esac
+fi
 
 # --solo-platform (#69): when the operator has one vendor only, the mandatory
 # pre-handoff review uses the same platform with an alternate model tag so
@@ -2394,6 +2400,71 @@ review_receipt_ok() {
   return 0
 }
 
+# Reuse the existing authenticated evaluator; never interpret a green sweep or
+# an arbitrary APPROVE comment ourselves. 2 means there is no open PR for this
+# branch (legacy pre-PR handoff); 1 means unknown/pending/rejected, so do not
+# spend a second reviewer. This is handoff evidence, not merge authorization.
+reuse_pr_review() {
+  local branch="$1" sha="$2" base="$3" base_sha="$4"
+  local rows pr rc evidence after
+  if ! origin_remote_halt_slug; then return 2; fi
+  if ! command -v node >/dev/null 2>&1 || ! command -v gh >/dev/null 2>&1; then
+    block "cannot inspect existing PR review: node and gh are required; no reviewer dispatched"
+    return 1
+  fi
+  local fields="number,state,headRefName,headRefOid,baseRefName,baseRefOid,isCrossRepository,updatedAt"
+  if ! rows=$(run_with_wall_timeout 60 gh pr list --repo "$ORIGIN_HALT_SLUG" \
+      --state open --head "$branch" --limit 2 --json "$fields"); then
+    block "existing PR review lookup failed; outcome unknown, no reviewer dispatched"
+    return 1
+  fi
+  pr=$(printf '%s' "$rows" | node -e '
+    const rows = JSON.parse(require("fs").readFileSync(0, "utf8"));
+    if (!Array.isArray(rows)) process.exit(1);
+    if (rows.length === 0) process.exit(2);
+    const [branch, head, base, baseSha] = process.argv.slice(1), p = rows[0];
+    if (rows.length !== 1 || !Number.isSafeInteger(p.number) || p.number < 1 ||
+        p.state !== "OPEN" || p.isCrossRepository !== false ||
+        p.headRefName !== branch || p.headRefOid !== head ||
+        p.baseRefName !== base || p.baseRefOid !== baseSha) process.exit(1);
+    process.stdout.write(String(p.number));
+  ' "$branch" "$sha" "$base" "$base_sha"); rc=$?
+  if [[ "$rc" -eq 2 ]]; then return 2; fi
+  if [[ "$rc" -ne 0 ]]; then
+    block "existing PR does not uniquely match the handoff branch/head/base; no reviewer dispatched"
+    return 1
+  fi
+  if ! evidence=$(run_with_wall_timeout 60 node "$SCRIPT_DIR/pr-review-evidence.mjs" \
+      --repo "$ORIGIN_HALT_SLUG" --pr "$pr" --expected-head "$sha" \
+      --config "$GIBSON/config/review-evidence.v1.json"); then
+    block "existing PR #$pr review was rejected or unreadable; no reviewer dispatched"
+    return 1
+  fi
+  if ! printf '%s' "$evidence" | node -e '
+    const r = JSON.parse(require("fs").readFileSync(0, "utf8"));
+    process.exit(r.headSha === process.argv[1] && r.state === "success" && r.reason === "pass" ? 0 : 1);
+  ' "$sha"; then
+    block "existing PR #$pr lacks accepted current-head review; reconcile its attempt before another request"
+    return 1
+  fi
+  if ! after=$(run_with_wall_timeout 60 gh pr list --repo "$ORIGIN_HALT_SLUG" \
+      --state open --head "$branch" --limit 2 --json "$fields") || [[ "$after" != "$rows" ]]; then
+    block "PR changed during review lookup; no reviewer dispatched"
+    return 1
+  fi
+  # Forward the actual evaluator result, never an unrelated/stale local review.
+  # It binds the head, not the base at review time. The supervisor must reconcile
+  # current-range coverage; this snapshot is not an exact-range local receipt,
+  # a new approval, or merge authorization.
+  HANDOFF_REVIEW_FILE="$STATE_DIR/pr-review-evidence.json"
+  if ! printf '%s\n' "$evidence" > "$HANDOFF_REVIEW_FILE"; then
+    block "could not save existing PR #$pr review evidence for the supervisor"
+    return 1
+  fi
+  info "head-bound independent review recorded on PR #$pr @ $sha — forwarding for range reconciliation without dispatch"
+  return 0
+}
+
 # Law 5 gate: never grade your own homework. Returns 0 only when a reviewer from
 # a different vendor completed successfully against exactly $base_sha...$sha.
 # Every other outcome — no distinct vendor configured, reviewer CLI missing,
@@ -2403,6 +2474,13 @@ ensure_cross_vendor_review() {
   # Never $REVIEW_ARTIFACT: this review runs on every handoff, and writing it there
   # would overwrite the escalation review the next hat was told to read.
   local out="$PRE_HANDOFF_REVIEW"
+  HANDOFF_REVIEW_FILE="$PRE_HANDOFF_REVIEW"
+
+  # Check live PR evidence before a local receipt: a rejected/pending remote
+  # review must not be replaced by a cached receipt or a duplicate dispatch.
+  local reuse_rc=0
+  reuse_pr_review "$branch" "$sha" "$base" "$base_sha" || reuse_rc=$?
+  case "$reuse_rc" in 0) return 0 ;; 2) ;; *) return 1 ;; esac
 
   if review_receipt_ok "$sha" "$branch" "$base" "$base_sha"; then
     info "distinct-vendor review already recorded for $branch @ $sha against $base @ $base_sha — reusing it"
@@ -2593,13 +2671,13 @@ supervisor_handoff() {
   [[ -z "$issue" ]] || task="Issue: $issue."
   [[ -z "$next" ]] || task="${task:+$task }Next action: $next"
   [[ -n "$task" ]] || task="See the branch diff; loop-state carried no task description."
-  # The pre-handoff review, not the escalation artifact: the supervisor must be
-  # shown the review of the exact diff it is being handed, which is the one the
-  # receipt above binds.
-  local review="$PRE_HANDOFF_REVIEW"
+  # The pre-handoff review or existing PR evidence, not the escalation artifact.
+  # A local receipt binds both endpoints; PR evidence may bind only the head.
+  # The supervisor message requires range reconciliation before reuse.
+  local review="$HANDOFF_REVIEW_FILE"
   # The supervisor gets the human branch NAMES — it opens a PR from one branch
   # into another, not from one commit into another — AND both exact SHAs, so the
-  # diffstat it is shown is built from the same two endpoints the reviewer saw.
+  # diffstat it is shown describes the current candidate endpoints.
   # Passing only the names would let a stale local ref describe a different diff
   # than the one that was reviewed. Both objects were fetched and verified by
   # resolve_base_pin/resolve_handoff_sha above, so the exact-SHA diff is readable.

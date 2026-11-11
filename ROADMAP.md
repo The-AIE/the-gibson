@@ -39,7 +39,7 @@ Design docs 01–15, operator guide, memory seeds, templates, specs. ✅
 - scripts: `claim.sh`, `gate.sh`/`gate-baseline.sh`, `preview-url.sh`, `loop.sh`
 - ci: `gibson-gate.yml` live on one sandbox repo; security layers 1–3 hard-fail
 - playbooks: `builder`, `reviewer`, `loop-step` (DOC-BACKLOG P0)
-- Mission Control patch: reviewer-absent → **block** (L-005); dispatched tasks run
+- Agent Kontrol patch: reviewer-absent → **block** (L-005); dispatched tasks run
   the claim protocol (docs/05 seam)
 - **Demo:** one Tier A issue flows end-to-end on the sandbox, zero human touches.
 

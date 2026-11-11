@@ -26,7 +26,7 @@ USAGE
   audit.sh --help
 
 EXAMPLES
-  ./scripts/delivery-control/audit.sh --repo example-org/target-app
+  ./scripts/delivery-control/audit.sh --repo acme/acme-app
   cd ~/Code/acme-app && ../../the-gibson/scripts/delivery-control/audit.sh --repo acme/acme-app
 EOF
 }

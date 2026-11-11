@@ -208,7 +208,9 @@ export function validateConfig(cfg) {
   // (Codex in GitHub) posts no evidence on this repo, so a hand-run Codex
   // verdict countersigned by the owner is the only way it reaches the gate
   // until the App does.
-  const ocv = cfg.ownerCountersignVendors ?? [];
+  const ocv = Object.prototype.hasOwnProperty.call(cfg, "ownerCountersignVendors")
+    ? cfg.ownerCountersignVendors
+    : [];
   if (!Array.isArray(ocv)) fail("ownerCountersignVendors");
   const seenOcv = new Set();
   for (const v of ocv) {
@@ -333,7 +335,8 @@ export function resolveAuthors(commits, identities, attestedVendor, { relaxed = 
       // to vendor `human` on its login alone: the login check exists to stop a
       // forged BOT login from dodging same-vendor exclusion, and `human`
       // excludes no reviewer, so a forged human login gains nothing. The diff
-      // still needs a listed cross-vendor reviewer at the exact head (D-014).
+      // still needs one independent approval at the exact head plus required
+      // checks (the current #623 contract).
       if (relaxed && vendor === "human") {
         vendors.add("human");
         if (attestedVendor) for (const v of attestedVendor) if (v !== "human") vendors.add(v);

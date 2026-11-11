@@ -369,9 +369,9 @@ headroom drops below 1,000 points.
 
 ## D-019 · 2026-10-23 · Codex reviews under its own App identity; the Mini author App never reviews; the owner countersign for Codex stays open by explicit config
 Decided (proposed by the #470 lane on 2026-10-23 after Mark asked why Codex is
-only advisory and said it should be a trusted reviewer; the owner's merge of the
-Tier C pull request that carries this record is the sign-off AGENTS.md's ratchet
-requires for a change to who may supply review evidence):
+only advisory and said it should be a trusted reviewer; the Tier C pull request
+that carries this record still requires one independent approval at the exact
+head plus the repository's required checks under the current #623 contract):
 - Codex has the `reviewer` role in `config/review-evidence.v1.json` under
   `chatgpt-codex-connector[bot]`: GitHub App `chatgpt-codex-connector`, appId
   1144995, installed on every The-AIE repository, already a trusted comment
@@ -387,10 +387,11 @@ requires for a change to who may supply review evidence):
   codex`, or an owner attestation naming codex. The evaluator's code is
   unchanged; its existing same-vendor exclusion does the work, and a
   same-vendor Codex FAIL on a codex head is ineligible too, not a verdict.
-- Evidence forms are the evaluator's existing two, bound to the App by slug
-  AND id: a formal APPROVED or CHANGES_REQUESTED review by the Bot login at the
-  exact head, or an App-authored `review-evidence:v1` comment at the exact
-  head. Codex's native GitHub review is NOT evidence: it is a COMMENTED review
+- Evidence forms are the evaluator's existing two: a formal APPROVED or
+  CHANGES_REQUESTED review by the configured Bot login at the exact head, or an
+  App-authored `review-evidence:v1` comment at the exact head whose App slug and
+  id match the configured identity. Codex's native GitHub review is NOT evidence:
+  it is a COMMENTED review
   plus a summary comment ("Codex Review: Didn't find any major issues") with a
   10-character "Reviewed commit" prefix, so it carries neither a verdict under
   the fleet severity contract nor an exact head.
@@ -444,8 +445,8 @@ requires for a change to who may supply review evidence):
   App, and the recipe for making Codex in GitHub emit the block is unwritten.
 Why: #469 on 2026-10-09 (Grok stalled 19 minutes on a 700-line diff while a
 Codex review found six rounds of real defects that could not be recorded as
-evidence), and D-015's accepted risk named reviewer availability as the live
-weakness of the Tier C floor with Grok as the only lane-bot reviewer. Posting a
+evidence), and the accepted risk named reviewer availability as the live
+weakness of the independent-approval floor with Grok as the only lane-bot reviewer. Posting a
 Codex verdict under the Grok App would misattribute it; posting it under the
 Mini author App would let one login author and review.
 Rejected: adding `reviewer` to the Mini author App (one login authoring and

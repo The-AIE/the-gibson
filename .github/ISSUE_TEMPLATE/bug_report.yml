@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in the harness does not do what its docs say, or a gate passes when it should not.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. If this could be a security problem (for example a gate that can be bypassed), please do **not** file it here; follow [SECURITY.md](https://github.com/The-AIE/the-gibson/blob/main/SECURITY.md) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run or do, and what did you see?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened, and where do the docs or the code say so?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of commands or steps that shows it.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: A release tag or commit SHA of the Gibson you are on.
+      placeholder: v0.1.3 or a 7+ character SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, shell and version, Node version, and which agent runtime if it matters.
+      placeholder: macOS 15, bash 3.2, Node 22, Claude Code
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output or logs
+      description: Paste relevant output. Remove any hostnames, paths or tokens first.
+      render: shell

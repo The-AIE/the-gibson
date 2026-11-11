@@ -1,5 +1,8 @@
 ---
 name: gibson
+key: gibson.gibson
+category: Engineering Tools
+tags: [gibson, orchestrator, setup]
 description: "Point The Gibson at any repo and run the full autonomous development loop — audit the repo, discover which AI runners/resources are available, set up GitHub guardrails, then drive continuous build/test/review/merge with cost-optimized routing (Grok for volume, Codex second, Claude for judgment, Devin as merge captain). The owner's recurring job is product direction in plain English; spend, credentials, and Tier-C merges always come back to them for explicit approval. Trigger on: 'gibson <repo>', 'run the gibson', 'point the gibson at', 'start autonomous development on', 'have the fleet build', or any ask to set up and run the agent-fleet SDLC loop against a repository."
 ---
 
