@@ -70,7 +70,7 @@ They compose: Agent Kontrol queues, dispatches, and tracks the work (the person 
 ```
 PLAN ─▶ DECOMPOSE ─▶ BUILD ─▶ TEST ─▶ REVIEW ─▶ UI/UX EVAL ─▶ SECURITY ─▶ MERGE ─▶ DEPLOY ─▶ RETRO
  │         │           │        │        │          │            │          │         │        │
- spec +    GitHub      worktree green    multi-lens Playwright   SAST/DAST/ E3+checks  Vercel   lessons →
+ spec +    GitHub      worktree green    multi-lens Playwright   SAST/DAST/ review+CI  Vercel   lessons →
  design    issues w/   + scope  gate     tiered,    vs. preview  authz/     for Tier C promote  harness
  language  contracts   claims            x-vendor   deployment   secrets    (D-015)   + verify PRs
 ```

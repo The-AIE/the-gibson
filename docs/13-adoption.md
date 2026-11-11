@@ -182,13 +182,13 @@ builder and reviewer share one account (L-015 / L-021 / issue #67). Setup once:
    `second-opinion.sh` so a `VERDICT: approve` becomes a formal review under the
    reviewer identity.
 
-Tier C clears on the G12 floor (E3 at the exact head plus required checks, D-015), not on a formal review alone. Formal review unblocks Tier A/B mergeability;
+Tier C clears on the G12 floor (one independent approval at the exact head plus required checks, D-015), not on a formal review alone. Formal review unblocks Tier A/B mergeability;
 it does not replace the remaining human gates.
 
 ## Definition of adopted
 
 A Tier A issue can go plan→issue→build→test→review→eval→merge→deploy→verified with
-**zero human touches**, and a Tier C issue clears on the G12 floor (E3 plus required
+**zero human touches**, and a Tier C issue clears on the G12 floor (one independent approval at the exact head plus required
 checks, D-015) and stops only at the human gates that apply to it (for example G6
 on billing code) and nowhere else.
 

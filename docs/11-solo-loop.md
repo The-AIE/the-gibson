@@ -47,7 +47,7 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 │   ── context reset ──
 │   6. REVIEW    lens review of the PR; Tier C → cross-vendor if  [reviewer hat]
 │                REVIEWER_CMD is set, else adversarial self-pass
-│                + flag Tier C for E3 (D-015)
+│                + flag Tier C for the G12 floor
 │   ── context reset ──
 │   7. UX-EVAL   Playwright vs. the PR's preview deployment       [ux-evaluator hat]
 │   8. SECURITY  CI layers run on the PR automatically; read      [security hat]
@@ -56,7 +56,7 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 │                then park the PR + write a handoff note)
 │  10. MERGE     if gates green and NOT human-gated → merge,      [release hat]
 │                verify deploy, smoke, cleanup. Tier C merges once
-│                E3 (exact head) + required checks are met (D-015).
+│                one independent approval (exact head) + required checks are met (D-015).
 │                Human-gated (e.g. G6 billing, schema) → queue it
 │                for Mark, move on.
 │  11. RETRO     any lesson? file it; harness fix if small        [historian hat]
@@ -322,7 +322,7 @@ installed and no second vendor is available, run:
 | Law 5 | Different vendor | Fresh context + alt model counts as present reviewer |
 | Escalation | `--reviewers codex,claude` | Same-vendor alt-model second opinion (no deadlock) |
 | Tier B | One independent APPROVE | Prefer **two** independent fresh-context APPROVE verdicts when available |
-| Tier C | G12 floor: E3 cross-vendor review at the exact head + required checks (D-015) | **Unchanged** — same-vendor review cannot meet E3; Tier C waits for a cross-vendor reviewer |
+| Tier C | G12 floor: one independent approval at the exact head + required checks (D-015) | **Unchanged** — the reviewer must be independent of the author (Law 5); cross-vendor preferred, not required |
 | Missing review path | Fail closed (block handoff) | Fail closed only if the configured solo review path itself breaks |
 
 Default `--reviewers` under `--solo-platform` becomes `<runner>:review` (e.g.

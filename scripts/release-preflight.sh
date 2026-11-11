@@ -40,7 +40,7 @@ WHAT IT DOES
        Actions infrastructure (startup_failure / no steps / no runner), which
        re-runs identically and is usually concurrent across open PRs.
     4. Tier. tier-c never gets an admin path (Law 7); it merges only on the
-       G12 floor (E3 at the exact head plus required checks, D-015).
+       G12 floor (one independent approval at the exact head plus required checks, D-015).
 
   Read-only. It never merges, never comments, never edits.
 
@@ -53,7 +53,7 @@ WHY
 RISKS
   - Read-only: worst case is a wrong verdict, which the checklist it prints lets
     you audit. It does not authorize anything by itself. It does not verify the
-    Tier C G12 floor (E3 cross-vendor review at the exact head plus required
+    Tier C G12 floor (one independent approval at the exact head plus required
     checks, D-015) — confirm that before merging Tier C — and ADMIN-CANDIDATE is
     a pre-launch operator decision, not a green light.
 

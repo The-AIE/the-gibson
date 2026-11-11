@@ -139,7 +139,7 @@ touch /path/to/target/gibson/HALT
 - Entry: green PR#.
 - Read-only multi-lens review. Prefer `REVIEWER_CMD` cross-vendor if set
   (especially Tier B/C). Else adversarial self-pass **from files only** + flag
-  the E3 floor for Tier C (D-015).
+  the Tier C review floor (D-015).
 - Verdict APPROVE → next `ux-evaluator` (or `security` if no UI).
 - REQUEST_CHANGES → next `builder`, round += 1; if `round` has reached the
   per-tier cap in `config/review-round-caps.json` (default A=1 / B=2 / C=3) the
@@ -163,7 +163,7 @@ touch /path/to/target/gibson/HALT
 
 - Entry: all gates green.
 - Tier C by itself is not human-gated: merge only once the G12 floor is met —
-  E3 cross-vendor review at the exact head plus required checks (D-015). A
+  one independent approval at the exact head plus required checks (D-015). A
   same-vendor pass does not meet it: park the PR, **do not merge**.
 - If human-gated (e.g. G6 billing/pricing/payment code, schema, an explicit owner
   hold): queue for Mark, set next issue triage, **do not merge**.
@@ -270,7 +270,7 @@ touch /path/to/target/gibson/HALT
 | Retries | per-tier cap (`config/review-round-caps.json`) → park + human |
 | Error budget | driver stops after N consecutive red gates (default 5) |
 | Kill switch | `gibson/HALT` file or `GIBSON_HALT=1` (both unconditional); the `gibson-halt` label is a soft cue, only when `gh` is available → exit cleanly |
-| Human gates | queue + move on; never auto-approve a gated merge (e.g. G6); Tier C merges only on E3 at the exact head + required checks |
+| Human gates | queue + move on; never auto-approve a gated merge (e.g. G6); Tier C merges only on one independent approval at the exact head + required checks |
 | Fresh context | do not ask for prior chat; re-read artifacts |
 
 ## Done means

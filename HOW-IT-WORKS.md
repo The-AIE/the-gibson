@@ -170,7 +170,7 @@ The closed list of real interruptions is in
 money (including billing/pricing/payment merges), outward-facing actions, owner
 identity, product-scope ambiguity, credentials, active exploitation, and
 prompt-injection incidents. Tier C classification alone is not a stop: a Tier C
-merge clears on E3 cross-vendor review at the exact head plus required checks
+merge clears on one independent approval at the exact head plus required checks
 (the G12 floor, D-015).
 
 ### How several AI systems work as one crew
@@ -239,8 +239,8 @@ The Gibson supports two operating shapes:
 
 - **Single-platform / solo loop:** one runner cycles through fresh role contexts and
   file handoffs. A separate model or vendor is still preferred for review; Tier C
-  still needs E3, so it waits for a cross-vendor review at the exact head plus
-  required checks (D-015) instead of merging on a same-vendor pass.
+  still needs one independent approval at the exact head plus required checks
+  (D-015); the author's own context never supplies it (Law 5).
 - **Multi-model fleet:** a coordinator assigns disjoint work to several vendor
   pools, with cross-vendor review and one serialized merge train.
 
@@ -383,8 +383,8 @@ AI-surface, and runtime findings.
 **Gate:** hard-fail layers pass; report-only findings receive owners and follow-up.
 
 Tier C surfaces — authentication, money, consent/PII, security boundaries, schema,
-and production data — require frontier-grade adversarial review, cross-vendor review
-at the exact head (E3), and green required checks. No owner merge step (D-015).
+and production data — require adversarial cases in the review, one independent
+approval at the exact head, and green required checks. No owner merge step (D-015).
 
 #### 7. Merge
 
@@ -590,9 +590,9 @@ The author cannot approve its own work. Independence includes:
 
 Cross-vendor review is the default because it adds different training and tool
 failure modes. Single-platform mode is a documented degradation using a distinct
-model/fresh context; it does not weaken the Tier C floor. A same-vendor pass cannot
-provide E3, so Tier C waits for cross-vendor review at the exact head plus required
-checks (D-015).
+model/fresh context; it does not weaken the Tier C floor. Tier C still
+needs one independent approval at the exact head plus required checks (D-015);
+cross-vendor is preferred, not required, and the author never reviews its own work.
 
 #### Risk-shaped depth
 
@@ -600,8 +600,8 @@ checks (D-015).
 - **Tier B:** shared or multi-file behavior, full review lenses and applicable UX
   evaluation.
 - **Tier C:** money, auth, consent/PII, security boundaries, schema, or production
-  data; frontier adversarial review, serialized stateful work, and E3 cross-vendor
-  review at the exact head plus required checks, with no owner merge step (D-015).
+  data; adversarial review cases, serialized stateful work, and one independent
+  approval at the exact head plus required checks, with no owner merge step (D-015).
   Billing/pricing/payment code still needs the owner's merge decision (G6).
 
 Risk may increase when the actual diff expands. It does not silently decrease
