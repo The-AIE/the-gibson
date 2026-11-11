@@ -121,6 +121,7 @@ const RISK_PATH = "dynamic/github-code-scanning/code-security-risk-assessment";
 const REVIEW_READY_PATH = ".github/workflows/review-ready.yml";
 const LESSON_PROOF_PATH = ".github/workflows/lesson-proof.yml";
 const DRAIN_PATH = ".github/workflows/drain-ratchet.yml";
+const EVAL_PATH = ".github/workflows/eval-gate.yml";
 const WFS = [
   { id: 1, name: "Gibson self-gate", path: ".github/workflows/gibson-self-gate.yml", state: "active" },
   { id: 2, name: "Sensor health", path: ".github/workflows/sensor-health.yml", state: "active" },
@@ -130,7 +131,8 @@ const WFS = [
   { id: 5, name: "PR review evidence", path: REVIEW_EVIDENCE_WORKFLOW_PATH, state: "active" },
   { id: 7, name: "Drain ratchet", path: DRAIN_PATH, state: "active" },
   { id: 8, name: "review-ready", path: REVIEW_READY_PATH, state: "active" },
-  { id: 9, name: "Lesson proof", path: LESSON_PROOF_PATH, state: "active" },
+  { id: 9, name: "gibson-eval-gate", path: EVAL_PATH, state: "active" },
+  { id: 10, name: "Lesson proof", path: LESSON_PROOF_PATH, state: "active" },
 ];
 function head(sha = HEAD, has_pages = true) {
   return [
@@ -196,7 +198,7 @@ function greenCoreHandlers(has_pages, workflows = WFS, { emptyPages = false } = 
       respond: () => res(200, { jobs: [job({ id: 77, name: "sensors" })] }),
     },
     {
-      match: (u) => /\/workflows\/[2-9]\/runs\?/.test(u),
+      match: (u) => /\/workflows\/(?:[2-9]|10)\/runs\?/.test(u),
       respond: (u) => {
         const id = Number(u.match(/workflows\/(\d+)/)[1]);
         if (emptyPages && id === 4) {
@@ -206,7 +208,7 @@ function greenCoreHandlers(has_pages, workflows = WFS, { emptyPages = false } = 
           workflow_runs: [
             run({
               id: 400 + id,
-              event: id === 2 || id === 5 || id === 7 || id === 8 || id === 9 ? "schedule" : "dynamic",
+              event: id === 2 || id === 5 || id === 7 || id === 8 || id === 9 || id === 10 ? "schedule" : "dynamic",
               updated_at: "2026-08-30T10:00:00Z",
             }),
           ],
@@ -512,14 +514,14 @@ describe("matrix 10-13 audit integration", () => {
         respond: () => res(200, { jobs: [job({ id: 77, name: "sensors" })] }),
       },
       {
-        match: (u) => /\/workflows\/[2-9]\/runs\?/.test(u),
+        match: (u) => /\/workflows\/(?:[2-9]|10)\/runs\?/.test(u),
         respond: (u) => {
           const id = Number(u.match(/workflows\/(\d+)/)[1]);
           return res(200, {
             workflow_runs: [
               run({
                 id: 400 + id,
-                event: id === 2 || id === 5 || id === 7 || id === 8 || id === 9 ? "schedule" : "dynamic",
+                event: id === 2 || id === 5 || id === 7 || id === 8 || id === 9 || id === 10 ? "schedule" : "dynamic",
                 updated_at: "2026-08-30T10:00:00Z",
               }),
             ],
@@ -839,7 +841,7 @@ describe("coordinator gap controls", () => {
       repository: "The-AIE/the-gibson",
       // Five-workflow fixture: this test pins the run-page cap, not workflow-list paging.
       // A full last page looks incomplete, so later checked-in workflows stay out of this fixture.
-      registry: { ...reg(), policies: reg().policies.filter((p) => p.path !== RISK_PATH && p.path !== DRAIN_PATH && p.path !== REVIEW_READY_PATH && p.path !== LESSON_PROOF_PATH) },
+      registry: { ...reg(), policies: reg().policies.filter((p) => p.path !== RISK_PATH && p.path !== DRAIN_PATH && p.path !== REVIEW_READY_PATH && p.path !== EVAL_PATH && p.path !== LESSON_PROOF_PATH) },
       observationTime: OBS,
       runPageCap: 3,
       perPage: 2,
@@ -856,7 +858,7 @@ describe("coordinator gap controls", () => {
         if (/\/actions\/workflows\?/.test(u)) {
           const page = Number(new URL(u).searchParams.get("page") || 1);
           const pp = Number(new URL(u).searchParams.get("per_page") || 100);
-          return res(200, { workflows: WFS.filter((w) => w.path !== RISK_PATH && w.path !== DRAIN_PATH && w.path !== REVIEW_READY_PATH && w.path !== LESSON_PROOF_PATH).slice((page - 1) * pp, page * pp) });
+          return res(200, { workflows: WFS.filter((w) => w.path !== RISK_PATH && w.path !== DRAIN_PATH && w.path !== REVIEW_READY_PATH && w.path !== EVAL_PATH && w.path !== LESSON_PROOF_PATH).slice((page - 1) * pp, page * pp) });
         }
         if (/\/workflows\/2\/runs\?/.test(u)) {
           return res(200, {
