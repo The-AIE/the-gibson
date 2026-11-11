@@ -35,6 +35,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -233,7 +234,38 @@ function lockIsStale(lockPath) {
   }
 }
 
-function acquireLock(lockPath, timeoutMs) {
+function reclaimStaleLock(lockPath) {
+  // Rename is the claim. Only one waiter can move the stale file. A waiter
+  // must not unlink the original path: that deletes a lock another process
+  // created after the stale check.
+  const claim = `${lockPath}.reclaim.${process.pid}.${randomBytes(6).toString("hex")}`;
+  try {
+    renameSync(lockPath, claim);
+  } catch {
+    return false;
+  }
+  if (!lockIsStale(claim)) {
+    try {
+      linkSync(claim, lockPath);
+    } catch {
+      return false;
+    }
+    try {
+      unlinkSync(claim);
+    } catch {
+      /* the restored lock is the one that matters */
+    }
+    return false;
+  }
+  try {
+    unlinkSync(claim);
+  } catch {
+    /* the path is already free */
+  }
+  return true;
+}
+
+export function acquireLock(lockPath, timeoutMs) {
   const start = Date.now();
   mkdirSync(dirname(lockPath), { recursive: true });
   for (;;) {
@@ -244,13 +276,9 @@ function acquireLock(lockPath, timeoutMs) {
       return { ok: true, fd, path: lockPath };
     } catch (error) {
       if (error.code !== "EEXIST") return { ok: false, reason: "lock-failed" };
-      if (lockIsStale(lockPath)) {
-        try {
-          unlinkSync(lockPath);
-          continue;
-        } catch {
-          /* another waiter took it */
-        }
+      if (lockIsStale(lockPath) && reclaimStaleLock(lockPath)) {
+        if (Date.now() - start >= timeoutMs) return { ok: false, reason: "lock-timeout" };
+        continue;
       }
       if (Date.now() - start >= timeoutMs) return { ok: false, reason: "lock-timeout" };
       sleepMs(Math.min(20, Math.max(0, timeoutMs - (Date.now() - start))));
@@ -258,7 +286,7 @@ function acquireLock(lockPath, timeoutMs) {
   }
 }
 
-function releaseLock(lock) {
+export function releaseLock(lock) {
   if (!lock || !lock.ok) return;
   try {
     closeSync(lock.fd);
@@ -901,6 +929,27 @@ function transition(inc, to, evidence, at, report) {
   return true;
 }
 
+function deploymentBoundaryMs(inc) {
+  const recorded = inc.evidence && inc.evidence.deployed && inc.evidence.deployed.recorded_at;
+  const fromEvidence = parseRfc3339(recorded);
+  if (fromEvidence !== null) return fromEvidence;
+  let boundary = null;
+  for (const step of inc.history || []) {
+    if (step.to !== "deployed") continue;
+    const ms = parseRfc3339(step.at);
+    if (ms !== null) boundary = ms;
+  }
+  return boundary;
+}
+
+function failurePredatesDeployment(inc, observedAt) {
+  const boundary = deploymentBoundaryMs(inc);
+  if (boundary === null) return false;
+  const observed = parseRfc3339(observedAt);
+  if (observed === null) return false;
+  return observed < boundary;
+}
+
 function onFailure(state, event, id, nowMs, report, opts) {
   const normalized = normalizeSignature(event.raw_signature);
   const key = incidentKey({
@@ -914,6 +963,7 @@ function onFailure(state, event, id, nowMs, report, opts) {
     const fresh = addAttempt(existing, event, id);
     if (!fresh) return;
     if (existing.state === "effective" || existing.state === "deployed") {
+      if (failurePredatesDeployment(existing, event.observed_at)) return;
       const from = existing.state;
       existing.state = "reopened";
       existing.history.push({ from, to: "reopened", at: event.observed_at });
@@ -980,6 +1030,7 @@ function onReviewCap(state, event, id, nowMs, report, opts, caps) {
   noteEvidence(inc, event);
   addAttempt(inc, event, id);
   if (inc.state === "effective" || inc.state === "deployed") {
+    if (failurePredatesDeployment(inc, event.observed_at)) return;
     const from = inc.state;
     inc.state = "reopened";
     inc.history.push({ from, to: "reopened", at: event.observed_at });
@@ -987,7 +1038,31 @@ function onReviewCap(state, event, id, nowMs, report, opts, caps) {
     maybeIssue(inc, nowMs, report, opts, "escape");
     return;
   }
-  if (realIssueCount(inc) === 0) maybeIssue(inc, nowMs, report, opts, "review-cap");
+  if (inc.state === "reopened" || realIssueCount(inc) === 0) {
+    maybeIssue(inc, nowMs, report, opts, "review-cap");
+  }
+}
+
+function deliveryId(event) {
+  if (event.kind === "review-cap") {
+    return JSON.stringify([
+      "review-cap",
+      event.repo,
+      event.attempt_id,
+      event.head_sha,
+      event.detector_version,
+      event.raw_signature,
+      event.tier,
+      event.review_rounds,
+    ]);
+  }
+  return eventId({
+    repo: event.repo,
+    attemptId: event.attempt_id,
+    headSha: event.head_sha,
+    detectorVersion: event.detector_version,
+    rawSignature: event.raw_signature,
+  });
 }
 
 function controlEventId(event) {
@@ -1040,13 +1115,7 @@ function applyEvent(state, event, nowMs, report, opts, caps) {
     return;
   }
   if (event.kind === "detector-status") return;
-  const id = eventId({
-    repo: event.repo,
-    attemptId: event.attempt_id,
-    headSha: event.head_sha,
-    detectorVersion: event.detector_version,
-    rawSignature: event.raw_signature,
-  });
+  const id = deliveryId(event);
   if (state.seen_event_ids.includes(id)) return;
   state.seen_event_ids.push(id);
   if (event.kind === "ci-failure") onFailure(state, event, id, nowMs, report, opts);
@@ -1105,7 +1174,10 @@ function applyIssues(state, report, persist) {
         /* temp body already gone */
       }
       if (!result || result.error || result.status !== 0) {
-        request.status = "planned";
+        // A child that never started cannot have created an issue. A child
+        // that started and then failed may have created one and lost the reply.
+        // Leave that request "creating" so the next --apply does not open another.
+        if (result && result.error) request.status = "planned";
         report.evaluation = "UNKNOWN";
         report.unknown_reason = "gh issue create failed";
         report.alerts.push({ reason: "triage-alert", detail: "gh issue create failed" });

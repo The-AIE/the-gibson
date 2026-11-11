@@ -223,6 +223,27 @@ dry() {
   run_tool --events "$events" --state "$state" --now "$now" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human "$@"
 }
 
+write_cap() {
+  local dest="$1" attempt="$2" sha="$3" at="$4" raw="$5" det="$6" tier="$7" rounds="$8"
+  CAP_DEST=$dest CAP_ATTEMPT=$attempt CAP_SHA=$sha CAP_AT=$at CAP_RAW=$raw CAP_DET=$det \
+    CAP_TIER=$tier CAP_ROUNDS=$rounds \
+    node --input-type=module -e '
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.CAP_DEST, JSON.stringify({
+  kind: "review-cap",
+  repo: "The-AIE/the-gibson",
+  attempt_id: process.env.CAP_ATTEMPT,
+  head_sha: process.env.CAP_SHA,
+  observed_at: process.env.CAP_AT,
+  raw_signature: process.env.CAP_RAW,
+  detector_version: process.env.CAP_DET,
+  detector_health: "healthy",
+  tier: process.env.CAP_TIER,
+  review_rounds: Number(process.env.CAP_ROUNDS)
+}) + "\n");
+'
+}
+
 write_ci() {
   local dest="$1" attempt="$2" sha="$3" at="$4" raw="$5" det="$6"
   CI_DEST=$dest CI_ATTEMPT=$attempt CI_SHA=$sha CI_AT=$at CI_RAW=$raw CI_DET=$det \
@@ -916,17 +937,17 @@ if [[ "$apply_lines" == "$apply_after" ]]; then ok "second apply left the gh log
 
 GH_MODE=fail
 : > "$GH_LOG"
-check "gh failure is UNKNOWN and reverts to planned" 3 \
+check "gh failure is UNKNOWN and stays creating" 3 \
   'r.evaluation==="UNKNOWN" && r.unknown_reason==="gh issue create failed" && r.gh_invocations===1' \
   --apply --events "$FIX/two-attempts.jsonl" --state "$TMP/gh-fail.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
-expect_state "failed create stays planned" "$TMP/gh-fail.json" \
-  'Object.values(s.incidents)[0].issue_requests[0].status==="planned"'
+expect_state "ambiguous gh failure stays creating" "$TMP/gh-fail.json" \
+  'Object.values(s.incidents)[0].issue_requests[0].status==="creating"'
 GH_MODE=ok
-check "a reverted create can be retried" 0 \
-  'r.evaluation==="complete" && r.gh_invocations===1 && r.issue_requests.length===0' \
+: > "$GH_LOG"
+check "an ambiguous create is not retried" 3 \
+  'r.evaluation==="UNKNOWN" && r.unknown_reason==="a previous create did not finish" && r.gh_invocations===0' \
   --apply --events "$FIX/two-attempts.jsonl" --state "$TMP/gh-fail.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
-expect_state "retried create is stored" "$TMP/gh-fail.json" \
-  'Object.values(s.incidents)[0].issue_requests[0].status==="created"'
+if [[ ! -s "$GH_LOG" ]]; then ok "ambiguous create did not call gh"; else bad "ambiguous create did not call gh"; fi
 
 GH_MODE=badurl
 : > "$GH_LOG"
@@ -954,6 +975,12 @@ rm -f "$BIN/cat"
 mv "$BIN/gh.off" "$BIN/gh"
 expect_state "missing gh leaves the request planned" "$TMP/no-gh.json" \
   'Object.values(s.incidents)[0].issue_requests[0].status==="planned"'
+: > "$GH_LOG"
+check "a create that never started can be retried" 0 \
+  'r.evaluation==="complete" && r.gh_invocations===1 && r.issue_requests.length===0' \
+  --apply --events "$FIX/two-attempts.jsonl" --state "$TMP/no-gh.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+expect_state "retried create is stored" "$TMP/no-gh.json" \
+  'Object.values(s.incidents)[0].issue_requests[0].status==="created"'
 
 GH_MODE=snapshot
 export RETRO_STATE_PATH="$TMP/snap-apply.json"
@@ -1093,6 +1120,134 @@ if grep -q 'pr merge' "$TOOL" || grep -q '\["merge"' "$TOOL"; then
   bad "actuator does not merge"
 else
   ok "actuator does not merge"
+fi
+
+printf '\n%s\n' "=== delivery identity, deployment boundary, reopened cap ==="
+write_ci "$TMP/id-ci.jsonl" r1 "$SHA_C" "$NOW0" "$RAW88" det-1
+write_cap "$TMP/id-cap.jsonl" r1 "$SHA_C" "$NOW0" "$RAW88" det-1 B 3
+cat "$TMP/id-ci.jsonl" "$TMP/id-cap.jsonl" > "$TMP/id-both.jsonl"
+check "a ci-failure does not suppress a review-cap breach" 0 \
+  'r.incidents.length===1 && r.incidents[0].real_issue_requests===1 && r.issue_requests[0].reason==="review-cap"' \
+  --events "$TMP/id-both.jsonl" --state "$TMP/id-both.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+
+write_cap "$TMP/id-exact.jsonl" r2 "$SHA_C" "$NOW0" "$RAW88" det-1 B 2
+write_cap "$TMP/id-over.jsonl" r2 "$SHA_C" "$NOW0" "$RAW88" det-1 B 3
+cat "$TMP/id-exact.jsonl" "$TMP/id-over.jsonl" > "$TMP/id-rounds.jsonl"
+check "an at-cap event does not consume a later breach" 0 \
+  'r.incidents.length===1 && r.incidents[0].real_issue_requests===1 && r.issue_requests[0].reason==="review-cap"' \
+  --events "$TMP/id-rounds.jsonl" --state "$TMP/id-rounds.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+
+HIST=$TMP/hist.json
+check "historical seed" 0 'r.incidents.length===1 && r.incidents[0].state==="detected"' \
+  --events "$FIX/two-attempts.jsonl" --state "$HIST" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+walk_to_effective "$HIST" 2 duty-human 02
+write_ci "$TMP/old-fail.jsonl" old1 "$SHA_D" "2026-01-01T00:00:02Z" "$RAW88" det-1
+check "a pre-deployment failure does not reopen" 0 \
+  'r.evaluation==="complete" && r.incidents[0].state==="effective" && r.issue_requests.length===0 && r.incidents[0].revoked_claims.length===0' \
+  --events "$TMP/old-fail.jsonl" --state "$HIST" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+expect_state "pre-deployment attempt is kept" "$HIST" \
+  'const i=Object.values(s.incidents)[0]; i.state==="effective" && i.revoked_claims.length===0 && i.attempts.some((a) => a.attempt_id==="old1")'
+write_ci "$TMP/boundary-fail.jsonl" boundary1 "$SHA_E" "2026-01-01T00:00:03Z" "$RAW88" det-1
+check "a failure at the deployment boundary reopens" 0 \
+  'r.incidents[0].state==="reopened" && r.incidents[0].revoked_claims.some((c) => c.claim==="effective")' \
+  --events "$TMP/boundary-fail.jsonl" --state "$HIST" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+
+CAPH=$TMP/caph.json
+write_cap "$TMP/caph-seed.jsonl" c0 "$SHA_C" "$NOW0" "$RAW88" det-1 B 3
+check "review-cap historical seed" 0 'r.incidents.length===1 && r.incidents[0].real_issue_requests===1' \
+  --events "$TMP/caph-seed.jsonl" --state "$CAPH" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+walk_to_effective "$CAPH" 2 duty-human 02
+write_cap "$TMP/caph-old.jsonl" c-old "$SHA_D" "2026-01-01T00:00:02Z" "$RAW88" det-1 B 4
+check "a pre-deployment review-cap breach does not reopen" 0 \
+  'r.incidents[0].state==="effective" && r.issue_requests.length===0 && r.incidents[0].revoked_claims.length===0 && r.incidents[0].real_issue_requests===1' \
+  --events "$TMP/caph-old.jsonl" --state "$CAPH" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_cap "$TMP/caph-new.jsonl" c-new "$SHA_E" "2026-01-03T00:00:00Z" "$RAW88" det-1 B 4
+check "a review-cap breach after deployment reopens" 0 \
+  'r.incidents[0].state==="reopened" && r.issue_requests[0].action==="suppressed-flood" && r.incidents[0].real_issue_requests===1' \
+  --events "$TMP/caph-new.jsonl" --state "$CAPH" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+
+CAPR=$TMP/capr.json
+write_cap "$TMP/capr-seed.jsonl" c0 "$SHA_C" "$NOW0" "$RAW88" det-1 B 3
+check "reopened cap seed" 0 'r.incidents[0].state==="detected" && r.incidents[0].real_issue_requests===1' \
+  --events "$TMP/capr-seed.jsonl" --state "$CAPR" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+walk_to_effective "$CAPR" 2 duty-human 02
+write_cap "$TMP/capr-week.jsonl" c1 "$SHA_D" "2026-01-03T00:00:00Z" "$RAW88" det-1 B 3
+check "cap escape inside the week is suppressed" 0 \
+  'r.incidents[0].state==="reopened" && r.issue_requests[0].action==="suppressed-flood" && r.incidents[0].real_issue_requests===1 && r.incidents[0].repair_attempts_used===1' \
+  --events "$TMP/capr-week.jsonl" --state "$CAPR" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_cap "$TMP/capr-later.jsonl" c7 "$SHA_E" "2026-01-09T00:00:00Z" "$RAW88" det-1 B 4
+check "a later reopened cap breach can request another repair" 0 \
+  'r.issue_requests[0].action==="would-create" && r.issue_requests[0].reason==="review-cap" && r.incidents[0].repair_attempts_used===2 && r.incidents[0].real_issue_requests===2 && r.incidents[0].state==="reopened"' \
+  --events "$TMP/capr-later.jsonl" --state "$CAPR" --now "$NOW7" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+
+printf '\n%s\n' "=== stale lock reclaim ==="
+cat > "$TMP/lock-probe.mjs" << 'END'
+import { appendFileSync } from "node:fs";
+const mod = await import(process.env.TOOL_URL);
+const lock = mod.acquireLock(process.env.LOCK_PATH, 5000);
+if (!lock.ok) {
+  process.stderr.write(String(lock.reason) + "\n");
+  process.exit(2);
+}
+appendFileSync(process.env.LOCK_LOG, process.pid + " enter " + Date.now() + "\n");
+const view = new Int32Array(new SharedArrayBuffer(4));
+Atomics.wait(view, 0, 0, 400);
+appendFileSync(process.env.LOCK_LOG, process.pid + " leave " + Date.now() + "\n");
+mod.releaseLock(lock);
+END
+dead_pid=$("$NODE_REAL" -e 'process.stdout.write(String(process.pid))')
+printf '%s' "$dead_pid" > "$TMP/race.lock"
+: > "$TMP/race.log"
+TOOL_URL="file://${TOOL}" LOCK_PATH="$TMP/race.lock" LOCK_LOG="$TMP/race.log" \
+  node "$TMP/lock-probe.mjs" >"$TMP/race1.out" 2>"$TMP/race1.err" &
+race1=$!
+TOOL_URL="file://${TOOL}" LOCK_PATH="$TMP/race.lock" LOCK_LOG="$TMP/race.log" \
+  node "$TMP/lock-probe.mjs" >"$TMP/race2.out" 2>"$TMP/race2.err" &
+race2=$!
+race1_rc=0
+race2_rc=0
+wait "$race1" || race1_rc=$?
+wait "$race2" || race2_rc=$?
+if [[ "$race1_rc" -eq 0 && "$race2_rc" -eq 0 ]]; then
+  ok "two stale-lock waiters both finished"
+else
+  bad "two stale-lock waiters both finished (rc=$race1_rc/$race2_rc)"
+fi
+if LOCK_LOG="$TMP/race.log" node --input-type=module -e '
+import { readFileSync } from "node:fs";
+const lines = readFileSync(process.env.LOCK_LOG, "utf8").trim().split("\n").filter(Boolean);
+let open = null;
+const spans = [];
+for (const line of lines) {
+  const parts = line.split(" ");
+  if (parts.length !== 3) process.exit(2);
+  const pid = parts[0];
+  const kind = parts[1];
+  const at = Number(parts[2]);
+  if (kind === "enter") {
+    if (open) process.exit(3);
+    open = { pid, at };
+  } else if (kind === "leave") {
+    if (!open || open.pid !== pid) process.exit(4);
+    spans.push({ pid, start: open.at, end: at });
+    open = null;
+  } else {
+    process.exit(5);
+  }
+}
+if (open || spans.length !== 2) process.exit(6);
+spans.sort((a, b) => a.start - b.start);
+if (!(spans[0].end <= spans[1].start)) process.exit(7);
+if (spans[0].pid === spans[1].pid) process.exit(8);
+'; then
+  ok "two stale-lock waiters did not overlap"
+else
+  bad "two stale-lock waiters did not overlap"
+fi
+if [[ ! -e "$TMP/race.lock" ]]; then
+  ok "stale-lock waiters released the lock"
+else
+  bad "stale-lock waiters released the lock"
 fi
 
 printf '\n%s\n' "=== summary ==="

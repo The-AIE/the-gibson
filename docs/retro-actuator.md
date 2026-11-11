@@ -26,8 +26,11 @@ use the network.
 
 Two identifiers:
 
-- `event_id` = (`repo`, `attempt_id`, `head_sha`, `detector_version`, `raw_signature`).
+- `event_id` for a `ci-failure` is (`repo`, `attempt_id`, `head_sha`, `detector_version`, `raw_signature`).
   This is delivery identity. A repeated line is one delivery.
+- A `review-cap` delivery adds `kind`, `tier`, and `review_rounds` to that tuple.
+  An event at the cap does not consume the identity of a later breach, and a
+  `ci-failure` with the same attempt fields does not consume a review-cap delivery.
 - `incident_key` = (`repo`, normalized signature, `signature_schema_version`).
   Attempt id and head SHA are stored as evidence. They are not dedup inputs.
   Two deliveries of the same attempt id are one attempt, even when the head SHA differs.
@@ -56,9 +59,15 @@ to `healthy`, an exposure window whose end is after its start, a
 `minimum_sample` of at least 1, a `sample_count` at least that minimum, and a
 `measurement_ref` that is non-empty and not the literal `unknown`.
 
-A later failed attempt while the incident is `deployed` or `effective` reopens
-that same incident and revokes the claim it left. This program does not edit
-`memory/LESSONS.md`.
+A failed attempt observed at or after the current deployment, while the incident
+is `deployed` or `effective`, reopens that same incident and revokes the claim
+it left. The boundary is the current deployed evidence `recorded_at` when that
+timestamp parses, otherwise the `at` of the latest history step into `deployed`.
+An attempt observed strictly before that boundary is stored as evidence. It does
+not reopen the incident, revoke the claim, or request another repair. The same
+rule applies to a review-cap breach. A fresh review-cap breach on a `reopened`
+incident still reaches the flood and budget checks, even when an earlier real
+request is on the incident. This program does not edit `memory/LESSONS.md`.
 
 ## Flood, budget, drift
 
@@ -92,10 +101,12 @@ batch. A state that already has incidents but no trusted schema is refused.
 
 The default mode is dry-run. The report lists the issue the program would open.
 `--apply` is the only path that runs `gh issue create`. Before that call it
-writes the request as `creating`. If the process dies after GitHub has created
-the issue, the next `--apply` sees that marker and does not open a second
-issue. Dry-run still writes the state file, so a second dry-run against the
-same `--state` path dedups.
+writes the request as `creating`. If `gh` never starts, the request returns to
+`planned` and a later `--apply` may try again. If `gh` starts and fails, or
+returns success without an issue URL, the request stays `creating`. The next
+`--apply` sees that marker and does not open a second issue. The same marker
+covers a process that dies after GitHub has created the issue. Dry-run still
+writes the state file, so a second dry-run against the same `--state` path dedups.
 
 `.github/workflows/retro-actuator.yml` is a new workflow. It runs on a weekly
 schedule and on `workflow_dispatch`. It passes no `--apply`. Its state path is
