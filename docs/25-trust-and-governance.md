@@ -55,7 +55,7 @@ Each already exists in the harness:
 
 The Gibson governs **build-time**: how a fleet safely produces software. It stops at
 ship. A deployed agent that *acts in the world at runtime* — books, pays, moves data —
-is a different trust problem, owned by a **runtime governor** (Mission Control for our
+is a different trust problem, owned by a **runtime governor** (Agent Kontrol for our
 own dispatch; a runtime policy layer for the agentic products we ship). The two
 compose:
 

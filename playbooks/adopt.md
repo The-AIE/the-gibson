@@ -177,8 +177,8 @@ immediately; whole-codebase hard-fail when burn-down completes.
 
 ## Step 5 — Wire the fleet
 
-1. Register repo in Mission Control (project name, workdir per machine).
-2. Verify each runtime can: clone, run gate, reach MC.
+1. Register repo in Agent Kontrol (project name, workdir per machine).
+2. Verify each runtime can: clone, run gate, reach AK.
 3. **Canary:** one real Tier A issue per runtime through the full pipeline.
 4. Seed memory: adoption report → first DECISIONS entries (fork or target as
    appropriate).

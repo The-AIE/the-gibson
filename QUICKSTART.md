@@ -178,7 +178,7 @@ Optional multi-model upgrade (not required):
 | Tier A canary | Merged + deployed without you babysitting steps |
 | Human gates | You only saw decision cards for real owner decisions (or none) |
 | Kill switch | You know how to pause (`gibson-halt` / `gibson/HALT`) |
-| Digest | You know where status will show up (Hermes / GH / MC) |
+| Digest | You know where status will show up (Hermes / GH / AK) |
 
 ---
 

@@ -63,7 +63,7 @@ PR: #123
 
 No lifecycle hooks like Claude. Options:
 
-- Session watcher daemon (Mission Control pattern)
+- Session watcher daemon (Agent Kontrol pattern)
 - Best-effort MCP `report_status` if configured
 - Always: PR + claim table as ground truth for "who's working"
 
