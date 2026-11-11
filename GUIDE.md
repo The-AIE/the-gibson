@@ -153,8 +153,8 @@ Different agents (or fresh solo-loop hats):
 | UX (if UI) | `playbooks/ux-evaluator.md` | `BASE_URL=$(scripts/preview-url.sh N)` + Playwright |
 | Security | `playbooks/security.md` + CI | layers table on PR |
 
-Tier C clears on one independent approval at the exact head plus green required checks
-(G12 floor, D-015), with no owner step. You only intervene for the
+Tier C clears on one independent approval at the exact head, from a review that covered
+the adversarial cases, plus green required checks (G12 floor, D-015), with no owner step. You only intervene for the
 [human gates](docs/14-human-gates.md) — for example G6 billing/pricing/payment code,
 G1 destructive schema changes, or the one-schema-merge-in-flight rule.
 

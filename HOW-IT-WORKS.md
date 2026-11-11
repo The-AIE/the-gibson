@@ -170,8 +170,8 @@ The closed list of real interruptions is in
 money (including billing/pricing/payment merges), outward-facing actions, owner
 identity, product-scope ambiguity, credentials, active exploitation, and
 prompt-injection incidents. Tier C classification alone is not a stop: a Tier C
-merge clears on one independent approval at the exact head plus required checks
-(the G12 floor, D-015).
+merge clears on one independent approval at the exact head, from a review that
+covered the adversarial cases, plus required checks (the G12 floor, D-015).
 
 ### How several AI systems work as one crew
 
