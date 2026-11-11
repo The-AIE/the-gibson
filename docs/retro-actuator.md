@@ -78,8 +78,13 @@ of `unknown` is rejected and does not reset the count.
 If the state's trusted signature schema is not version 1, or an event brings a
 detector version the state does not trust yet, the run reports drifted open
 keys and does not apply the batch and does not call `gh`. The following run
-that repeats those versions promotes trust and then applies. A further new
-detector version withholds again. Open incident keys are not rewritten in place.
+that repeats the untrusted part promotes trust and then applies. For a
+detector version, every version in that next batch which the state does not
+already trust must have been named on the previous gate. An already-trusted
+version in the same batch does not force another withhold. For a
+signature-schema change, every version in the batch must have been named on
+that gate. A further new detector version withholds again. Open incident keys
+are not rewritten in place.
 A fresh empty state trusts the current schema and the versions in that first
 batch. A state that already has incidents but no trusted schema is refused.
 

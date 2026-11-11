@@ -765,6 +765,39 @@ check "another new detector version withholds again" 0 \
   'r.trust==="drift-reported" && r.new_keys_trusted===false && r.pending_count===1 && r.incidents.length===1' \
   --events "$FIX/det3-one.jsonl" --state "$TMP/det.json" --now "2026-01-03T00:00:00Z" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
 
+# A gate recorded for det-2 alone must accept the next batch that repeats
+# det-2 beside an already-trusted det-1. A version the gate never named
+# still withholds the whole batch.
+check "mixed seed trusts det-1" 0 \
+  'r.trust==="trusted" && r.incidents.length===1' \
+  --events "$FIX/two-attempts.jsonl" --state "$TMP/mixed.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+check "det-2 alone records a detector gate" 0 \
+  'r.trust==="drift-reported" && r.new_keys_trusted===false && r.pending_count===0' \
+  --events "$FIX/det2-one.jsonl" --state "$TMP/mixed.json" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_ci "$TMP/mix-a.jsonl" m1 "$SHA_C" "2026-01-04T00:00:00Z" "$RAW88" det-1
+write_ci "$TMP/mix-b.jsonl" m2 "$SHA_D" "2026-01-04T00:00:01Z" "Error: assert qux.ts:4 expected 9" det-2
+cat "$TMP/mix-a.jsonl" "$TMP/mix-b.jsonl" > "$TMP/mix.jsonl"
+check "trusted plus already-gated detector promotes" 0 \
+  'r.trust==="trusted" && r.new_keys_trusted===true && r.pending_count===1 && r.incidents.length===1' \
+  --events "$TMP/mix.jsonl" --state "$TMP/mixed.json" --now "2026-01-04T00:00:02Z" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+expect_state "promoted gate trusts det-2 and drops the gate" "$TMP/mixed.json" \
+  's.drift_gate===null && s.trusted_detector_versions.includes("det-1") && s.trusted_detector_versions.includes("det-2") && s.seen_event_ids.length===4 && Object.keys(s.pending).length===1'
+
+check "ungated seed trusts det-1" 0 \
+  'r.trust==="trusted"' \
+  --events "$FIX/two-attempts.jsonl" --state "$TMP/novel.json" --now "$NOW0" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+check "det-2 gate before an unseen version" 0 \
+  'r.trust==="drift-reported"' \
+  --events "$FIX/det2-one.jsonl" --state "$TMP/novel.json" --now "$NOW1" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+write_ci "$TMP/novel-a.jsonl" n1 "$SHA_E" "2026-01-05T00:00:00Z" "Error: assert qux.ts:4 expected 9" det-2
+write_ci "$TMP/novel-b.jsonl" n2 "$SHA_F" "2026-01-05T00:00:01Z" "Error: assert qux.ts:5 expected 9" det-3
+cat "$TMP/novel-a.jsonl" "$TMP/novel-b.jsonl" > "$TMP/novel-mix.jsonl"
+check "an ungated detector version withholds the mixed batch" 0 \
+  'r.trust==="drift-reported" && r.new_keys_trusted===false && r.pending_count===0' \
+  --events "$TMP/novel-mix.jsonl" --state "$TMP/novel.json" --now "2026-01-05T00:00:02Z" --root "$REPO_ROOT" --repair-budget 2 --escalate-to duty-human
+expect_state "ungated mix is not stored" "$TMP/novel.json" \
+  's.seen_event_ids.length===2 && s.drift_gate.detector_versions.includes("det-2") && s.drift_gate.detector_versions.includes("det-3") && s.trusted_detector_versions.includes("det-1") && !s.trusted_detector_versions.includes("det-2") && !s.trusted_detector_versions.includes("det-3")'
+
 printf '{\n' > "$TMP/corrupt.json"
 corrupt_before=$(cksum "$TMP/corrupt.json")
 check "corrupt state is refused" 1 \

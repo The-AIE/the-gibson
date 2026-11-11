@@ -615,11 +615,17 @@ function assessGate(state, events) {
   const novel = incoming.filter((version) => !known.has(version));
   if (!schemaMismatch && novel.length === 0) return { action: "ready", incoming };
   const gate = state.drift_gate;
+  // A detector-version gate confirms only versions the state does not trust
+  // yet. An already-trusted version in the same batch must not force another
+  // withhold, or that batch is dropped. A signature-schema change still has
+  // to cover every incoming version, because the whole batch is re-read
+  // under the new schema.
+  const versionsToCover = schemaMismatch ? incoming : novel;
   const gateCovers =
     isObject(gate) &&
     gate.signature_schema_version === SIGNATURE_SCHEMA_VERSION &&
     Array.isArray(gate.detector_versions) &&
-    incoming.every((version) => gate.detector_versions.includes(version));
+    versionsToCover.every((version) => gate.detector_versions.includes(version));
   if (gateCovers) return { action: "promote", incoming };
   return {
     action: "withhold",
