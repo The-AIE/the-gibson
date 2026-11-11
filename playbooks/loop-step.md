@@ -166,13 +166,18 @@ touch /path/to/target/gibson/HALT
   one independent approval at the exact head plus required checks (D-015). The
   approval must come from a reviewer independent of the author (Law 5); a
   same-vendor reviewer in a fresh context can meet it, the author's own pass
-  cannot. Without it: park the PR, **do not merge**.
+  cannot. Check it yourself before merging: it is a native `APPROVED` review
+  whose `commit_id` equals the PR's current head. A comment is not bound to a
+  commit and does not count, and `release-preflight.sh` does not verify this yet
+  (#636), so its READY is not proof of it. A push after the approval makes it
+  stale. Without a current one: park the PR, **do not merge**.
 - If human-gated (e.g. G6 billing/pricing/payment code, schema, an explicit owner
-  hold) and the owner has not recorded an explicit approval on the PR: queue for
-  Mark, set next issue triage, **do not merge**. A decline, a hold, a question or
-  silence is not an approval and the PR stays parked. Only after the owner's
-  explicit approval is recorded on the PR, do not queue it again: continue with
-  the remaining merge checks.
+  hold) and the owner has not recorded an explicit approval of the PR's current
+  head: queue for Mark, set next issue triage, **do not merge**. A decline, a
+  hold, a question or silence is not an approval, and an approval given before a
+  later push does not cover the new head; in each case the PR stays parked. Only
+  after the owner's explicit approval of the current head is recorded on the PR,
+  do not queue it again: continue with the remaining merge checks.
 - If `RELEASE_CMD` is set: shell out to it for the actual merge, passing the PR
   number and repo path — the runner that built and/or reviewed this PR must not
   also be the one that merges it when a distinct release identity is configured.
