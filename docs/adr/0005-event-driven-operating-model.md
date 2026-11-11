@@ -29,12 +29,17 @@ inbound service or a CI-held credential able to execute on the Mini.
 
 1. Adopt the six rules in doc 33 as the operating model.
 2. One GitHub App webhook into Agent Kontrol is the front door, with a signed, deduplicated
-   inbox and a table of deterministic reducers. CI-side events (#562) cover repos without the
-   App webhook.
+   inbox and a table of deterministic reducers. Without the App, the only CI signal in this
+   tree is #562's `review-ready` producer: a commit status and a `repository_dispatch` on
+   that GitHub repository. It covers "required contexts green at this head," and it reaches
+   Agent Kontrol only when a relay or an App subscription to `repository_dispatch` is
+   configured. It does not cover issue closure, decision labels, or the other catalogue rows.
+   Until that relay exists, the reviewer's fallback sweep is what finds a green head.
 3. Consumers on the Mini hold an **outbound** long-poll to Agent Kontrol with a scoped
    credential. Agent Kontrol never executes on the Mini.
 4. A sweeper in Agent Kontrol emits absences as events: `pr-stuck`, `consumer-silent`,
-   `pause-unexplained`, `pause-expired`, `decision-aging`.
+   `pause-unexplained`, `pause-incomplete`, `pause-expired`, `resume-uncited`,
+   `decision-aging`.
 5. Pause and resume are recorded decisions: reason, citing decision, `until`, default 72
    hours maximum.
 6. Each consumer's health is three signals (alive, working, delivering). Idle is acceptable
@@ -54,15 +59,18 @@ inbound service or a CI-held credential able to execute on the Mini.
   a shorter tick costs API calls and model runs at every interval.
 - **Keep the model-driven coordinator polling.** Rejected as the primary path: on
   2026-10-26 it ran 32 times, each with a prompt of about 190,000 characters, and reported no
-  accepted delivery. It remains the exception handler.
+  accepted delivery. Whether that loop is retired, or kept as the exception handler, is
+  owner question 3 in doc 33. This record does not decide it.
 
 ## Consequences
 
 - Latency from green to review start drops from a tick plus queue to seconds.
 - A dead consumer becomes a growing, visible backlog, so consumer lag and the dead-man
   switch are part of the decision, not extras.
-- The webhook is at least once and can drop; every consumer keeps a slower sweep and counts
-  what it catches.
+- At-least-once applies to an event the inbox has persisted. A webhook that never arrives
+  can drop, and GitHub does not automatically redeliver it. The reconcile sweep re-reads
+  current state and counts work an event should have delivered. It does not replay a
+  transition that left no trace.
 - Adds an inbox table, a receiver route, a long-poll route and a sweeper to Agent Kontrol
   (epic `mrhinkle/agent-kontrol#62`). Adds no gate to the Gibson.
 

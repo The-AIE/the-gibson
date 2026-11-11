@@ -43,8 +43,15 @@ says "alive" when the outcome is "nothing delivered"; **C** a latency floor set 
 interval; **D** one consumer serving many queues; **E** a rule that blocks work silently;
 **F** state that goes stale because nothing is responsible for expiring it.
 
-*Re-verify (measured 2026-10-26):* `hermes cron status` on the operator host, then the
-coordinator profile's `cron/executions.db` and `paused_at` in `cron/jobs.json`.
+*Re-verify (measured 2026-10-26):* `hermes cron status` and `hermes doctor` on the operator
+host; the host sleep setting (`pmset -g`); the coordinator profile's `cron/executions.db`
+and `paused_at` in `cron/jobs.json`. The same `executions.db` re-verifies the 32 runs and
+the 25 open PRs in "Liveness is not delivery." Webhooks, the "0 of 5" baseline: `gh api
+repos/<owner>/<repo>/hooks` on each of the five watched repos returned an empty list.
+The "25 min seen 2026-10-25" review latency is the triage record; no separate command was
+captured. The "18 h" evidence-to-merge figure was recorded the same day against a comment
+in `merge-on-green.yml`. That file is not in this repository's `.github/workflows/`
+(re-verify: list that directory); 18 h stays a historical measurement.
 
 ## The six rules
 
@@ -54,9 +61,17 @@ coordinator profile's `cron/executions.db` and `paused_at` in `cron/jobs.json`.
 2. **An event is a hint; the system of record is the truth.** A consumer re-reads state by
    id and pins the head SHA before it acts. Payloads are untrusted input, the same rule as
    issue text.
-3. **At least once, so idempotent.** Deduplicate on the delivery id. Every consumer keeps a
-   slower sweep and counts how often the sweep finds work an event should have caught. That
-   count is the gauge of event loss; a rising count is the alarm.
+3. **At least once, so idempotent.** The guarantee covers an event the inbox has already
+   persisted. Consumers deduplicate on that delivery id, so a second delivery of the same id
+   is a no-op. A GitHub webhook that never reached the inbox is outside the guarantee.
+   GitHub does not automatically redeliver a failed webhook, and this model does not add a
+   redelivery queue; manual or scripted redelivery is a separate operator action
+   ([Handling failed webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)).
+   The reconcile sweep does not replay a missed transition. It re-reads the system of record
+   and catches work that current state still requires. A transition that happened and left
+   no trace, such as a label added and removed between sweeps, is not recovered. Each
+   consumer counts how often the sweep finds work an event should have delivered. That count
+   is the gauge of event loss; a rising count is the alarm.
 4. **Time is an event.** A stuck PR, a silent consumer, an aging decision and an expired
    pause are all things that did not happen. A sweeper emits them as synthetic events with
    their own deadlines.
@@ -87,8 +102,15 @@ coordinator profile's `cron/executions.db` and `paused_at` in `cron/jobs.json`.
 
 - **Front door.** One GitHub App webhook, pointed at Agent Kontrol, covers every installed
   repository, including new ones. A webhook per repository does not self-populate and is
-  not used. The CI-side producers (#562's `review-ready` status and dispatch) cover repos
-  where the App webhook is not installed and add no new inbound path.
+  not used. Where the App is not installed, this tree's only CI signal is #562's
+  `review-ready` producer ([docs/32](32-review-ready-event.md)): a commit status and a
+  `repository_dispatch` on that GitHub repository. It covers "required contexts green at
+  this head." It does not cover issue closure, decision-label changes, or the other
+  catalogue rows; those rows have an event source only after the App is installed. The
+  producer does not deliver to Agent Kontrol. A relay, or an App subscription to
+  `repository_dispatch`, is what would carry the advisory into the inbox. With neither
+  configured, the reviewer's fallback sweep is what finds the head. Neither path adds an
+  inbound listener on the Mini.
 - **Outbound-only last mile.** The Mini is not reachable from the internet, and D-018
   rejected an inbound receiver and a CI-held credential that can execute on the Mini. This
   model needs neither. Each consumer on the Mini opens a held connection to Agent Kontrol
@@ -110,13 +132,17 @@ Each row names a consumer. An event with no consumer is a finding, not a row.
 | Required contexts green at head | App webhook or `review-ready` | Reviewer controller starts review at that exact head | verdict 4 h Tier A/B, 12 h Tier C from green |
 | Review evidence posted | `issue_comment` | Merge reducer evaluates that PR only | merge within 15 min of evidence |
 | Push to main | App webhook | Reducer merges base into PRs now behind and re-requests review at the new head | 5 min |
-| PR merged or closed | App webhook | Release claim, drop `agent-claimed`, unblock dependents, post-merge verify | 5 min |
+| PR merged | App webhook | Release the claim, drop `agent-claimed`, unblock dependents only when this merge satisfied their prerequisite, post-merge verify | 5 min |
+| PR closed without merge | App webhook | Release the claim and drop `agent-claimed`. Do not unblock dependents; the prerequisite is not in main | 5 min |
 | Issue closed | App webhook | Parse `Blocked by #N` in open issues, relabel, emit `became-unblocked` | 5 min |
 | Decision label added or removed | App webhook | Upsert or withdraw the decision row | 1 min |
-| Session end, milestone | agent ingest | Record a work event | n/a |
+| Session end, milestone | agent ingest | Record a work event | recorded within 5 min; a missing row is a finding in the next brief |
 | `pr-stuck` (green over 30 min with no review started, open over 48 h, conflicting) | sweeper | Brief and owner alert | alert once, repeat after 12 h |
 | `consumer-silent` (no work event past its limit while ready work exists) | sweeper | Owner alert | 10 min |
-| `pause-unexplained`, `pause-expired` | sweeper | Owner alert, listed in the brief | 10 min |
+| `pause-unexplained` (no reason) | sweeper | Owner alert, listed in the brief | 10 min |
+| `pause-incomplete` (a reason, but the decision or `until` is missing or invalid) | sweeper | Owner alert, listed in the brief | 10 min |
+| `pause-expired` | sweeper | Owner alert, listed in the brief | 10 min |
+| `resume-uncited` (a resume that cites no decision) | sweeper | Owner alert, listed in the brief | 10 min |
 | `decision-aging` (14 days) | sweeper | Owner alert | once per row |
 | `dispatch-ready-empty` with raw issues waiting | sweeper | Trigger the Spec Writer | 1 h |
 
@@ -132,8 +158,10 @@ Neither could be explained a day later, and the resume contradicted the decision
   well.
 - The sweeper reads the scheduler's job records. A pause with a valid decision and an
   unexpired `until` is **held**: expected, and shown in the brief as a line, not an alarm.
-  A pause with no reason is `pause-unexplained`. A pause past `until` is `pause-expired`.
-  A resume with no cited decision emits `resume-uncited`.
+  A pause with no reason is `pause-unexplained`. A pause that names a reason but whose
+  decision or `until` is missing or invalid is `pause-incomplete`: a finding, not silence.
+  A pause past `until` is `pause-expired`. A resume with no cited decision emits
+  `resume-uncited`. The catalogue gives that event the same owner alert, due in 10 minutes.
 - The dead-man switch's current alert reads "Check the Mini scheduler and resume it." For a
   deliberate pause that wording invites exactly the unrecorded resume it is meant to
   prevent. It should say "paused by decision X until Y" when it has a reason.
@@ -159,7 +187,8 @@ that from the inbox, not from the consumer's own report.
 | Timer | Why | Cadence |
 |---|---|---|
 | Sweeper in Agent Kontrol | emits absence events | 5 min |
-| Per-consumer reconcile sweep | catches lost events; counts misses | 30 to 60 min |
+| Per-consumer reconcile sweep | re-reads current state for work an event should have delivered; counts those misses. Does not replay a transition that left no trace | 30 to 60 min |
+| Reviewer fallback probe | D-018's 60-second ready probe, kept as the reviewer's fallback until the owner amends it. This row is not the 30 to 60 min sweep | 60 seconds |
 | Dead-man switch | watches the watcher; no model | 10 min |
 | Morning brief | one pushed summary | daily 07:00 |
 
@@ -172,12 +201,16 @@ neither is a poll and is removed.
   including "Actions to `repository_dispatch` to a Mini receiver" because that needs an
   inbound service or a CI-held credential that can execute on the Mini. The outbound-only
   design above needs neither, so the rejection does not apply to it. If the owner approves
-  ADR-0005, the probe becomes the reviewer's fallback sweep and D-018 is amended, not
-  deleted.
-- **#562** (CI emits `review-ready`) is the event producer for repos without the App
-  webhook. The producer is already in this tree ([docs/32](32-review-ready-event.md),
-  `.github/workflows/review-ready.yml`); tracking issue #562 is still open. It needs no
-  Mini receiver, because the event lands in a workflow or in Agent Kontrol.
+  ADR-0005, that 60-second probe becomes the reviewer's fallback and D-018 is amended, not
+  deleted. It does not move to the 30 to 60 minute cadence used by the other consumers.
+- **#562** (CI emits `review-ready`) is the producer for "required contexts green" on a
+  repo without the App webhook. The producer is already in this tree
+  ([docs/32](32-review-ready-event.md), `.github/workflows/review-ready.yml`). Tracking
+  issue #562 was still open on 2026-11-11 (`gh issue view 562 --repo The-AIE/the-gibson`).
+  The producer writes a GitHub status and a `repository_dispatch`. It needs no Mini
+  receiver. It reaches Agent Kontrol only when a relay or an App subscription to
+  `repository_dispatch` is configured. Until then the reviewer's 60-second fallback probe
+  is what finds the head.
 - **Controller repository pull request 45** (per-repository reviewer lanes and event
   dispatch with the tick as fallback) is the consumer side of this model and conforms to
   it. The repository slug stays out of this tree.
@@ -188,21 +221,23 @@ neither is a poll and is removed.
    pull request 45. Both address the measured review latency.
 2. Agent Kontrol: the GitHub App webhook receiver and the inbox.
 3. The dispatcher and reviewer consumers move to the outbound long-poll.
-4. The sweeper, starting with `consumer-silent`, `pause-unexplained` and `pr-stuck`.
+4. The sweeper, starting with `consumer-silent`, `pause-unexplained`, `pause-incomplete`,
+   `resume-uncited` and `pr-stuck`.
 5. merge-on-green moves to events with its cron kept as the fallback sweep.
-6. Retire the model-driven polling crons; keep a model only for the exceptions in the
-   reducer table.
+6. After the owner answers question 3, either retire the model-driven coordinator loop or
+   keep it as the exception handler only. A model runs only where the reducer table says
+   the step is judgment.
 
 ## Measures of success
 
 | Measure | Baseline (measured) | Target |
 |---|---|---|
-| Green at head to review started, p90 | up to 15 min tick plus the queue ahead; 25 min seen 2026-10-25 | under 2 min |
-| Evidence posted to merged, p90 | 18 h recorded in `merge-on-green.yml`; 10 min cron sweep | under 15 min |
+| Green at head to review started, p90 | up to 15 min tick plus the queue ahead; 25 min seen 2026-10-25 (triage record; no separate command captured) | under 2 min |
+| Evidence posted to merged, p90 | 18 h, measured 2026-10-26. Cited `merge-on-green.yml` is not in this repo's `.github/workflows/` as of 2026-11-11; historical figure. The 10 min cron sweep is the timer this row replaces | under 15 min |
 | Work found by a fallback sweep that an event should have caught | not measured | under 2 percent |
-| Paused jobs with no recorded reason | 4 coordinator jobs, 10-23 to 10-25 | 0 |
-| Hours per day a consumer is idle while ready work exists | not measured; the coordinator ran 32 times with 25 open PRs | 0 |
-| Repos with a webhook | 0 of 5 | all installed |
+| Paused jobs with no recorded reason | 4 coordinator jobs, 10-23 to 10-25 (`paused_at` in `cron/jobs.json`) | 0 |
+| Hours per day a consumer is idle while ready work exists | not measured; the coordinator ran 32 times with 25 open PRs on 2026-10-26 (`executions.db`) | 0 |
+| Repos with a webhook | 0 of 5, measured 2026-10-26 with `gh api repos/<owner>/<repo>/hooks` | all installed |
 
 ## Non-goals
 
