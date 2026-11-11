@@ -426,6 +426,8 @@ function runGate(how, file, fixtureDir, work) {
     env: gateEnv(work),
     encoding: "utf8",
     timeout: GATE_TIMEOUT_MS,
+    // A gate can ignore SIGTERM. SIGKILL is what makes this timeout a bound.
+    killSignal: "SIGKILL",
     maxBuffer: 64 * 1024,
   });
   if (r.error && r.error.code === "ETIMEDOUT") return { ran: false, reason: "gate-timeout" };

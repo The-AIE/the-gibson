@@ -24,20 +24,8 @@ ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-lesson-proof.XXXXXX") || {
   echo "lesson-proof.test.sh: mktemp -d failed" >&2
   exit 1
 }
-SENSOR_BAK=$(mktemp "${TMPDIR:-/tmp}/gibson-lesson-proof-sensor.XXXXXX") || {
-  echo "lesson-proof.test.sh: mktemp sensor backup failed" >&2
-  exit 1
-}
-cp "$SENSOR" "$SENSOR_BAK" || {
-  echo "lesson-proof.test.sh: cannot back up the sensor" >&2
-  exit 1
-}
 
 cleanup() {
-  if [[ -n "${SENSOR_BAK:-}" && -f "${SENSOR_BAK}" && -f "${SENSOR}" ]]; then
-    cp "$SENSOR_BAK" "$SENSOR"
-    rm -f "$SENSOR_BAK"
-  fi
   if [[ -n "${ROOT:-}" && -d "${ROOT}" ]]; then
     rm -rf -- "${ROOT:?}"
   fi
@@ -497,6 +485,27 @@ if [[ "$(get_field "$BIG_JSON" "$(lid 931)" replay.bad.ran)" == "false" \
 else
   bad "timeout replay bad.ran=$(get_field "$BIG_JSON" "$(lid 931)" replay.bad.ran) reason=$(get_field "$BIG_JSON" "$(lid 931)" replay.bad.reason)"
 fi
+{
+  printf '## %s · 2026-10-25 · ignore-term\n' "$(lid 940)"
+  printf '**Status:** fixed\n'
+  printf '**Proof:** %s gates/ignore-term.sh tree-good\n' "$SHA"
+  printf '**Tags:** #fixture\n'
+} > "$ROOT/ignore-term.md"
+ignore_start=$(date +%s)
+node "$SENSOR" --repo "$REPO" --ledger "$ROOT/ignore-term.md" --json "$ROOT/ignore-term.json" \
+  >"$ROOT/ignore-term.out" 2>"$ROOT/ignore-term.err"
+ignore_rc=$?
+ignore_elapsed=$(( $(date +%s) - ignore_start ))
+ignore_reason=$(get_field "$ROOT/ignore-term.json" "$(lid 940)" replay.bad.reason)
+if [[ "$ignore_rc" -eq 0 \
+   && "$(get_field "$ROOT/ignore-term.json" "$(lid 940)" verdict)" == "unknown" \
+   && "$ignore_reason" == "gate-timeout" \
+   && "$ignore_elapsed" -ge 8 \
+   && "$ignore_elapsed" -le 25 ]]; then
+  ok "SIGTERM-ignoring gate is killed (${ignore_elapsed}s)"
+else
+  bad "SIGTERM-ignoring gate rc=$ignore_rc elapsed=${ignore_elapsed}s reason=$ignore_reason"
+fi
 if [[ "$(get_field "$BIG_JSON" "$(lid 903)" proof)" == "null" \
    && "$(get_field "$BIG_JSON" "$(lid 904)" proof)" == "unknown" \
    && "$(get_field "$BIG_JSON" "$(lid 901)" proof.sha)" == "$SHA" ]]; then
@@ -757,12 +766,21 @@ else
 fi
 
 echo "# mutations"
+MUT_SENSOR="$ROOT/lesson-proof.mut.mjs"
+SENSOR_PRISTINE="$ROOT/lesson-proof.pristine.mjs"
+mkdir -p "$ROOT/lib"
+cp "$SCRIPT_DIR/../lib/args.mjs" "$ROOT/lib/args.mjs"
+cp "$SENSOR" "$MUT_SENSOR"
+cp "$SENSOR" "$SENSOR_PRISTINE"
+tracked_before=$(cksum "$SENSOR")
+
 restore_sensor() {
-  cp "$SENSOR_BAK" "$SENSOR"
+  cp "$SENSOR_PRISTINE" "$MUT_SENSOR"
 }
 
 mutate_verdict() {
   local token="$1" replacement="$2" ledger="$3" num="$4" green="$5" label="$6"
+  local SENSOR="$MUT_SENSOR"
   node "$MUTATE" "$SENSOR" "$token" "$replacement"
   if node --check "$SENSOR"; then
     ok "$label mutated file parses"
@@ -796,6 +814,7 @@ mutate_verdict() {
 
 mutate_exit() {
   local token="$1" replacement="$2" ledger="$3" green_rc="$4" label="$5"
+  local SENSOR="$MUT_SENSOR"
   shift 5
   node "$MUTATE" "$SENSOR" "$token" "$replacement"
   if node --check "$SENSOR"; then
@@ -852,11 +871,15 @@ mutate_exit MUTATION_STRICT '  return false; // MUTATION_STRICT' \
 mutate_exit MUTATION_REPORT_ONLY '  return false; // MUTATION_REPORT_ONLY' \
   "$ROOT/m-absent.md" 0 "report only"
 
-if cmp -s "$SENSOR" "$SENSOR_BAK"; then
-  ok "sensor restored after mutations"
+if cmp -s "$MUT_SENSOR" "$SENSOR_PRISTINE"; then
+  ok "mutation copy restored"
 else
-  bad "sensor differs from backup after mutations"
-  restore_sensor
+  bad "mutation copy differs from pristine"
+fi
+if [[ "$(cksum "$SENSOR")" == "$tracked_before" ]]; then
+  ok "tracked sensor unchanged by mutations"
+else
+  bad "tracked sensor was rewritten by mutations"
 fi
 
 echo "# live ledger"
