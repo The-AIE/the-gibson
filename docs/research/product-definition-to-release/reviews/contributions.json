@@ -1,0 +1,367 @@
+{
+  "research_date": "2026-10-30",
+  "source": "https://openrouter.ai/api/v1/models",
+  "catalogue_observed_count": 456,
+  "method": "Independent conceptual first pass; bounded public-source-informed delta with each model's own first memo; no browsing or code access in model requests",
+  "input_digest_serialization": "UTF-8 JSON messages, sorted keys, compact separators, ensure_ascii=false",
+  "codex": {
+    "received": true,
+    "memo": "codex-initial.md",
+    "source_audit_separate": true,
+    "note": "Platform-resolved Codex session; internal audit support is not an external contributor"
+  },
+  "external_contributors": [
+    {
+      "contributor": "GLM 5.3",
+      "requested_model": "z-ai/glm-5.3",
+      "catalogue_name": "Z.ai: GLM 5.3",
+      "requested_output_token_limit": 8000,
+      "reported_model": "z-ai/glm-5.3",
+      "generation_id": "gen-1793374928-rTDwV0qPYpmwBZgDUGE9",
+      "response_received": true,
+      "status": "completed; final response recovered from retained result artifact after transport timeout",
+      "input_messages_sha256": "dcbb296d254b2bc4b9814e97226b8a2d9542a84bd5eee740fc34deff52c6d62c",
+      "memo_sha256": "b069f3d4f52b2fe4393185c63b0769a421b5ca586ae510be5ee917f8dd892263",
+      "usage": {
+        "completion_tokens": 7784,
+        "completion_tokens_details": {
+          "audio_tokens": 0,
+          "image_tokens": 0,
+          "reasoning_tokens": 5276
+        },
+        "cost": 0.02808696,
+        "cost_details": {
+          "upstream_inference_completions_cost": 0.0280224,
+          "upstream_inference_cost": 0.02808696,
+          "upstream_inference_prompt_cost": 6.456e-05
+        },
+        "is_byok": false,
+        "prompt_tokens": 807,
+        "prompt_tokens_details": {
+          "audio_tokens": 0,
+          "cache_write_tokens": 0,
+          "cached_tokens": 0,
+          "video_tokens": 0
+        },
+        "total_tokens": 8591
+      },
+      "cost": 0.02808696,
+      "published_catalogue_pricing_per_token": {
+        "prompt": "0.00000008",
+        "completion": "0.0000036"
+      },
+      "provider": "InferenceNet",
+      "finish_reason": "stop",
+      "final_response_sha256": "b069f3d4f52b2fe4393185c63b0769a421b5ca586ae510be5ee917f8dd892263",
+      "memo_file": "glm-5.3.md",
+      "memo_file_sha256": "f8c1659e94a00ee7e56cbbfd8a6975a1e91cc9c9911b431624be4366e1acceb8",
+      "followup": {
+        "requested_model": "z-ai/glm-5.3",
+        "reported_model": "z-ai/glm-5.3",
+        "generation_id": "gen-1793376834-zppNeIoJgDugdikyqB20",
+        "provider": "Wafer",
+        "response_received": true,
+        "completed": true,
+        "finish_reason": "stop",
+        "status": "completed",
+        "requested_output_token_limit": 4000,
+        "input_messages_sha256": "8b048e3426c8be78816a640dffbf985e38d1cff437de8aca2bdc9c5042ec89db",
+        "final_response_sha256": "46549aff83c46c96a6413aa0cc13501b2cb8ea27f7cbaf3b69e58da4a46d07c1",
+        "memo_file": "glm-5.3-source-delta.md",
+        "memo_file_sha256": "7af17f71dd13b0ce6ca9500dbc793ad2038d4adf04bccfcd1a62fe979a719d14",
+        "usage": {
+          "completion_tokens": 1284,
+          "completion_tokens_details": {
+            "audio_tokens": 0,
+            "image_tokens": 0,
+            "reasoning_tokens": 1
+          },
+          "cost": 0.002511989,
+          "cost_details": {
+            "upstream_inference_completions_cost": 0.0017976,
+            "upstream_inference_cost": 0.002511989,
+            "upstream_inference_prompt_cost": 0.000714389
+          },
+          "is_byok": false,
+          "prompt_tokens": 3991,
+          "prompt_tokens_details": {
+            "audio_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "video_tokens": 0
+          },
+          "total_tokens": 5275
+        },
+        "cost": 0.002511989
+      }
+    },
+    {
+      "contributor": "Kimi",
+      "requested_model": "moonshotai/kimi-k3.1-pro",
+      "catalogue_name": "MoonshotAI: Kimi K3.1 Pro",
+      "requested_output_token_limit": 8000,
+      "reported_model": "moonshotai/kimi-k3.1-pro",
+      "generation_id": "gen-1793374926-RP2n0v1W5gXx4ac1uEug",
+      "response_received": true,
+      "status": "completed; final response recovered from retained result artifact after transport timeout",
+      "input_messages_sha256": "dcbb296d254b2bc4b9814e97226b8a2d9542a84bd5eee740fc34deff52c6d62c",
+      "memo_sha256": "a88a7d919e536a5eaf14d068716620efe90705d5a511f5879cb6443f1346c154",
+      "usage": {
+        "completion_tokens": 6241,
+        "completion_tokens_details": {
+          "audio_tokens": 0,
+          "image_tokens": 0,
+          "reasoning_tokens": 3798
+        },
+        "cost": 0.064174,
+        "cost_details": {
+          "upstream_inference_completions_cost": 0.06241,
+          "upstream_inference_cost": 0.064174,
+          "upstream_inference_prompt_cost": 0.001764
+        },
+        "is_byok": false,
+        "prompt_tokens": 882,
+        "prompt_tokens_details": {
+          "audio_tokens": 0,
+          "cache_write_tokens": 0,
+          "cached_tokens": 0,
+          "video_tokens": 0
+        },
+        "total_tokens": 7123
+      },
+      "cost": 0.064174,
+      "published_catalogue_pricing_per_token": {
+        "prompt": "0.000002",
+        "completion": "0.00001"
+      },
+      "provider": "Moonshot AI",
+      "finish_reason": "stop",
+      "final_response_sha256": "a88a7d919e536a5eaf14d068716620efe90705d5a511f5879cb6443f1346c154",
+      "memo_file": "kimi.md",
+      "memo_file_sha256": "65eeb5477b23463e6afe2f2d4ebdb580815c0d409bfa5e1ee1ee50c6b3cb3be3",
+      "followup": {
+        "requested_model": "moonshotai/kimi-k3.1-pro",
+        "reported_model": "moonshotai/kimi-k3.1-pro",
+        "generation_id": "gen-1793376834-WHlJw9PLle9UnoA2908i",
+        "provider": "Moonshot AI",
+        "response_received": true,
+        "completed": true,
+        "finish_reason": "stop",
+        "status": "completed",
+        "requested_output_token_limit": 4000,
+        "input_messages_sha256": "42cd31d1102cab86c1d71c9c94df728bdef2c90ac63f4d66a280304d55b8682c",
+        "final_response_sha256": "c13c8afbdc01bea8a1602fab8f0934ea217bb629201dfc11e443cf47ad9563a1",
+        "memo_file": "kimi-source-delta.md",
+        "memo_file_sha256": "ddf18a30b53099edecc20fba7c0273b74852ebc83bb967ec80e01edf22a139a3",
+        "usage": {
+          "completion_tokens": 2773,
+          "completion_tokens_details": {
+            "audio_tokens": 0,
+            "image_tokens": 0,
+            "reasoning_tokens": 1876
+          },
+          "cost": 0.035736,
+          "cost_details": {
+            "upstream_inference_completions_cost": 0.02773,
+            "upstream_inference_cost": 0.035736,
+            "upstream_inference_prompt_cost": 0.008006
+          },
+          "is_byok": false,
+          "prompt_tokens": 4003,
+          "prompt_tokens_details": {
+            "audio_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "video_tokens": 0
+          },
+          "total_tokens": 6776
+        },
+        "cost": 0.035736
+      }
+    },
+    {
+      "contributor": "Grok",
+      "requested_model": "x-ai/grok-4.7",
+      "catalogue_name": "SpaceXAI: Grok 4.7",
+      "requested_output_token_limit": 8000,
+      "reported_model": "x-ai/grok-4.7",
+      "generation_id": "gen-1793374925-GaLQjpzgkCm7kHlotzTF",
+      "response_received": true,
+      "status": "completed; final response recovered from retained result artifact after transport timeout",
+      "input_messages_sha256": "dcbb296d254b2bc4b9814e97226b8a2d9542a84bd5eee740fc34deff52c6d62c",
+      "memo_sha256": "78c72ec9c6388b13b34ebda07ec16914bae3ff3f7fe8660c05efbd61b00d6fad",
+      "usage": {
+        "completion_tokens": 5790,
+        "completion_tokens_details": {
+          "audio_tokens": 0,
+          "image_tokens": 0,
+          "reasoning_tokens": 3036
+        },
+        "cost": 0.037136,
+        "cost_details": {
+          "upstream_inference_completions_cost": 0.03474,
+          "upstream_inference_cost": 0.037136,
+          "upstream_inference_prompt_cost": 0.002396
+        },
+        "is_byok": false,
+        "prompt_tokens": 2062,
+        "prompt_tokens_details": {
+          "audio_tokens": 0,
+          "cache_write_tokens": 0,
+          "cached_tokens": 1152,
+          "video_tokens": 0
+        },
+        "total_tokens": 7852
+      },
+      "cost": 0.037136,
+      "published_catalogue_pricing_per_token": {
+        "prompt": "0.000002",
+        "completion": "0.000006"
+      },
+      "provider": "xAI",
+      "finish_reason": "stop",
+      "final_response_sha256": "78c72ec9c6388b13b34ebda07ec16914bae3ff3f7fe8660c05efbd61b00d6fad",
+      "memo_file": "grok.md",
+      "memo_file_sha256": "f343cb3235648cb68bae49ae721ce73808a1f1aa600c3c6ed3741f3db77728ee",
+      "followup": {
+        "requested_model": "x-ai/grok-4.7",
+        "reported_model": "x-ai/grok-4.7",
+        "generation_id": "gen-1793376834-V1pV6m1o0eItl12CGVaL",
+        "provider": "xAI",
+        "response_received": true,
+        "completed": true,
+        "finish_reason": "stop",
+        "status": "completed",
+        "requested_output_token_limit": 4000,
+        "input_messages_sha256": "012ad4d841ec4243afec6910645a1fbbbe2cff88d9301af1712e2fe94e680c78",
+        "final_response_sha256": "e89e214ef3ad6b156bd454ae3bb691c7814fec5f68bb3ff04f5ea4dad4fee86b",
+        "memo_file": "grok-source-delta.md",
+        "memo_file_sha256": "8aa95eacb463d0f31d9f967745e91bc54498df4aa0d00cdab74600b0c2bdb6cb",
+        "usage": {
+          "completion_tokens": 1823,
+          "completion_tokens_details": {
+            "audio_tokens": 0,
+            "image_tokens": 0,
+            "reasoning_tokens": 995
+          },
+          "cost": 0.020224,
+          "cost_details": {
+            "upstream_inference_completions_cost": 0.010938,
+            "upstream_inference_cost": 0.020224,
+            "upstream_inference_prompt_cost": 0.009286
+          },
+          "is_byok": false,
+          "prompt_tokens": 5507,
+          "prompt_tokens_details": {
+            "audio_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_tokens": 1152,
+            "video_tokens": 0
+          },
+          "total_tokens": 7330
+        },
+        "cost": 0.020224
+      }
+    },
+    {
+      "contributor": "Claude",
+      "requested_model": "anthropic/claude-opus-5.5",
+      "catalogue_name": "Anthropic: Claude Opus 5.5",
+      "requested_output_token_limit": 8000,
+      "reported_model": "anthropic/claude-opus-5.5",
+      "generation_id": "gen-1793374926-ynPJ48ogXiJh3gnCeSPS",
+      "response_received": true,
+      "status": "completed; final response recovered from retained result artifact after transport timeout",
+      "input_messages_sha256": "dcbb296d254b2bc4b9814e97226b8a2d9542a84bd5eee740fc34deff52c6d62c",
+      "memo_sha256": "3c9db77208ad445bfec455fd77868c1c544e9111552a16b62a622076f1b7f492",
+      "usage": {
+        "completion_tokens": 7240,
+        "completion_tokens_details": {
+          "audio_tokens": 0,
+          "image_tokens": 0,
+          "reasoning_tokens": 1668
+        },
+        "cost": 0.150304,
+        "cost_details": {
+          "upstream_inference_completions_cost": 0.1448,
+          "upstream_inference_cost": 0.150304,
+          "upstream_inference_prompt_cost": 0.005504
+        },
+        "is_byok": false,
+        "prompt_tokens": 1376,
+        "prompt_tokens_details": {
+          "audio_tokens": 0,
+          "cache_write_tokens": 0,
+          "cached_tokens": 0,
+          "video_tokens": 0
+        },
+        "total_tokens": 8616
+      },
+      "cost": 0.150304,
+      "published_catalogue_pricing_per_token": {
+        "prompt": "0.000004",
+        "completion": "0.00002"
+      },
+      "provider": "Claude Platform on AWS",
+      "finish_reason": "stop",
+      "final_response_sha256": "3c9db77208ad445bfec455fd77868c1c544e9111552a16b62a622076f1b7f492",
+      "memo_file": "claude.md",
+      "memo_file_sha256": "b3c29c24ec0101d163c6fcce38e615e873da639d5adccd9c1da43da5bd792558",
+      "followup": {
+        "requested_model": "anthropic/claude-opus-5.5",
+        "reported_model": "anthropic/claude-opus-5.5",
+        "generation_id": "gen-1793376834-1zjOnUBOrJQVx1xrEPrW",
+        "provider": "Claude Platform on AWS",
+        "response_received": true,
+        "completed": false,
+        "finish_reason": "content_filter",
+        "status": "partial final text; ends mid-sentence; no ending inferred or regeneration",
+        "requested_output_token_limit": 4000,
+        "input_messages_sha256": "766b6c38d02133ce4354f3cff0754bce850f194cb046bd2cf74c5e99c7a81898",
+        "final_response_sha256": "dbe2b49d8af08c2fb1601d297f6a432ecbffa94a258692408981f1cebdb81096",
+        "memo_file": "claude-source-delta.md",
+        "memo_file_sha256": "7304978d5186276bdb36980a0667639468c13c35212bd0e6590a857a4437f8fd",
+        "usage": {
+          "completion_tokens": 2797,
+          "completion_tokens_details": {
+            "audio_tokens": 0,
+            "image_tokens": 0,
+            "reasoning_tokens": 1008
+          },
+          "cost": 0.088116,
+          "cost_details": {
+            "upstream_inference_completions_cost": 0.05594,
+            "upstream_inference_cost": 0.088116,
+            "upstream_inference_prompt_cost": 0.032176
+          },
+          "is_byok": false,
+          "prompt_tokens": 8044,
+          "prompt_tokens_details": {
+            "audio_tokens": 0,
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "video_tokens": 0
+          },
+          "total_tokens": 10841
+        },
+        "cost": 0.088116
+      }
+    }
+  ],
+  "formal_release_review": false,
+  "limitations": [
+    "Initial external memos are conceptual; follow-ups use our bounded public-source findings and each model's own first memo. No external contributor browsed or audited code.",
+    "Codex source inspection is a separate richer evidence stream, not a matched-model benchmark.",
+    "Research agreement does not establish product validity, enterprise readiness or formal release approval.",
+    "Provider reasoning text and connection/account metadata are excluded.",
+    "Claude follow-up has provider finish_reason content_filter and incomplete final text. Its missing ending is not inferred; no regeneration was requested."
+  ],
+  "external_memos_received": 4,
+  "total_provider_reported_cost": 0.426288949,
+  "external_initial_memos_completed": 4,
+  "external_followup_responses_received": 4,
+  "external_followup_memos_completed": 3,
+  "external_followup_memos_partial": 1,
+  "first_round_provider_reported_cost": 0.27970096,
+  "followup_provider_reported_cost": 0.146587989
+}
