@@ -314,7 +314,10 @@ if [[ "${1:-}" == "--renew" ]]; then
   # Two stale claims that overlap each both see the other as non-blocking.
   # Renew must not turn both fresh. Displacement is the create path's job;
   # it writes Displaced by only after the new claim has passed every gate.
-  if grep -q '^scope-overlap: displaced-claim ' <<<"$_rn_so_out"; then
+  # A predecessor line is the same refusal: renew would overlap a claim whose
+  # displacer this sensor is about to replace, and renew does not record that.
+  if grep -q '^scope-overlap: displaced-claim ' <<<"$_rn_so_out" ||
+    grep -q '^scope-overlap: displaced-predecessor ' <<<"$_rn_so_out"; then
     echo "claim.sh: ERROR: renewing $_rn_id would overlap an expired claim — renew does not displace; re-claim through claim.sh so both PR bodies record it" >&2
     exit 1
   fi
@@ -391,7 +394,9 @@ if [[ "${1:-}" == "--renew" ]]; then
   # compare-and-swap to close that window.
   _rn_so_rc2=0
   _rn_so_out2=$(env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE node "$_rn_dir/scope-overlap.mjs" "${_rn_args[@]}") || _rn_so_rc2=$?
-  if [[ "$_rn_so_rc2" -ne 0 ]] || grep -q '^scope-overlap: displaced-claim ' <<<"$_rn_so_out2"; then
+  if [[ "$_rn_so_rc2" -ne 0 ]] ||
+    grep -q '^scope-overlap: displaced-claim ' <<<"$_rn_so_out2" ||
+    grep -q '^scope-overlap: displaced-predecessor ' <<<"$_rn_so_out2"; then
     [[ -z "$_rn_so_out2" ]] || printf '%s\n' "$_rn_so_out2" >&2
     if ! gh pr edit "$_rn_pr" --repo "$_rn_repo" --body-file "${_rn_file}.before"; then
       rm -f "$_rn_file" "${_rn_file}.got" "${_rn_file}.before"
@@ -1577,8 +1582,12 @@ info "reservation: $RESERVATION_SHA"
 # has already passed, so a rolled-back lane never strands a claim it was
 # displacing. A write that still fails here rolls this lane back, and
 # pr-claims.sh ignores a record whose displacer is no longer a live claim, so
-# even a partial stamp does not freeze anyone out. The note on this PR is
-# informational.
+# even a partial stamp does not freeze anyone out. The note on THIS PR is
+# required too (#557: displacement is visible in both bodies). A missing note
+# is the same failure as a missing stamp: roll back, do not report success.
+# Predecessor lines are claims an intermediate displacer already holds. The
+# old Displaced-by line stays; this claim is added beside it. If this claim
+# rolls back, the intermediate line still counts.
 record_displacement() { # pr-number line -> 0 only when the line is readable back
   local n="$1" line="$2" body tmp
   body=$(gh pr view "$n" --repo "$REPO" --json body -q .body 2>/dev/null) || return 1
@@ -1592,20 +1601,29 @@ record_displacement() { # pr-number line -> 0 only when the line is readable bac
   grep -qxF -- "$line" <<<"$body"
 }
 while IFS= read -r _dl; do
-  [[ "$_dl" == "scope-overlap: displaced-claim "* ]] || continue
+  if [[ "$_dl" == "scope-overlap: displaced-claim "* ]]; then
+    _expect_state=stale
+  elif [[ "$_dl" == "scope-overlap: displaced-predecessor "* ]]; then
+    _expect_state=displaced
+  else
+    continue
+  fi
   read -r _ _ _d_id _d_pr _d_exp <<<"$_dl"
   [[ "$_d_id" == issue-* && "$_d_pr" =~ ^[0-9]+$ ]] || continue
   # The admission snapshot is not a licence to stamp. Re-read expiry now and
   # compare: a renew or a push since the snapshot means this claim is no
-  # longer the stale row we decided on. Do not write Displaced by in that case.
+  # longer the row we decided on. A direct displacement must still be stale.
+  # A predecessor must still be displaced (its intermediate displacer is
+  # still live). Do not write Displaced by in any other case.
   _disp_exp=$("$SCRIPT_DIR/pr-claims.sh" expiry "$REPO") ||
     die "could not re-read expiry for ${_d_id} (PR #${_d_pr}) immediately before displacement — refusing to stamp from the admission snapshot; rolling this claim back"
   _disp_row=$(awk -F'\t' -v n="$_d_pr" '$1 == n { print; exit }' <<<"$_disp_exp")
   _disp_id_now=$(awk -F'\t' '{ print $2 }' <<<"$_disp_row")
   _disp_state=$(awk -F'\t' '{ print $3 }' <<<"$_disp_row")
   _disp_push=$(awk -F'\t' '{ print $7 }' <<<"$_disp_row")
-  if [[ "$_disp_id_now" != "$_d_id" || "$_disp_state" != "stale" ]]; then
-    die "PR #${_d_pr} (${_d_id}) was stale in the admission snapshot but is now '${_disp_state:-missing}' (id '${_disp_id_now:-missing}') — not writing Displaced by; rolling this claim back"
+  # A direct row was stale in the admission snapshot; a predecessor was displaced.
+  if [[ "$_disp_id_now" != "$_d_id" || "$_disp_state" != "$_expect_state" ]]; then
+    die "PR #${_d_pr} (${_d_id}) was ${_expect_state} in the admission snapshot but is now '${_disp_state:-missing}' (id '${_disp_id_now:-missing}') — not writing Displaced by; rolling this claim back"
   fi
   record_displacement "$_d_pr" "- Displaced by: ${CLAIM_ID} (PR #${PR_NUMBER})" ||
     die "could not durably record the displacement of ${_d_id} (PR #${_d_pr}) — without it that claim could be renewed back into overlap; rolling this claim back"
@@ -1622,7 +1640,7 @@ while IFS= read -r _dl; do
   gh pr edit "$_d_pr" --repo "$REPO" --add-label claim-expired >/dev/null 2>&1 ||
     info "WARNING: could not label PR #${_d_pr} claim-expired"
   record_displacement "$PR_NUMBER" "- Displaced claim: ${_d_id} (PR #${_d_pr}, expired ${_d_exp})" ||
-    info "WARNING: could not record the displacement of ${_d_id} on PR #${PR_NUMBER}"
+    die "could not record the displacement of ${_d_id} on this claim PR #${PR_NUMBER} — both PR bodies must name it; rolling this claim back"
 done <<EOF
 $_adm_out
 EOF

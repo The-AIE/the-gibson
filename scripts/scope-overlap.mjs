@@ -947,6 +947,10 @@ function readExpirySnapshot() {
       expires: cols[5],
       push: cols[6],
       state: cols[2],
+      // Column 9 (index 8) is the raw displacer list (`id (PR #n)`,
+      // `;`-separated, no spaces). An empty field means no readable record.
+      // A short row never reaches here: the length check above drops it.
+      displacers: cols[8] || "",
     });
   }
   fpLines.sort();
@@ -1417,8 +1421,13 @@ const displaced = [];
 const blockingPrClaims = prClaims.filter((c) => {
   const row = staleClaims.get(`${c.number}\t${c.id}`);
   if (!row || c.id === opt.claimId) return true;
-  // A claim displaced EARLIER is terminal and already recorded on both
-  // sides: it stays non-blocking but is not displaced a second time.
+  // A claim displaced EARLIER is terminal: it stays non-blocking and is
+  // not emitted as a new stale displacement. If its displacer is one of
+  // the stale claims this admission is taking (or a predecessor of those)
+  // and the scopes overlap, the walk below emits it as a predecessor so
+  // the new claim is recorded on that body too. The old Displaced-by line
+  // stays, so rolling this claim back does not free the predecessor while
+  // the intermediate displacer is still a live claim.
   if (row.state === "stale") displaced.push({ claim: c, expires: row.expires });
   return false;
 });
@@ -1525,12 +1534,63 @@ const displacedHere = displaced
   .map((d) => ({ ...d, hits: scopesOverlap(opt.scopes, d.claim.scope) }))
   .filter((d) => d.hits.length)
   .map((d) => ({ claimId: d.claim.id, prNumber: d.claim.number, expires: d.expires }));
-if (displacedHere.length && !opt.json) {
+
+// `id (PR #n)` tokens from pr-claims.sh column 9. Anything else is ignored,
+// so a malformed displacer cannot invent a successor.
+function displacerKeys(field) {
+  if (!field) return [];
+  const keys = [];
+  for (const part of String(field).split(";")) {
+    const m = part.match(/^(issue-[A-Za-z0-9-]+) \(PR #(\d+)\)$/);
+    if (m) keys.push(`${m[2]}\t${m[1]}`);
+  }
+  return keys;
+}
+
+// B displaces A, then B goes stale and C displaces B. A still says
+// "Displaced by B". When B closes, that record stops counting and a push
+// that landed while A was displaced can make A fresh on C's scope. Record
+// C on every overlapping predecessor whose displacer chain reaches a claim
+// C is displacing now. The old line is left in place: if C rolls back, B
+// still holds A.
+const directKeys = new Set(displacedHere.map((d) => `${d.prNumber}\t${d.claimId}`));
+const predecessorKeys = new Set();
+if (directKeys.size) {
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const c of prClaims) {
+      if (c.id === opt.claimId || !Number.isInteger(c.number)) continue;
+      const key = `${c.number}\t${c.id}`;
+      if (directKeys.has(key) || predecessorKeys.has(key)) continue;
+      const row = staleClaims.get(key);
+      if (!row || row.state !== "displaced") continue;
+      if (!scopesOverlap(opt.scopes, c.scope).length) continue;
+      const parents = displacerKeys(row.displacers);
+      if (!parents.some((p) => directKeys.has(p) || predecessorKeys.has(p))) continue;
+      predecessorKeys.add(key);
+      grew = true;
+    }
+  }
+}
+const displacedPredecessors = [...predecessorKeys]
+  .map((key) => staleClaims.get(key))
+  .filter((row) => row)
+  .map((row) => ({ claimId: row.id, prNumber: row.number, expires: row.expires }))
+  .sort((a, b) => a.prNumber - b.prNumber || a.claimId.localeCompare(b.claimId));
+
+if (!opt.json) {
   for (const d of displacedHere) {
     console.log(
       `scope-overlap: displaced expired claim ${d.claimId} (PR #${d.prNumber}, expired ${d.expires}) — its scope no longer blocks`
     );
     console.log(`scope-overlap: displaced-claim ${d.claimId} ${d.prNumber} ${d.expires}`);
+  }
+  for (const d of displacedPredecessors) {
+    console.log(
+      `scope-overlap: displaced predecessor ${d.claimId} (PR #${d.prNumber}, expired ${d.expires}) — recording this claim on it so the intermediate displacer closing cannot revive it`
+    );
+    console.log(`scope-overlap: displaced-predecessor ${d.claimId} ${d.prNumber} ${d.expires}`);
   }
 }
 
@@ -1539,6 +1599,7 @@ ok({
   proposed: opt.scopes,
   ref: ref.trim(),
   displaced: displacedHere,
+  displacedPredecessors,
   ...(opt.admitPr != null
     ? {
         admitPr: opt.admitPr,

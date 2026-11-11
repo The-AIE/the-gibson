@@ -131,6 +131,11 @@ case "$1 $2" in
     ;;
   "pr edit")
     n="$3"
+    # A test can refuse the body write for one PR number. The body file is
+    # left as it was, which is what a failed gh pr edit does.
+    if [[ -n "${GH_FAIL_BODY_FOR:-}" && "$n" == "$GH_FAIL_BODY_FOR" ]]; then
+      exit 1
+    fi
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --body-file) cp "$2" "${GH_ROOT:?}/body-$n"; shift 2 ;;
@@ -258,6 +263,21 @@ stage "$(claim_node_extra 63 issue-60-gone 'lib/**' "$EXPIRED" "$OLD_PUSH" '- Di
 out=$("$PC" expiry acme/app 2>&1)
 check "an unreadable Displaced by record is unknown (blocks)" "$(state_of "$out" 63)" "unknown"
 
+echo "pr-claims expiry · a successor keeps the predecessor displaced after the intermediate closes"
+# A was displaced by B. C later displaced B and was recorded beside B.
+# B has closed (absent). A's own clock is fresh. C being live is what holds A.
+# '\\n' is the two-character JSON escape. A single '\n' is a real newline
+# inside the sed replacement and the staged node stops parsing.
+BOTH='- Displaced by: issue-40-mid (PR #40)\\n- Displaced by: issue-50-new (PR #50)'
+stage "$(claim_node_extra 32 issue-30-old 'lib/**' "$FRESH" "$RECENT_PUSH" "$BOTH"),$(claim_node 50 issue-50-new 'lib/**' "$FRESH" "$RECENT_PUSH")"
+out=$("$PC" expiry acme/app 2>&1)
+check "intermediate closed, successor live: still displaced" "$(state_of "$out" 32)" "displaced"
+contains "the live successor is named" "$out" "displaced by issue-50-new (PR #50)"
+# C rolled back (absent) and B is still open: the original line still holds A.
+stage "$(claim_node_extra 32 issue-30-old 'lib/**' "$FRESH" "$RECENT_PUSH" "$BOTH"),$(claim_node 40 issue-40-mid 'lib/**' "$FRESH" "$RECENT_PUSH")"
+out=$("$PC" expiry acme/app 2>&1)
+check "successor rolled back, intermediate live: still displaced" "$(state_of "$out" 32)" "displaced"
+
 echo "pr-claims list · the 8-column contract is untouched"
 stage "$(claim_node 19 issue-28-cols 'lib/**' "$FRESH" "$RECENT_PUSH")"
 out=$("$PC" list acme/app 2>&1)
@@ -319,10 +339,41 @@ stage "$(claim_node_extra 37 issue-30-held 'components/nav/**' "$FRESH" "$RECENT
 out=$(run_so --json --scope 'components/nav/Item.tsx' --claim-id issue-31-mine --issue 31); rc=$?
 check "displaced claim does not block" "$rc" "0"
 check "it is not displaced a second time" "$(jq -r '.displaced | length' <<<"$out")" "0"
+check "a live displacer is not retargeted" "$(jq -r '.displacedPredecessors | length' <<<"$out")" "0"
 echo "scope-overlap · an unreadable displacement record blocks (fail closed)"
 stage "$(claim_node_extra 38 issue-30-held 'components/nav/**' "$EXPIRED" "$OLD_PUSH" '- Displaced by: ???')"
 out=$(run_so --scope 'components/nav/Item.tsx' --claim-id issue-31-mine --issue 31); rc=$?
 [[ "$rc" -ne 0 ]] && ok "unreadable Displaced by blocks" || bad "unreadable displacement record revived/displaced a claim (rc=$rc): $out"
+
+echo "scope-overlap · displacing a stale intermediate also names its predecessor"
+PRED='- Displaced by: issue-40-mid (PR #40)'
+pred_a=$(claim_node_extra 32 issue-30-old 'lib/**' "$FRESH" "$RECENT_PUSH" "$PRED")
+mid_b=$(claim_node 40 issue-40-mid 'lib/**' "$EXPIRED" "$OLD_PUSH")
+unrel=$(claim_node_extra 33 issue-33-other 'docs/**' "$FRESH" "$RECENT_PUSH" "$PRED")
+stage "${pred_a},${mid_b},${unrel}"
+out=$(run_so --scope 'lib/util/**' --claim-id issue-50-new --issue 50); rc=$?
+check "the stale intermediate does not block" "$rc" "0"
+contains "the intermediate is the direct displacement" "$out" "scope-overlap: displaced-claim issue-40-mid 40 "
+contains "the predecessor is named for the new claim" "$out" "scope-overlap: displaced-predecessor issue-30-old 32 "
+lacks "an unrelated scope is not a predecessor" "$out" "issue-33-other"
+out=$(run_so --json --scope 'lib/util/**' --claim-id issue-50-new --issue 50); rc=$?
+check "json mode passes the chain" "$rc" "0"
+check "json names one predecessor" "$(jq -r '.displacedPredecessors | length' <<<"$out")" "1"
+check "json predecessor is the overlapping claim" "$(jq -r '.displacedPredecessors[0].claimId' <<<"$out")" "issue-30-old"
+check "json predecessor PR" "$(jq -r '.displacedPredecessors[0].prNumber' <<<"$out")" "32"
+
+echo "scope-overlap · the predecessor chain is transitive"
+# A displaced by B, B displaced by D, D now stale. C overlapping D must name B and A.
+chain_a=$(claim_node_extra 32 issue-30-old 'lib/**' "$EXPIRED" "$OLD_PUSH" '- Displaced by: issue-40-mid (PR #40)')
+chain_b=$(claim_node_extra 40 issue-40-mid 'lib/**' "$EXPIRED" "$OLD_PUSH" '- Displaced by: issue-41-late (PR #41)')
+chain_d=$(claim_node 41 issue-41-late 'lib/**' "$EXPIRED" "$OLD_PUSH")
+stage "${chain_a},${chain_b},${chain_d}"
+out=$(run_so --json --scope 'lib/**' --claim-id issue-50-new --issue 50); rc=$?
+check "transitive chain admits" "$rc" "0"
+check "only the stale tail is a direct displacement" "$(jq -r '.displaced | length' <<<"$out")" "1"
+check "the stale tail is D" "$(jq -r '.displaced[0].claimId' <<<"$out")" "issue-41-late"
+check "both earlier claims are predecessors" "$(jq -r '.displacedPredecessors | length' <<<"$out")" "2"
+check "predecessors are ordered by PR number" "$(jq -r '[.displacedPredecessors[].claimId] | join(",")' <<<"$out")" "issue-30-old,issue-40-mid"
 
 echo "scope-overlap admission · expiry is part of the settled snapshot, not a later read"
 rm -f "$ROOT/expiry-n" "$ROOT/list-n"
@@ -399,9 +450,16 @@ out=$(GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 42 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "renew after displacement refuses" || bad "renew revived a displaced claim: $out"
 contains "the refusal names the displacer" "$out" "issue-31-mine (PR #99)"
 check "the body is untouched" "$(cat "$ROOT/body-43")" "$before"
-printf '%b\n' "- Active-work claim: issue-42-gone\n- Issue: #42\n- Claim scope: lib/**\n- Claimed: 2026-10-01T00:00:00Z\n- Claim-expires: ${EXPIRED}\n- Displaced by: garbage" > "$ROOT/body-43"
+# The expiry verdict comes from the GraphQL fixture, not from body-43.
+# Staging the garbage line only in the body file leaves the valid displacer
+# in GH_PAGES, and renew refuses as "already displaced" before it ever sees
+# the unreadable record.
+stage "$(claim_node_extra 43 issue-42-gone 'lib/**' "$EXPIRED" "$OLD_PUSH" '- Displaced by: garbage')"
+printf '%b\n' "- Claim schema: gibson.claim/v2\n- Active-work claim: issue-42-gone\n- Issue: #42\n- Claim scope: lib/**\n- Claimed: 2026-10-01T00:00:00Z\n- Claim-expires: ${EXPIRED}\n- Displaced by: garbage" > "$ROOT/body-43"
 out=$(GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 42 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "an unreadable Displaced by record refuses the renew" || bad "renew passed on an unreadable displacement record: $out"
+contains "the refusal names the unreadable record" "$out" "cannot read"
+lacks "it did not refuse as an already-readable displacement" "$out" "was displaced and cannot be renewed"
 
 echo "claim.sh --renew is an admission: it refuses when it would overlap a live claim"
 stage "$(claim_node 44 issue-43-mine 'lib/**' "$EXPIRED" "$OLD_PUSH"),$(claim_node 45 issue-44-rival 'lib/util/**' "$FRESH" "$RECENT_PUSH")"
@@ -480,6 +538,52 @@ check "renew of a claim whose displacer is dead works" "$rc" "0"
 new=$(sed -n 's/^- Claim-expires: //p' "$ROOT/body-73")
 [[ "$new" > "$(iso_at $((7 * DAY - 300)))" ]] && ok "and moves the date" || bad "date did not move (got '$new')"
 
+echo "claim.sh --renew refuses a predecessor line even when nothing else overlaps"
+stage "$(claim_node 51 issue-50-pred 'docs/only/**' "$EXPIRED" "$OLD_PUSH")"
+printf '%b\n' "- Claim schema: gibson.claim/v2\n- Active-work claim: issue-50-pred\n- Issue: #50\n- Claim scope: docs/only/**\n- Claimed: 2026-10-01T00:00:00Z\n- Claim-expires: ${EXPIRED}\n\nbody text" > "$ROOT/body-51"
+before=$(cat "$ROOT/body-51")
+cat > "$ROOT/bin/node" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *scope-overlap.mjs* ]]; then
+  out=\$(${REAL_NODE} "\$@")
+  rc=\$?
+  printf '%s\\n' "\$out"
+  if [[ \$rc -eq 0 ]]; then
+    printf '%s\\n' "scope-overlap: displaced-predecessor issue-30-old 32 ${EXPIRED}"
+  fi
+  exit \$rc
+fi
+exec ${REAL_NODE} "\$@"
+EOF
+chmod +x "$ROOT/bin/node"
+out=$(GIBSON_CANONICAL="$ROOT/repo/canon" bash "$CLAIM" --renew 50 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a predecessor line refuses the renew" || bad "renew ignored a predecessor line: $out"
+contains "renew does not displace a predecessor" "$out" "renew does not displace"
+check "the predecessor renew left the body alone" "$(cat "$ROOT/body-51")" "$before"
+rm -f "$ROOT/bin/node"
+
+echo "record_displacement succeeds only when the new line reads back"
+sed -n '/^record_displacement() {/,/^}$/p' "$CLAIM" > "$ROOT/record-displacement.fn.sh"
+# shellcheck disable=SC1091
+source "$ROOT/record-displacement.fn.sh"
+# Used by the sourced record_displacement function. Exported so shellcheck
+# can see the handoff; the function reads it in this same shell.
+export REPO=acme/app
+printf 'existing\n' > "$ROOT/body-77"
+record_displacement 77 "- Displaced claim: issue-30-old (PR #32, expired ${EXPIRED})"
+rc=$?
+check "a readable-back note succeeds" "$rc" "0"
+contains "the note is in the body" "$(cat "$ROOT/body-77")" "- Displaced claim: issue-30-old (PR #32, expired ${EXPIRED})"
+export GH_FAIL_BODY_FOR=78
+printf 'existing\n' > "$ROOT/body-78"
+before78=$(cat "$ROOT/body-78")
+record_displacement 78 "- Displaced claim: issue-30-old (PR #32, expired ${EXPIRED})"
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "a failed body write does not report the note recorded" ||
+  bad "record_displacement returned 0 when gh pr edit failed (rc=$rc)"
+check "the failed write left the body untouched" "$(cat "$ROOT/body-78")" "$before78"
+unset REPO GH_FAIL_BODY_FOR
+
 echo "claim.sh stamps the terminal Displaced-by record LAST (after every gate that can roll the claim back)"
 prov_line=$(grep -n 'info "reservation: \$RESERVATION_SHA"' "$CLAIM" | head -1 | cut -d: -f1)
 stamp_line=$(grep -n '"- Displaced by: \${CLAIM_ID}' "$CLAIM" | head -1 | cut -d: -f1)
@@ -497,6 +601,14 @@ if [[ -n "$reread_line" && "$reread_line" -lt "$stamp_line" ]]; then
 else
   bad "the stale re-read is not before the stamp (reread=$reread_line stamp=$stamp_line)"
 fi
+note_line=$(grep -n 'both PR bodies must name it' "$CLAIM" | head -1 | cut -d: -f1)
+if [[ -n "$note_line" && "$note_line" -gt "$stamp_line" && "$note_line" -lt "$done_line" ]]; then
+  ok "a missing note on this PR dies before CLAIM_COMPLETE"
+else
+  bad "the new-PR displacement note is not a failing step before success (note=$note_line stamp=$stamp_line complete=$done_line)"
+fi
+lacks "the new-PR note is not a warning" "$(sed -n '/record_displacement "\$PR_NUMBER"/,/^CLAIM_COMPLETE=1/p' "$CLAIM")" "WARNING: could not record the displacement"
+contains "predecessor rows are stamped" "$(sed -n '/^while IFS= read -r _dl; do$/,/^done <<EOF$/p' "$CLAIM")" "displaced-predecessor"
 
 echo "claim.sh --renew passes a literal glob scope to the sensor (no pathname expansion)"
 mkdir -p "$ROOT/repo/canon/lib"
