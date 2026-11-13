@@ -10,7 +10,7 @@ nav_exclude: true
 
 ```
 WHAT:        {{one_sentence_decision_in_plain_language}}
-WHY YOU:     {{why_this_is_an_owner_decision}} ({{gate_id e.g. G6/G7/G12}})
+WHY YOU:     {{why_this_is_an_owner_decision}} ({{gate_id e.g. G6/G7/G9}})
 RISK:        {{low|medium|high}}. {{what_could_go_wrong}} Undo: {{how_to_undo}}.
 RECOMMEND:   {{Approve|Decline|Wait}}. {{one_sentence_why_fleet_recommends_this}}
 IF YOU WAIT: {{what_happens_if_silent — always safe; other work continues}}
@@ -36,7 +36,7 @@ merge authorization, and not answer ingestion.
 
 ```bash
 # Record a PENDING decision locally (runtime ledger under gibson/ by default):
-scripts/decision-ledger.sh add --repo owner/name --gate G12 \
+scripts/decision-ledger.sh add --repo owner/name --gate G6 \
   --source-type pr --source-id 123 --source-sha <40-hex> \
   --what "..." --why-you "..." --risk-level medium \
   --risk-consequence "..." --risk-undo "..." \
@@ -61,12 +61,12 @@ IF YOU WAIT: Nothing breaks. Other work continues. I'll re-ask in 3 days.
 REPLY:       "yes" / "no" / any question you have.
 ```
 
-### Example (Tier C merge)
+### Example (billing code merge, G6)
 
 ```
-WHAT:        Ready to accept a change that touches how people sign in.
-WHY YOU:     Login and security changes always need your go-ahead. (G12)
-RISK:        Medium. A bug could lock people out until we roll back (~1 minute).
+WHAT:        Ready to accept a change to how customers are charged.
+WHY YOU:     Billing changes always need your go-ahead. (G6)
+RISK:        Medium. A bug could mischarge people until we roll back (~1 minute).
 RECOMMEND:   Approve. Tests and two reviewers signed off; preview looks correct.
 IF YOU WAIT: The change stays off the live site. Other tasks keep moving.
 REPLY:       "yes" / "no" / any question you have.
