@@ -526,7 +526,7 @@ fi
 
 if [[ ${#ADMIN_REASONS[@]} -gt 0 ]]; then
   if [[ "$TIER" == "tier-c" ]]; then
-    BLOCKERS+=("Tier C has no admin-merge path (Law 7, G12 floor) — fix the check, whatever the CI is doing")
+    BLOCKERS+=("Tier C has no admin-merge path (Law 7, G12 floor) — Resolve the underlying review or check issue. Obtain an independent approval at the exact head if missing, and verify all required checks before merging.")
     ADMIN_REASONS=()
   elif [[ "$LAUNCHED" -eq 1 ]]; then
     BLOCKERS+=("post-launch posture (--launched): no admin merge on any red — escalate to the owner")

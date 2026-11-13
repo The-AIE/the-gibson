@@ -850,6 +850,27 @@ f_tierc=$(fixture tierc '.labels = [{"name": "tier-c"}] |
 out=$(run "$f_tierc"); rc=$?
 check "tier-c downgrades ADMIN-CANDIDATE to BLOCKED" "$rc" "1"
 contains "cites the no-admin rule" "$out" "no admin-merge path"
+contains "infra red still sends the operator to the checks" "$out" "verify all required checks before merging"
+
+echo "Law 7 · Tier C with green checks and only the author's approval"
+# The only approval is the author's own VERDICT: APPROVE and every check is
+# green, so the missing piece is an independent review, not a check. The
+# refusal must hold and the remediation must not point at the checks alone.
+f_tierc_self=$(fixture tierc_self '.labels = [{"name": "tier-c"}] | .reviewDecision = "" |
+  .comments = [{"author": {"login": "builder-bot"}, "body": "six lenses clear\n\nVERDICT: APPROVE", "createdAt": "2026-08-02T15:00:00Z"}]')
+out=$(run "$f_tierc_self"); rc=$?
+check "author-only approval on Tier C is BLOCKED" "$rc" "1"
+contains "verdict BLOCKED" "$out" "BLOCKED"
+contains "cites the no-admin rule" "$out" "no admin-merge path"
+contains "asks for an independent approval at the exact head" "$out" "Obtain an independent approval at the exact head if missing"
+if echo "$out" | grep -F -- "fix the check" >/dev/null; then
+  bad "does not tell the operator to fix a check when every check is green"
+else
+  ok "does not tell the operator to fix a check when every check is green"
+fi
+out=$(GH_FIXTURE="$f_tierc_self" "$PREFLIGHT" 1 --repo acme/app --json 2>&1)
+check "json verdict BLOCKED" "$(echo "$out" | jq -r .verdict)" "BLOCKED"
+check "json offers no admin path" "$(echo "$out" | jq -r '.admin_reasons | length')" "0"
 
 out=$(run "$f_infra" --launched); rc=$?
 check "--launched removes the admin path" "$rc" "1"
