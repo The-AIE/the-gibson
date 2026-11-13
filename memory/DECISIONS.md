@@ -480,11 +480,14 @@ Proposed, not decided. Mark's direction of 2026-10-23, given while reviewing the
 open source readiness of this repository: the default review-evidence strictness
 for an adopter should be less strict than this repository's own, and each project
 chooses its level. The proposal, the four levels (0 solo, 1 second-opinion as the
-shipped default, 2 signed identities, 3 delivery control), what never loosens, the
+proposed default, 2 signed identities, 3 delivery control), what never loosens, the
 security argument for a level-1 receipt posted under the `github-actions` App
 identity by a default-branch reviewer workflow, the per-level evidence-source
 table, the adoption question, the migration of the three existing repositories and
-ten open questions are in `docs/adr/0004-review-evidence-strictness-levels.md`.
+twelve open questions are in `docs/adr/0004-review-evidence-strictness-levels.md`.
+The record also lists three technical gaps that block implementation even after
+the owner decides (U1 run-bound receipt ordering and deletion, U2 binding the policy
+checkout to the workflow revision that ran, U3 bounded recovery after retargets).
 No evaluator, trust-file, workflow or template change until Mark answers; the
 first such change is Tier C. Numbering note: D-019 is carried by the-gibson#534;
 D-020 belongs to the record moved to the operator's private repository with
