@@ -139,7 +139,7 @@ touch /path/to/target/gibson/HALT
 - Entry: green PR#.
 - Read-only multi-lens review. Prefer `REVIEWER_CMD` cross-vendor if set
   (especially Tier B/C). Else adversarial self-pass **from files only** + flag
-  human merge gate for Tier C.
+  the Tier C review floor (D-015).
 - Verdict APPROVE → next `ux-evaluator` (or `security` if no UI).
 - REQUEST_CHANGES → next `builder`, round += 1; if `round` has reached the
   per-tier cap in `config/review-round-caps.json` (default A=1 / B=2 / C=3) the
@@ -162,8 +162,25 @@ touch /path/to/target/gibson/HALT
 ### If `{{hat}}` = release
 
 - Entry: all gates green.
-- If human-gated (Tier C/schema): queue for Mark, set next issue triage, **do not
-  merge**.
+- Tier C by itself is not human-gated: merge only once the G12 floor is met —
+  one independent approval at the exact head plus required checks (D-015). The
+  approval must come from a reviewer independent of the author (Law 5); a
+  same-vendor reviewer in a fresh context can meet it, the author's own pass
+  cannot. Check it yourself before merging: it is a native `APPROVED` review
+  whose `commit_id` equals the PR's current head. A comment is not bound to a
+  commit and does not count, and `release-preflight.sh` does not verify this yet
+  (#636), so its READY is not proof of it. A push after the approval makes it
+  stale. The same review must show the Tier C adversarial cases (Law 7): its
+  body names the abuse or failure cases it tried against the changed surface. An
+  approval that does not show them does not meet the floor. Without a current
+  approval that does: park the PR, **do not merge**.
+- If human-gated (e.g. G6 billing/pricing/payment code, schema, an explicit owner
+  hold) and the owner has not recorded an explicit approval of the PR's current
+  head: queue for Mark, set next issue triage, **do not merge**. A decline, a
+  hold, a question or silence is not an approval, and an approval given before a
+  later push does not cover the new head; in each case the PR stays parked. Only
+  after the owner's explicit approval of the current head is recorded on the PR,
+  do not queue it again: continue with the remaining merge checks.
 - If `RELEASE_CMD` is set: shell out to it for the actual merge, passing the PR
   number and repo path — the runner that built and/or reviewed this PR must not
   also be the one that merges it when a distinct release identity is configured.
@@ -267,7 +284,7 @@ touch /path/to/target/gibson/HALT
 | Retries | per-tier cap (`config/review-round-caps.json`) → park + human |
 | Error budget | driver stops after N consecutive red gates (default 5) |
 | Kill switch | `gibson/HALT` file or `GIBSON_HALT=1` (both unconditional); the `gibson-halt` label is a soft cue, only when `gh` is available → exit cleanly |
-| Human gates | queue + move on; never auto-approve Tier C merge |
+| Human gates | queue + move on; never auto-approve a gated merge (e.g. G6); Tier C merges only on one independent approval at the exact head + required checks |
 | Fresh context | do not ask for prior chat; re-read artifacts |
 
 ## Done means
