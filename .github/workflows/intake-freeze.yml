@@ -1,0 +1,29 @@
+# D5 intake freeze — signed by Mark 2026-11-12 (Notion FLEET-DEC-5).
+# Labels every newly opened issue frozen-2026-11 until 2027-01-01. The label is a hint for people
+# and the morning brief. The enforcement is fleet-tooling/bin/intake-admit.sh, which lane-check runs
+# before any claim and which freezes issues opened after the freeze began even if this never ran.
+# Exception: an issue labelled bug + blocks-product is admitted.
+# Canonical copy: mrhinkle/fleet-tooling/.github/workflows/intake-freeze.yml. Keep every copy identical.
+name: intake-freeze
+on:
+  issues:
+    types: [opened]
+permissions:
+  issues: write
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Label the new issue frozen-2026-11
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          if [[ "$(date -u +%F)" > "2026-12-31" ]]; then
+            echo "The D5 intake freeze ended 2027-01-01; not labelling."; exit 0
+          fi
+          gh label create frozen-2026-11 --repo "$REPO" --color BFD4F2 \
+            --description "D5 intake freeze until 2027-01-01; admitted only with bug + blocks-product" 2>/dev/null || true
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label frozen-2026-11
