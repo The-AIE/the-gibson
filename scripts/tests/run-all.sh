@@ -28,6 +28,7 @@ USAGE
   scripts/tests/run-all.sh [--only PATTERN] [--timeout SECONDS] [--jobs N]
                            [--wall-budget SECONDS] [--no-quarantine]
                            [--list-quarantine] [--quiet]
+                           [--results-json FILE --results-base SHA --results-head SHA]
   scripts/tests/run-all.sh --self-test-toolchain
   scripts/tests/run-all.sh --metrics-contract-fixture
   scripts/tests/run-all.sh --help
@@ -50,6 +51,9 @@ USAGE
   --no-quarantine         treat quarantined suites as required — the burn-down view
   --list-quarantine       print the quarantine list with issue links and exit
   --quiet                 suite summary lines only, no per-assertion output
+  --results-json FILE     optional advisory semantic suite report (never selects tests)
+  --results-base SHA      base commit identity for that report
+  --results-head SHA      PR head identity (may differ from a merge checkout)
   --self-test-toolchain   offline checks for ShellCheck version parsing/mismatch
                           and single-source pin wiring (no network, no sensors).
                           The ordinary path also runs these checks and fails the
@@ -678,6 +682,11 @@ WALL_BUDGET="${GIBSON_GATE_WALL_BUDGET:-0}"
 USE_QUARANTINE=1
 QUIET=0
 METRICS_CONTRACT_FIXTURE=0
+RESULTS_JSON="${GIBSON_SUITE_REPORT_PATH:-}"
+RESULTS_BASE="${GIBSON_SUITE_REPORT_BASE:-}"
+RESULTS_HEAD="${GIBSON_SUITE_REPORT_HEAD:-}"
+# Only this invocation owns the report; nested runners must not inherit its path.
+unset GIBSON_SUITE_REPORT_PATH GIBSON_SUITE_REPORT_BASE GIBSON_SUITE_REPORT_HEAD
 
 # GIBSON_METRICS_CONTRACT_FIXTURE_PRESCAN
 # Presence-only. Do not parse ordinary flags here: --help / --list-quarantine /
@@ -708,6 +717,14 @@ if [[ "$METRICS_CONTRACT_FIXTURE" -eq 1 ]]; then
 else
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --results-json|--results-base|--results-head)
+        [[ $# -ge 2 && "$2" != --* ]] || { echo "run-all.sh: $1 requires a value" >&2; exit 2; }
+        case "$1" in
+          --results-json) RESULTS_JSON="$2" ;;
+          --results-base) RESULTS_BASE="$2" ;;
+          --results-head) RESULTS_HEAD="$2" ;;
+        esac
+        shift 2 ;;
       --only) ONLY="${2:-}"; shift 2 ;;
       --timeout) TIMEOUT="${2:-}"; shift 2 ;;
       --jobs) JOBS="${2:-}"; shift 2 ;;
@@ -2257,6 +2274,33 @@ SUITE_CAPTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gibson-runall-suites.XXXXXX") || 
   exit 2
 }
 
+# Optional shadow receipts consume the same semantic decisions as the gate.
+# No test is selected or repeated by this reporting path; NUL records preserve IDs.
+RESULTS_EXECUTED=""
+if [[ -n "$RESULTS_JSON" ]]; then
+  RESULTS_EXECUTED=$(git rev-parse HEAD 2>/dev/null || true)
+  : > "$RESULTS_JSON" || echo "run-all: cannot initialize advisory report" >&2
+  : > "$SUITE_CAPTURE_DIR/results.records"
+  : > "$SUITE_CAPTURE_DIR/results.inventory"
+  : > "$SUITE_CAPTURE_DIR/results.executed"
+fi
+gibson_results_suite() {
+  [[ -n "$RESULTS_JSON" ]] || return 0
+  printf '%s\0' "$1" "$2" "$3" "$4" "$5" "$6" >> "$SUITE_CAPTURE_DIR/results.records"
+}
+gibson_results_write() {
+  [[ -n "$RESULTS_JSON" ]] || return 0
+  local mode=full
+  [[ -z "$ONLY" ]] || mode=partial
+  node "$REPO_ROOT/scripts/ci-suite-selection.mjs" write-report \
+    --repo "$REPO_ROOT" --records "$SUITE_CAPTURE_DIR/results.records" \
+    --inventory "$SUITE_CAPTURE_DIR/results.inventory" \
+    --executed-inventory "$SUITE_CAPTURE_DIR/results.executed" \
+    --base "$RESULTS_BASE" --head "$RESULTS_HEAD" --executed "$RESULTS_EXECUTED" \
+    --exit "$verdict_rc" --wall "$RUN_ALL_WALL" --global-failures "$FAILED" \
+    --mode "$mode" --output "$RESULTS_JSON" || echo "run-all: advisory results export failed" >&2
+}
+
 # On EXIT/INT/TERM/HUP stop any suites still running (whole process trees —
 # a suite may have forked node/docker/git children) before removing captures,
 # so a cancelled gate does not leave orphans burning the runner.
@@ -2330,8 +2374,10 @@ suite_selected() {
 SELECTED_SUITES=""
 for suite in scripts/tests/*.test.sh; do
   name=$(basename "$suite")
+  if [[ -n "$RESULTS_JSON" ]]; then printf '%s\0' "$name" >> "$SUITE_CAPTURE_DIR/results.inventory"; fi
   suite_selected "$name" || continue
   SELECTED_SUITES="$SELECTED_SUITES $suite"
+  if [[ -n "$RESULTS_JSON" ]]; then printf '%s\0' "$name" >> "$SUITE_CAPTURE_DIR/results.executed"; fi
 done
 
 # Bash 3.2 has no `wait -n`, so reap *any* finished child by polling: a slot
@@ -2369,16 +2415,19 @@ for suite in $SELECTED_SUITES; do
     echo "${RED}  FAIL${OFF} — $name is not executable"
     FAILED="$FAILED $name"
     gibson_metrics_contribute "" "$name" || true
+    gibson_results_suite "$name" fail 126 0 1 not-executable
     continue
   fi
 
   cap="$SUITE_CAPTURE_DIR/$name"
+  suite_capture_missing=0
   if [[ -s "$cap.ec" ]]; then
     out=$(cat "$cap.out"); ec=$(cat "$cap.ec")
     suite_elapsed=$(cat "$cap.elapsed" 2>/dev/null || echo 0)
   else
     out="run-all: suite produced no exit-code capture (runner crashed?)"; ec=1
     suite_elapsed=0
+    suite_capture_missing=1
   fi
   # Overlay timeout classification after the capture-to-locals seam that
   # bash32-syntax-each.test.sh pins. Wall-budget kills must not surface as
@@ -2388,7 +2437,10 @@ for suite in $SELECTED_SUITES; do
   ec="$_gs_ec"
   suite_elapsed="$_gs_elapsed"
   tally="$_gs_tally"
-  gibson_metrics_contribute "$out" "$name" || true
+  suite_metric_failure=0
+  gibson_metrics_contribute "$out" "$name" || suite_metric_failure=1
+  suite_verdict=fail
+  suite_reason=nonzero-exit
 
   # Shell-construction diagnostics must never green a nominally-passing suite
   # (#153 review round 7). An unquoted heredoc under `set -u` can print
@@ -2420,23 +2472,30 @@ for suite in $SELECTED_SUITES; do
   fi
 
   if [[ "$bash32_bench_ok" -eq 0 ]]; then
+    suite_reason=bash32-receipt
     echo "${RED}  FAIL${OFF} — $name: bash 3.2 benchmark receipt missing or invalid (exit $ec, ${suite_elapsed}s)"
     FAILED="$FAILED $name"
   elif [[ -n "$shell_diag" ]]; then
+    suite_reason=shell-diagnostic
     echo "${RED}  FAIL${OFF} — $name: shell construction diagnostic with tally '$tally' (exit $ec, ${suite_elapsed}s)"
     echo "$shell_diag" | head -6 | sed 's/^/         /'
     FAILED="$FAILED $name"
   elif [[ "$ec" -eq 0 ]]; then
     if is_quarantined "$name"; then
+      suite_reason=escaped-quarantine
       echo "${RED}  FAIL${OFF} — $name PASSES but is quarantined (#$(quarantine_issue "$name")) — remove it from the list (${suite_elapsed}s)"
       ESCAPED="$ESCAPED $name"
     else
+      suite_verdict=pass
+      suite_reason=passed
       echo "${GRN}  ok${OFF}   — $name: $tally (${suite_elapsed}s)"
       if [[ -n "$bash32_bench_line" ]]; then
         printf '%s\n' "$bash32_bench_line"
       fi
     fi
   elif is_quarantined "$name"; then
+    suite_verdict=quarantined
+    suite_reason=quarantined-failure
     echo "${YEL}  KNOWN${OFF}— $name: $tally (quarantined, #$(quarantine_issue "$name"), ${suite_elapsed}s)"
     QUARANTINED="$QUARANTINED $name"
   else
@@ -2444,6 +2503,9 @@ for suite in $SELECTED_SUITES; do
     FAILED="$FAILED $name"
   fi
   # gibson_suite_loop_diag end
+  if [[ "$suite_metric_failure" -ne 0 ]]; then suite_verdict=fail; suite_reason=metric-contract; fi
+  if [[ "$suite_capture_missing" -ne 0 ]]; then suite_verdict=fail; suite_reason=missing-capture; fi
+  gibson_results_suite "$name" "$suite_verdict" "$ec" "$suite_elapsed" "$suite_metric_failure" "$suite_reason"
 done
 
 # --- wall-time budget -------------------------------------------------------
@@ -2465,5 +2527,6 @@ fi
 echo
 gibson_run_all_bind_and_print_verdict
 echo "run-all wall: ${RUN_ALL_WALL}s (budget ${WALL_BUDGET}s, jobs=$JOBS)"
+gibson_results_write
 gibson_metrics_emit_aggregate_or_fail
 exit $?
