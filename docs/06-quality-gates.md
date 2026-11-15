@@ -9,13 +9,19 @@ nav_order: 6
 
 > **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
 
-> 🙂 **In plain English:** Before any change is saved, automatic checks must pass: does
-> the code type-check, stay clean, pass tests, and build? Harder or riskier changes get
+> 🙂 **In plain English:** Check the behavior being changed while iterating, then run
+> the full required checks before pushing. Harder or riskier changes get
 > stricter review. Nothing ships on hope alone.
 
-## The green gate (computational, every commit)
+## Affected checks locally, full green gate before push
 
-Before **every** commit, in the worktree:
+Before each local product commit, record the checks selected and why they cover
+the changed behavior and its dependents. Documentation uses relevant link/contract
+checks; workflows use actionlint and workflow contracts; product code uses its
+lint/typecheck and affected behavior tests. Shared modules, dependency/configuration
+changes and uncertain impact require broader checks, up to the full suite.
+
+Before pushing and at the PR head, run the full gate in the worktree:
 
 ```bash
 <generate step>        # e.g. npx prisma generate — stale clients break the NEXT agent
@@ -34,6 +40,12 @@ that plain `tsc` misses).
 The same gate runs in CI (`ci/gibson-gate.yml`) so it holds regardless of which
 runtime wrote the code. Local gate is a courtesy to your own iteration speed; CI
 gate is the law.
+
+This changes local iteration guidance only. Existing required CI/pre-push gates
+stay intact until an affected-test selector is separately validated. A tooling
+canary receipt proves configured tool behavior, not product correctness or complete
+semantic source coverage. Its freshness follows tooling inputs; the product gate
+receipt remains bound to the current head.
 
 ## Test-integrity (count ratchet — issue #70)
 

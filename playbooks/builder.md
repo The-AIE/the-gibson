@@ -9,11 +9,11 @@ inputs:
 outputs:
   - claim row + agent-claimed label
   - git worktree + branch feat/<issue>-<slug>
-  - green-gate-passing commits (Signed-off-by)
+  - checked commits (Signed-off-by) and full green gate before push
   - PR referencing Closes #<N>; contract criteria addressed
 gates:
   - claim before touch (docs/05)
-  - green gate before every commit (docs/06)
+  - affected checks before local commits; full green gate before push (docs/06)
   - zero new failures vs. branch-point baseline
   - never edit the canonical checkout
 forbidden:
@@ -88,9 +88,10 @@ cd /path/to/the-gibson && ls scripts/claim.sh
 # 2. Work only inside the worktree
 cd ../wt-42-password-reset
 
-# 3. Baseline then build, then gate every commit
+# 3. Baseline, build, then record affected checks for each local commit
 /path/to/the-gibson/scripts/gate-baseline.sh
 # ... implement ...
+# Use the full gate when the affected checks are uncertain; always before push.
 /path/to/the-gibson/scripts/gate.sh && git commit -s -m "feat(#42): ..."
 ```
 
@@ -138,13 +139,20 @@ Manual equivalent if the script is unavailable:
 
 - Stay inside **Affected area**. Scope creep >2× or into undeclared Tier C → park and
   split (human gate G11).
-- Prefer small commits; every commit must pass the green gate.
+- Prefer small commits; record affected checks for each, with the full gate before push.
 - Schema / `package.json` / other hot files: follow target AGENTS.md rules
   (schema = own issue, additive-only, models named in claim).
 - Prefer REST/fetch over new SDKs. Unavoidable deps = own commit.
 - De-hot files when you can (generated barrels) — first-class builder work (doc 05).
 
-### 4. Green gate before every commit (Law 4)
+### 4. Affected local checks, full gate before push (Law 4)
+
+For each local commit, select and record checks for the changed behavior and its
+dependents. Docs-only changes use relevant link/contract checks; workflow changes
+use actionlint and workflow contract checks; application changes use lint/typecheck
+and affected behavior tests. Shared code, dependency or gate changes broaden the
+selection. If the impact is unclear, run the full gate. No required CI or pre-push
+check is removed by this guidance; a machine selector needs separate validation.
 
 ```bash
 <path-to-gibson>/scripts/gate.sh

@@ -72,15 +72,15 @@ Ship small verified units **without stopping** except at the human gates.
    A second lane on the same issue requires `--slice` and disjoint scope.
 3. **Never edit in the canonical checkout.** All mutation happens in your own
    git worktree. The shared checkout is read-only, always.
-4. **The green gate is absolute.** Before every commit: generate → typecheck →
-   lint → test → build, with **zero new failures vs. your branch point**. Record
-   the baseline when you branch (`scripts/gate-baseline.sh`). Pre-existing
-   failures are not yours to inherit or to hide behind. Do not delete or skip
-   tests to go green — `scripts/test-integrity.mjs` is canonical for that
-   ratchet. **Exception — pure memory commits:** if the commit touches **only**
-   files under `memory/` (and no product, script, CI, or playbook code), skip
-   the green gate and CI loop. Still never put secrets in memory files. A commit
-   that mixes memory with other paths follows Law 4 in full.
+4. **The green gate is absolute.** Record affected checks before local commits;
+   uncertainty requires the full gate. Before push and at the PR head, run
+   generate → typecheck → lint → test → build: **zero new failures vs. branch point**.
+   Keep required CI/pre-push checks until a selector is separately validated.
+   Record the branch baseline (`scripts/gate-baseline.sh`). Never hide behind
+   existing failures or delete/skip tests to go green (`scripts/test-integrity.mjs`).
+   **Exception — pure memory commits:** commits touching **only** `memory/`
+   (no product/script/CI/playbook code) skip the green gate and CI loop.
+   No secrets in memory. Mixed commits follow Law 4 in full.
 5. **Never grade your own homework.** You may not review, approve, or evaluate
    work you generated. One independent reviewer is sufficient for every tier;
    cross-vendor is preferred, not required. The reviewer is read-only and
@@ -300,13 +300,14 @@ head and full introduced range, plus required checks.
 
 ## Commit, PR, and merge
 
-Before **every** product commit, in the worktree: generate → typecheck → lint →
-test → build. Zero new failures vs. the recorded branch point. CI
-(`ci/gibson-gate.yml`) is the law; local `scripts/gate.sh` is the same
-obligation. Machine-readable twin is `.agents/gate.json`
+Full pre-push/PR-head gate: generate → typecheck → lint → test → build (Law 4).
+Machine-readable twin: `.agents/gate.json`
 (test: `bash scripts/tests/run-all.sh --no-quarantine`; empty strings for
-inapplicable generate/typecheck/lint/build). The twin does not weaken or
-replace the full five-step gate.
+inapplicable generate/typecheck/lint/build).
+
+New adoption requires `gibson-verify.mjs prove --adoption` at its head.
+Bootstrap/repair cannot claim unproven readiness. Existing repos are audit-only
+until reviewed required-mode opt-in (docs/13).
 
 Every commit carries a `Signed-off-by` trailer (DCO). Use `git commit -s`.
 Unsigned commits in a handed-off range refuse. The trailer must survive squash.

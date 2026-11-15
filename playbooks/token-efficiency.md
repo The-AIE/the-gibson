@@ -112,7 +112,8 @@ REPO_SLUG=owner/name       # safe placeholder — replace with the target's orig
   --reviewers codex,claude \
   --out "$REPO/gibson/second-opinion.md"
 
-# 4) Green gate before each commit (compares to the branch-point baseline).
+# 4) Full green gate before push (compares to the branch-point baseline).
+# Record affected checks for local commits; use the full gate if uncertain.
 (cd "$REPO" && "$GIBSON/scripts/gate.sh")
 
 # 5) Record one measured iteration (aggregate tokens optional — omit if unknown)
@@ -317,8 +318,9 @@ Cache hits never replace **exact-head** verification after new commits.
 
 ## 8. Quality invariants (non-negotiable)
 
-1. **Green gate** before every commit, run from the **target worktree** after a
-   branch-point baseline (`gate-baseline.sh` then `gate.sh` —
+1. **Affected checks** before local commits; **full green gate** before push and
+   at the PR head, from the **target worktree** after a branch-point baseline.
+   Uncertain selection requires the full gate (`gate-baseline.sh` then `gate.sh` —
    [docs/06](../docs/06-quality-gates.md)).
 2. **Exact-head CI:** required checks must run on the PR's current head SHA.
    A missing check is not a pass ([docs/20](../docs/20-multi-model-orchestration.md)

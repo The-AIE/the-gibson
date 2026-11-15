@@ -63,6 +63,22 @@ Runtimes: grok, claude-code
 
 ## Step 1 — Harnessability audit (read-only)
 
+Inventory tooling without treating configuration as executed coverage. This
+executes the target's declared version commands: review them first when the
+repository is untrusted. It is not a strictly read-only audit:
+
+```bash
+node <path-to-gibson>/scripts/gibson-verify.mjs doctor --repo /path/to/checkout --tooling-only
+```
+
+Legacy repos are audit-only. New adoptions must complete the required tooling
+contract described in docs/13, then run `gibson-verify.mjs prove --adoption` at the
+committed adoption head. This executable path rejects absent profiles, missing
+configuration, unavailable/mismatched tools and unproven controls. Bootstrap/repair
+work may create the contract before readiness is established; it cannot report the
+repo adopted. Ordinary required-mode `gate.sh` also rejects missing/stale tooling
+proof. Do not use an older installed gate which lacks this check.
+
 ### Git/GitHub wiring (required)
 
 Run the configurator **before** claiming the repo is adopted. It senses live settings

@@ -78,12 +78,12 @@
       "outputs": [
         "claim row + agent-claimed label",
         "git worktree + branch feat/<issue>-<slug>",
-        "green-gate-passing commits (Signed-off-by)",
+        "checked commits (Signed-off-by) and full green gate before push",
         "PR referencing Closes #<N>; contract criteria addressed"
       ],
       "gates": [
         "claim before touch (docs/05)",
-        "green gate before every commit (docs/06)",
+        "affected checks before local commits; full green gate before push (docs/06)",
         "zero new failures vs. branch-point baseline",
         "never edit the canonical checkout"
       ],

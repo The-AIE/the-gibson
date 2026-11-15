@@ -21,12 +21,13 @@
  * EXIT  0 ok/verified/parseable · 1 failed/claim-only/unparseable/I-O · 2 usage
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { join, dirname, resolve, isAbsolute } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { parseFlags, dieUsage } from "./lib/args.mjs";
+import { inspectTooling, cachedTooling, proveTooling } from "./lib/tooling-readiness.mjs";
 
 const GIBSON = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SCHEMA = "gibson.verify-receipt.v1";
@@ -48,9 +49,11 @@ RISKS
   authority. report without --dry-run POSTs with MC_TOKEN.
 
 USAGE
-  gibson-verify.mjs doctor [--repo DIR] [--gate FILE]
+  gibson-verify.mjs doctor [--repo DIR] [--gate FILE] [--base REF] [--tooling-only]
+                         [--require-proof] [--adoption]
   gibson-verify.mjs check  [--repo DIR] [--base REF] [--gate FILE] [--gate-arg ARG]...
   gibson-verify.mjs prove  (same flags as check; writes ${RECEIPT_DIR}/<HEAD>.json)
+                         [--adoption] [--refresh-tooling]
   gibson-verify.mjs verdict lint FILE
   gibson-verify.mjs report --agent ID [--repo DIR] [--receipt FILE] [--pr N]
                            [--issue N] [--platform P] [--dry-run]
@@ -70,7 +73,7 @@ function run(cmd, args, opts = {}) {
   const t = Date.now();
   const r = spawnSync(cmd, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, ...opts });
   // A signal or spawn error has no exit status; never read that as success.
-  const code = r.error ? 127 : r.status === null ? 1 : r.status;
+  const code = r.error || r.status === null ? 127 : r.status;
   return { code, stdout: r.stdout || "", stderr: r.stderr || "", ms: Date.now() - t };
 }
 
@@ -89,6 +92,14 @@ function isExecutable(p) {
 
 // ---------------------------------------------------------------- doctor
 function doctor(o) {
+  if (o.toolingOnly) {
+    const repo = resolve(o.repo || ".");
+    const tooling = inspectTooling({ repo, base: o.base, adoption: o.adoption, run, git });
+    const proof = o.requireProof && tooling.configured ? cachedTooling(repo, tooling, git(repo, ["rev-parse", "HEAD"]), o.adoption) : null;
+    const ok = !tooling.required || (tooling.configured && (!o.requireProof || Boolean(proof)));
+    out({ subcommand: "doctor", ok, tooling, proof: proof ? { verified: true, reused_from: proof.reused_from } : { verified: false, detail: "static findings are not executed proof; run prove to establish controls" } });
+    return ok ? 0 : 1;
+  }
   const checks = [];
   const add = (name, ok, required, detail) => checks.push({ name, ok, required, detail });
   for (const [tool, required] of [["git", true], ["node", true], ["bash", true], ["jq", true], ["gh", true], ["shellcheck", false]]) {
@@ -105,6 +116,8 @@ function doctor(o) {
     add("repo:git", false, true, e.message);
   }
   if (repo) {
+    const tooling = inspectTooling({ repo, base: o.base, adoption: o.adoption, run, git });
+    add("tooling:configuration", tooling.configured, tooling.required, tooling.findings);
     const gate = gatePath(repo, o.gate);
     add("gate:executable", isExecutable(gate), true, gate);
     const ign = run("git", ["-C", repo, "check-ignore", "-q", `${RECEIPT_DIR}/probe.json`]);
@@ -121,7 +134,27 @@ function doctor(o) {
 // ---------------------------------------------------------------- check / prove
 const REQUIRED_STEPS = ["clean-tree", "non-empty-diff", "gate", "truthful-status"];
 
-function check(o) {
+function baselineSnapshot(repo, args = []) {
+  let path = join(repo, ".gibson-baseline.json");
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--baseline" && args[i + 1]) path = resolve(repo, args[++i]);
+  }
+  const entries = [];
+  for (let p = path; ; p = dirname(p)) {
+    try {
+      const st = lstatSync(p);
+      if (p === path && !st.isFile()) throw new Error("baseline is not a regular file");
+      entries.push([p, st.dev, st.ino, st.mode, realpathSync(p), p === path ? sha256(readFileSync(p)) : null]);
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+      entries.push([p, null]);
+    }
+    if (dirname(p) === p) break;
+  }
+  return sha256(JSON.stringify(entries));
+}
+
+function checkWithTooling(o) {
   const repo = toplevel(o.repo);
   const head = git(repo, ["rev-parse", "HEAD"]);
   const base = o.base || "origin/main";
@@ -143,10 +176,29 @@ function check(o) {
 
   const dir = join(repo, RECEIPT_DIR);
   mkdirSync(dir, { recursive: true });
+  // Version/control commands must not rewrite the baseline before gate.sh
+  // establishes its own authority snapshot.
+  const baseline = baselineSnapshot(repo, o.gateArgs || []);
+  const plan = inspectTooling({ repo, base, adoption: o.adoption, run, git });
+  let tooling = { schema: plan.schema, fingerprint: plan.fingerprint, verified: false, findings: plan.findings };
+  if (steps.every((s) => s.ok) && plan.configured) {
+    tooling = (!o.refreshTooling && cachedTooling(repo, plan, head, o.adoption)) || proveTooling(repo, plan, run);
+    const afterControls = inspectTooling({ repo, base, adoption: o.adoption, run, git });
+    if (!afterControls.configured || afterControls.fingerprint !== plan.fingerprint) tooling.verified = false;
+    // The gate can consume these real control results without running them a
+    // second time. This interim receipt expressly does not claim a green gate.
+    writeFileSync(join(dir, `${head}.json`), `${JSON.stringify({ schema: SCHEMA, head, verified: false, tooling })}\n`);
+  }
+  const toolingBaselineStable = baselineSnapshot(repo, o.gateArgs || []) === baseline;
+  if (!toolingBaselineStable) tooling.verified = false;
+  step("tooling-baseline-stable", toolingBaselineStable, "baseline authority checked around tooling commands");
+  step("tooling", !plan.required || tooling.verified, plan.required ? (tooling.verified ? "tooling controls verified; product gate still required" : "required tooling missing/unproven") : "audit only; tooling findings do not block legacy repositories", { required: plan.required, findings: plan.findings });
   if (steps.every((s) => s.ok)) {
     const gate = gatePath(repo, o.gate);
     const log = join(dir, `${head}.gate.log`);
-    const g = isExecutable(gate) ? run(gate, o.gateArgs, { cwd: repo }) : { code: 127, stdout: "", stderr: `gate not executable: ${gate}\n`, ms: 0 };
+    const gateArgs = [...(o.gateArgs || [])];
+    if (gate === join(GIBSON, "scripts", "gate.sh")) gateArgs.push("--tooling-base", base);
+    const g = isExecutable(gate) ? run(gate, gateArgs, { cwd: repo }) : { code: 127, stdout: "", stderr: `gate not executable: ${gate}\n`, ms: 0 };
     const text = g.stdout + g.stderr;
     writeFileSync(log, text);
     step("gate", g.code === 0, `${gate} exit ${g.code}`, {
@@ -155,16 +207,39 @@ function check(o) {
     });
     const t = run(process.execPath, [join(GIBSON, "scripts", "truthful-status.mjs"), "--claimed", "success", "--log-file", log, "--gate-exit", String(g.code)]);
     step("truthful-status", t.code === 0, firstLine(t.stdout + t.stderr) || `exit ${t.code}`, { exit: t.code });
+    if (plan.configured) {
+      const afterGate = inspectTooling({ repo, base, adoption: o.adoption, run, git });
+      if (!afterGate.configured || afterGate.fingerprint !== plan.fingerprint) {
+        tooling.verified = false;
+        step("tooling-inputs-stable", !plan.required, "tooling inputs changed during gate; proof invalidated");
+      }
+    }
   }
+  const gateBaselineStable = baselineSnapshot(repo, o.gateArgs || []) === baseline;
+  if (!gateBaselineStable) tooling.verified = false;
+  step("gate-baseline-stable", gateBaselineStable, "baseline authority checked through final tooling observation");
   for (const name of REQUIRED_STEPS) {
     if (!steps.some((s) => s.name === name)) step(name, false, "skipped: an earlier step failed");
   }
   // Fail closed on a vacuous step list: every required step must be present AND ok.
-  const verified = REQUIRED_STEPS.every((n) => steps.some((s) => s.name === n && s.ok === true));
+  const verified = steps.every((s) => s.ok) && REQUIRED_STEPS.every((n) => steps.some((s) => s.name === n && s.ok === true));
   return {
-    schema: SCHEMA, head, base, merge_base: mergeBase, files, steps, verified,
+    schema: SCHEMA, head, base, merge_base: mergeBase, files, steps, verified, tooling,
     generated_at: new Date().toISOString(), generator: "scripts/gibson-verify.mjs",
   };
+}
+
+function check(o) {
+  const repo = toplevel(o.repo);
+  const path = join(repo, RECEIPT_DIR, `${git(repo, ["rev-parse", "HEAD"])}.json`);
+  const previous = existsSync(path) ? readFileSync(path) : null;
+  try { return checkWithTooling(o); }
+  finally {
+    // check is nonpublishing. Temporary control evidence serves gate.sh only
+    // during this call; it cannot replace an existing prove receipt.
+    if (previous === null) rmSync(path, { force: true });
+    else writeFileSync(path, previous);
+  }
 }
 
 function prove(o) {
@@ -305,9 +380,10 @@ async function report(o) {
 
 // ---------------------------------------------------------------- main
 const COMMON = { "--repo": { key: "repo" } };
-const CHECK_FLAGS = { ...COMMON, "--base": { key: "base" }, "--gate": { key: "gate" }, "--gate-arg": { key: "gateArgs", multiple: true } };
+const TOOLING_FLAGS = { "--base": { key: "base" }, "--adoption": { key: "adoption", type: "boolean" } };
+const CHECK_FLAGS = { ...COMMON, ...TOOLING_FLAGS, "--refresh-tooling": { key: "refreshTooling", type: "boolean" }, "--gate": { key: "gate" }, "--gate-arg": { key: "gateArgs", multiple: true } };
 const SPECS = {
-  doctor: { ...COMMON, "--gate": { key: "gate" } },
+  doctor: { ...COMMON, ...TOOLING_FLAGS, "--gate": { key: "gate" }, "--tooling-only": { key: "toolingOnly", type: "boolean" }, "--require-proof": { key: "requireProof", type: "boolean" } },
   check: CHECK_FLAGS,
   prove: CHECK_FLAGS,
   report: {
