@@ -1,0 +1,14 @@
+{
+  "schema": "gibson.ci-suite-selection-policy/v1",
+  "always_on": [
+    "architecture-fitness.test.sh",
+    "ci-suite-selection.test.sh",
+    "contract-authority.test.sh",
+    "convention-sensors.test.sh",
+    "laws-sensors.test.sh",
+    "policy-manifest.test.sh"
+  ],
+  "mapping": "Only modified existing scripts/tests/*.test.sh files map to their exact suite ID.",
+  "production_mappings": {},
+  "fallback": "All production, shared, unknown, added, renamed, deleted, workflow, configuration and dependency paths require the full inventory."
+}
