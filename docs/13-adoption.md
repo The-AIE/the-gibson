@@ -93,6 +93,79 @@ repo's contract. Gitignore it in the target unless the team wants the journal.
 
 ## Step 3 — Install enforcement
 
+### Tooling readiness for new adoptions
+
+Fill the template's `tooling` object before claiming a new repo adopted. All five
+profiles are explicit: `javascript` (ESLint), `python` (for example Ruff), `shell`
+(ShellCheck), `actions` (actionlint), and `formatting` (a formatter in check mode).
+These compose for mixed repositories; ESLint and Ruff cover different languages.
+Choose repository-appropriate tools, without changing existing async rules as a
+side effect. A genuinely absent surface uses `{"not_applicable":"reason"}`;
+detected tracked files prevent that exemption. An omitted profile is missing.
+The template deliberately starts incomplete so copying a file is not proof.
+
+An applicable profile has this shape (use the repo's actual exact version):
+
+```json
+{
+  "command": ["ruff", "check", "{file}"],
+  "version": {"command": ["ruff", "--version"], "expected": "ruff <exact-version>"},
+  "config": ["pyproject.toml", "uv.lock"],
+  "sources": ["src/", "tests/"],
+  "controls": {
+    "positive": ".agents/tooling-controls/valid.py",
+    "negative": ".agents/tooling-controls/undefined-name.py",
+    "exit": 1,
+    "diagnostic": "F821"
+  }
+}
+```
+
+Commands are argument arrays, not shell expressions. `{file}` is one complete
+argument. Controls must be distinct tracked files and exercise the same configured
+tool: valid input exits zero; invalid input emits the expected diagnostic and exact
+nonzero exit. A no-op command, unavailable tool, crash, timeout or unrelated config
+error fails proof. Keep negative controls under `.agents/tooling-controls/` and
+exclude them from normal product checks; choose commands that explicitly check
+them (for example an intentional ignore override) and cannot silently skip them.
+Source scope uses tracked files or directory prefixes ending in `/`, not globs;
+it must cover detected files for that profile. Formatting is declared separately.
+
+List custom configs, wrappers and other behavior inputs in `config`. Standard
+lockfiles/config files, tracked command arguments, controls and observed exact
+tool versions, executable bits and verifier/helper code are also fingerprinted.
+This is a bounded input model: unlisted
+transitive/global configuration is not proven; use `--refresh-tooling` after
+environment changes, and keep tools/dependencies pinned in the repo.
+
+```bash
+# Inventory runs declared version commands; review untrusted commands first:
+node <gibson>/scripts/gibson-verify.mjs doctor --repo <target> --tooling-only
+# After committing the adoption/repair and ignoring .gibson-receipts/:
+node <gibson>/scripts/gibson-verify.mjs prove --repo <target> --base origin/main --adoption
+```
+
+`prove --adoption` requires `mode: "required"`, all applicable profiles, real
+control results and the existing full product gate at the exact adoption head.
+Receipts remain in `.gibson-receipts/<HEAD>.json`; no second test runner is installed.
+Later `check`/`prove` reuses successful tooling controls while their inputs match,
+but runs the product gate for the current head. `gate.sh` checks this evidence too,
+so bypassing doctor does not bypass a required contract. Trusted base-tip
+required mode cannot be removed or downgraded from a branch. A fresh CI runner
+without a receipt runs `prove`, rather than invoking the required-mode gate alone.
+For another default branch, pass `--base origin/<branch>`; the built-in gate
+receives that ref. Direct gate invocations use `--tooling-base origin/<branch>`;
+custom gate wrappers must forward it themselves.
+
+Legacy repositories without tooling, or with `mode: "audit"`, report gaps without
+blocking. Opt-in is a reviewed config change. Bootstrap/repair can create missing
+tooling, but cannot mark it verified until the adoption command passes. This covers
+repos adopted through this procedure and the updated gate; it does not discover
+every newly created GitHub repo, alter branch protection, or retrofit old installed
+workflows. Calibrate the installed workflow to call the updated `prove` path and
+retain all existing required checks. Configuration/scope inventory and tool
+canaries are evidence about wiring; the current-head product gate is separate.
+
 From `ci/` and `templates/target-repo/`:
 
 1. `gibson-gate.yml` — the green gate in CI (generate/typecheck/lint/test/build +
