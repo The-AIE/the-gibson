@@ -18,8 +18,9 @@ nav_order: 6
 Before each local product commit, record the checks selected and why they cover
 the changed behavior and its dependents. Documentation uses relevant link/contract
 checks; workflows use actionlint and workflow contracts; product code uses its
-lint/typecheck and affected behavior tests. Shared modules, dependency/configuration
-changes and uncertain impact require broader checks, up to the full suite.
+lint/typecheck and affected behavior tests. Shared modules and dependency/configuration
+changes require checks covering their dependents. If the impact is uncertain, run
+the full generate → typecheck → lint → test → build sequence before committing.
 
 Before pushing and at the PR head, run the full gate in the worktree:
 

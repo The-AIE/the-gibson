@@ -54,6 +54,12 @@ function gv(repo, sub, ...args) {
 function receipt(repo) { return JSON.parse(readFileSync(join(repo, '.gibson-receipts', git(repo, 'rev-parse', 'HEAD') + '.json'))); }
 function test(name, fn) { fn(); passed++; console.log(`  ok — ${name}`); }
 try {
+  test('ordinary doctor rejects proof-only flags instead of silently ignoring them', () => {
+    const { repo } = fixture('ordinary-doctor-proof');
+    const result = gv(repo, 'doctor', '--gate', 'gate', '--require-proof');
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /--require-proof requires --tooling-only/);
+  });
   test('legacy audit permits missing profiles, adoption rejects them without running product gate', () => {
     const { repo, config } = fixture('legacy'); delete config.tooling; save(repo, config); commit(repo);
     assert.equal(gv(repo, 'doctor', '--tooling-only').code, 0);
@@ -182,6 +188,65 @@ try {
       const proof = gv(repo, 'prove', '--gate', 'gate', '--refresh-tooling');
       assert.equal(proof.code, 1); assert.equal(proof.json.steps.find(s => s.name === 'tooling-baseline-stable').ok, false);
       assert.equal(receipt(repo).tooling.verified, false);
+    }
+  });
+  test('tooling cannot repair, stage or commit product files and verify the captured head', () => {
+    for (const phase of ['version', 'control', 'index', 'commit', 'empty-commit']) {
+      const { repo, config } = fixture(`product-${phase}`);
+      put(repo, 'src/app.js', phase === 'empty-commit' ? 'const value = 1;\n' : 'const = ;\n');
+      let mutation = phase === 'empty-commit' ? '' : 'printf "const value = 2;\\n" > src/app.js\n';
+      if (phase === 'index') mutation += 'git add src/app.js\nprintf "const = ;\\n" > src/app.js\n';
+      if (phase === 'commit' || phase === 'empty-commit') mutation += 'git -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name="Tooling fixture" -c user.email=tooling@localhost commit --allow-empty -qam repair >/dev/null\n';
+      put(repo, 'mutator', '#!/bin/sh\nif [ ! -f .gibson-receipts/repaired ]; then\n' + mutation + 'touch .gibson-receipts/repaired\nfi\nif [ "$1" = --version ]; then printf "fixture v1\\n"; else exec "' + process.execPath + '" --check "$1"; fi\n');
+      chmodSync(join(repo, 'mutator'), 0o755);
+      if (phase === 'control') config.tooling.profiles.javascript.command = ['./mutator', '{file}'];
+      else config.tooling.profiles.javascript.version = { command: ['./mutator', '--version'], expected: 'fixture v1' };
+      if (phase !== 'index') put(repo, 'gate', '#!/bin/sh\n"' + process.execPath + '" --check src/app.js\n');
+      save(repo, config); commit(repo);
+      const originalHead = git(repo, 'rev-parse', 'HEAD');
+      const result = gv(repo, 'prove', '--gate', 'gate');
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.equal(result.json.head, originalHead);
+      assert.equal(result.json.steps.find(s => s.name === 'tooling-head-stable').ok, false);
+      assert.equal(result.json.steps.find(s => s.name === 'gate').ok, false);
+      const proof = JSON.parse(readFileSync(join(repo, '.gibson-receipts', `${originalHead}.json`)));
+      assert.equal(proof.verified, false); assert.equal(proof.tooling.verified, false);
+      if (phase === 'commit' || phase === 'empty-commit') assert.notEqual(git(repo, 'rev-parse', 'HEAD'), originalHead);
+      if (phase === 'index') assert.equal(git(repo, 'diff', originalHead, '--', 'src/app.js'), '');
+    }
+  });
+  test('whitespace-only tracked paths cannot hide worktree or index mutations', () => {
+    for (const phase of ['worktree', 'index']) {
+      const { repo, config } = fixture(`whitespace-${phase}`);
+      put(repo, ' ', 'broken\n');
+      const extra = phase === 'index' ? 'git add -- " "\nprintf "broken\\n" > " "\n' : '';
+      put(repo, 'mutator', '#!/bin/sh\nprintf "fixed\\n" > " "\n' + extra + 'printf "fixture v1\\n"\n');
+      chmodSync(join(repo, 'mutator'), 0o755);
+      config.tooling.profiles.javascript.version = { command: ['./mutator'], expected: 'fixture v1' };
+      if (phase === 'worktree') put(repo, 'gate', '#!/bin/sh\ntest "$(cat " ")" = fixed\n');
+      save(repo, config); commit(repo);
+      const result = gv(repo, 'prove', '--gate', 'gate');
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.equal(result.json.steps.find(s => s.name === 'tooling-head-stable').ok, false);
+      assert.equal(receipt(repo).verified, false); assert.equal(receipt(repo).tooling.verified, false);
+    }
+  });
+  test('gate and final version observation cannot change product files after the initial checks', () => {
+    for (const phase of ['gate', 'final-version']) {
+      const { repo, config } = fixture(`late-product-${phase}`);
+      if (phase === 'gate') put(repo, 'gate', '#!/bin/sh\nprintf "const value = 2;\\n" > src/app.js\nprintf "product gate ran\\n"\n');
+      else {
+        put(repo, 'mutator', '#!/bin/sh\ncount=$(cat .gibson-receipts/version-count 2>/dev/null || printf 0)\ncount=$((count + 1))\nprintf "%s\\n" "$count" > .gibson-receipts/version-count\nif [ "$count" -eq 3 ]; then printf "const value = 2;\\n" > src/app.js; fi\nprintf "fixture v1\\n"\n');
+        chmodSync(join(repo, 'mutator'), 0o755);
+        config.tooling.profiles.javascript.version = { command: ['./mutator'], expected: 'fixture v1' };
+      }
+      save(repo, config); commit(repo);
+      const result = gv(repo, 'prove', '--gate', 'gate');
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.equal(result.json.steps.find(s => s.name === 'tooling-head-stable').ok, true);
+      assert.equal(result.json.steps.find(s => s.name === 'gate').ok, true);
+      assert.equal(result.json.steps.find(s => s.name === 'gate-head-stable').ok, false);
+      assert.equal(receipt(repo).verified, false); assert.equal(receipt(repo).tooling.verified, false);
     }
   });
   console.log(`tooling-readiness.test.sh: ${passed} passed, 0 failed`);

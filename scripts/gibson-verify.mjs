@@ -60,6 +60,7 @@ USAGE
 
   Defaults: --repo cwd, --base origin/main, --gate <gibson>/scripts/gate.sh
   (in the Gibson repo itself: --gate scripts/tests/run-all.sh).
+  doctor --require-proof requires --tooling-only.
 
 EXIT
   0 ok/verified/parseable  1 failed/claim-only/unparseable  2 usage`);
@@ -92,6 +93,7 @@ function isExecutable(p) {
 
 // ---------------------------------------------------------------- doctor
 function doctor(o) {
+  if (o.requireProof && !o.toolingOnly) dieUsage(`${PREFIX}--require-proof requires --tooling-only`);
   if (o.toolingOnly) {
     const repo = resolve(o.repo || ".");
     const tooling = inspectTooling({ repo, base: o.base, adoption: o.adoption, run, git });
@@ -133,6 +135,15 @@ function doctor(o) {
 
 // ---------------------------------------------------------------- check / prove
 const REQUIRED_STEPS = ["clean-tree", "non-empty-diff", "gate", "truthful-status"];
+
+function headStateStable(repo, head) {
+  // Bind both worktree and index to the captured commit. A command that commits
+  // its repair must not turn a clean new HEAD into proof for the old one.
+  const paths = ["--", ".", `:(exclude)${RECEIPT_DIR}`];
+  const unchanged = (args) => run("git", ["-C", repo, "diff", "--no-ext-diff", "--quiet", ...args, head, ...paths]).code === 0;
+  return git(repo, ["rev-parse", "HEAD"]) === head
+    && unchanged([]) && unchanged(["--cached"]);
+}
 
 function baselineSnapshot(repo, args = []) {
   let path = join(repo, ".gibson-baseline.json");
@@ -189,6 +200,9 @@ function checkWithTooling(o) {
     // second time. This interim receipt expressly does not claim a green gate.
     writeFileSync(join(dir, `${head}.json`), `${JSON.stringify({ schema: SCHEMA, head, verified: false, tooling })}\n`);
   }
+  const toolingHeadStable = headStateStable(repo, head);
+  if (!toolingHeadStable) tooling.verified = false;
+  step("tooling-head-stable", toolingHeadStable, "HEAD, tracked worktree and index match the captured commit after tooling commands");
   const toolingBaselineStable = baselineSnapshot(repo, o.gateArgs || []) === baseline;
   if (!toolingBaselineStable) tooling.verified = false;
   step("tooling-baseline-stable", toolingBaselineStable, "baseline authority checked around tooling commands");
@@ -215,6 +229,9 @@ function checkWithTooling(o) {
       }
     }
   }
+  const gateHeadStable = headStateStable(repo, head);
+  if (!gateHeadStable) tooling.verified = false;
+  step("gate-head-stable", gateHeadStable, "HEAD, tracked worktree and index match the captured commit through final tooling observation");
   const gateBaselineStable = baselineSnapshot(repo, o.gateArgs || []) === baseline;
   if (!gateBaselineStable) tooling.verified = false;
   step("gate-baseline-stable", gateBaselineStable, "baseline authority checked through final tooling observation");
