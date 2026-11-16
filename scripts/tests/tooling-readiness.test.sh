@@ -231,6 +231,56 @@ try {
       assert.equal(receipt(repo).verified, false); assert.equal(receipt(repo).tooling.verified, false);
     }
   });
+  test('untracked source and whitespace paths created by tooling cannot repair the captured commit', () => {
+    for (const phase of ['version', 'control', 'whitespace']) {
+      const { repo, config } = fixture(`untracked-${phase}`);
+      const path = phase === 'whitespace' ? ' ' : 'src/generated.js';
+      if (phase !== 'whitespace') put(repo, 'src/app.js', "if (require('./generated.js') !== 42) process.exit(1);\n");
+      put(repo, 'generator', '#!/bin/sh\nprintf "module.exports = 42;\\n" > "' + path + '"\nif [ "$1" = --version ]; then printf "fixture v1\\n"; else exec "' + process.execPath + '" --check "$1"; fi\n');
+      chmodSync(join(repo, 'generator'), 0o755);
+      if (phase === 'control') config.tooling.profiles.javascript.command = ['./generator', '{file}'];
+      else config.tooling.profiles.javascript.version = { command: ['./generator', '--version'], expected: 'fixture v1' };
+      put(repo, 'gate', phase === 'whitespace' ? '#!/bin/sh\ntest -f " "\n' : '#!/bin/sh\n"' + process.execPath + '" src/app.js\n');
+      save(repo, config); commit(repo);
+      assert.notEqual(run('./gate', [], repo).code, 0);
+      const result = gv(repo, 'prove', '--gate', 'gate');
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.equal(existsSync(join(repo, path)), true);
+      assert.equal(result.json.steps.find(s => s.name === 'tooling-head-stable').ok, false);
+      assert.equal(result.json.steps.find(s => s.name === 'gate').ok, false);
+      assert.equal(receipt(repo).verified, false); assert.equal(receipt(repo).tooling.verified, false);
+    }
+  });
+  test('ignored build and dependency outputs and unignored receipt outputs remain allowed', () => {
+    const { repo, config } = fixture('allowed-outputs');
+    put(repo, '.gitignore', '.gibson-baseline.json\nbuild/\nnode_modules/\n');
+    put(repo, 'generator', '#!/bin/sh\nmkdir -p .gibson-receipts build node_modules/fixture\nprintf "{}\\n" > .gibson-receipts/tool-output.json\nprintf "generated\\n" > build/output.js\nprintf "dependency\\n" > node_modules/fixture/index.js\nprintf "fixture v1\\n"\n');
+    chmodSync(join(repo, 'generator'), 0o755);
+    config.tooling.profiles.javascript.version = { command: ['./generator'], expected: 'fixture v1' };
+    save(repo, config); commit(repo);
+    const result = gv(repo, 'prove', '--gate', 'gate');
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    assert.equal(receipt(repo).verified, true);
+    assert.ok(run('git', ['ls-files', '--others', '--exclude-standard', '-z'], repo).stdout.includes('.gibson-receipts/tool-output.json\0'));
+    for (const path of ['build/output.js', 'node_modules/fixture/index.js']) {
+      assert.equal(existsSync(join(repo, path)), true);
+      assert.equal(run('git', ['check-ignore', '-q', path], repo).code, 0);
+    }
+  });
+  test('untracked inventory errors cannot count as an empty inventory', () => {
+    const { repo } = fixture('inventory-error');
+    const bin = join(root, 'inventory-error-bin'); mkdirSync(bin);
+    put(bin, 'git', '#!/bin/sh\nif [ "$3" = ls-files ] && [ "$4" = --others ]; then exit 23; fi\nexec "$TOOLING_FIXTURE_REAL_GIT" "$@"\n');
+    chmodSync(join(bin, 'git'), 0o755);
+    const realGit = run('/bin/sh', ['-c', 'command -v git'], repo).stdout.trim();
+    const result = spawnSync(process.execPath, [verify, 'prove', '--repo', repo, '--gate', 'gate'], {
+      cwd: repo, encoding: 'utf8', timeout: 20000,
+      env: { ...process.env, PATH: bin + ':' + process.env.PATH, TOOLING_FIXTURE_REAL_GIT: realGit },
+    });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.equal(JSON.parse(result.stdout).steps.find(s => s.name === 'tooling-head-stable').ok, false);
+    assert.equal(receipt(repo).verified, false); assert.equal(receipt(repo).tooling.verified, false);
+  });
   test('gate and final version observation cannot change product files after the initial checks', () => {
     for (const phase of ['gate', 'final-version']) {
       const { repo, config } = fixture(`late-product-${phase}`);
