@@ -1,0 +1,9 @@
+diff --git a/tests/ok.test.js b/tests/ok.test.js
+--- a/tests/ok.test.js
++++ b/tests/ok.test.js
+@@ -0,0 +1,5 @@
++test.todo("spec line stays a todo");
++it("adds two numbers", () => { expect(1 + 1).toBe(2); });
++// retry logic lives in the client, this test only reads the result
++const msg = "sleeping is not the same as a sleep call";
++echo "$(touch PWNED)"

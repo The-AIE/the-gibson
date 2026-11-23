@@ -95,7 +95,11 @@ failing assertion to go green is a contract violation.
 
 ### 4. Flakes
 
-Quarantine within 24h, file as harness lesson (doc 09). Do not ignore.
+Find the root cause. Never skip a flaky test, add a sleep, or retry until it passes.
+If the cause stays unknown, quarantine within 24h with an issue link, or delete the test
+with a visible `Test-integrity: removed <n> for <reason>` line (Law 4), and file a
+harness lesson (doc 09). Do not ignore. `scripts/flaky-guard.mjs` reports added sleeps,
+skip markers and retry devices in a diff; findings are advisory today.
 
 ### 5. Gate out
 
