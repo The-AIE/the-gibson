@@ -93,6 +93,17 @@ node -e '
 out=$(GITHUB_ACTIONS=true node "$SENSOR" --diff "$MIXED" 2>&1)
 [[ "$out" == *"::warning file=web/app.test.ts,line=5,title=flaky-guard skip::"* ]] && ok "Actions run emits a ::warning:: annotation" || bad "no annotation: $out"
 
+# --- edge cases (independent review: GLM 5.3)
+EDGE="$FX/edge.diff"
+node -e '
+  const j = JSON.parse(process.argv[1]);
+  const got = j.findings.map((f) => `${f.path}:${f.line}:${f.id}`).sort();
+  const want = ["tests/e.test.js:2:sleep", "tests/e.test.js:3:sleep", "tests/a:b,c.test.js:1:sleep"].sort();
+  if (JSON.stringify(got) !== JSON.stringify(want)) { console.error("got", got); process.exit(1); }
+' "$(run --diff "$EDGE" --format json 2>&1)" && ok "an added line starting '++ ' is content, not a file header; arrow setTimeout is caught" || bad "edge findings differ"
+out=$(GITHUB_ACTIONS=true node "$SENSOR" --diff "$EDGE" 2>&1)
+[[ "$out" == *"::warning file=tests/a%3Ab%2Cc.test.js,line=1,"* ]] && ok "annotation properties are escaped (no workflow-command injection)" || bad "annotation not escaped: $out"
+
 # --- mutation: knock out the skip patterns; the exact-finding check must go red
 sed 's/(it|test|describe|context|suite)/(NEVER)/' "$SENSOR" >"$TMP/mutant.mjs"
 mj=$(env -u GITHUB_ACTIONS node "$TMP/mutant.mjs" --diff "$MIXED" --format json 2>&1)

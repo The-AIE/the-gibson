@@ -51,7 +51,7 @@ export const PATTERNS = [
   { id: "sleep", re: /(^|[\s;&|(`])sleep\s+(\d|\$)/, why: "fixed shell sleep in a test" },
   { id: "sleep", re: /\btime\.[Ss]leep\(/, why: "fixed sleep in a test" },
   { id: "sleep", re: /\bThread\.sleep\(/, why: "fixed sleep in a test" },
-  { id: "sleep", re: /\bsetTimeout\(\s*[A-Za-z_$][\w$]*\s*,\s*\d+/, why: "timer used as a sleep in a test" },
+  { id: "sleep", re: /\bsetTimeout\(.*,\s*\d+/, why: "timer used as a sleep in a test" },
   { id: "sleep", re: /\bawait\s+(sleep|delay|wait)\(\s*\d+/, why: "fixed wait in a test" },
   { id: "sleep", re: /\b(waitForTimeout|cy\.wait)\(\s*\d+/, why: "fixed wait in a test" },
   { id: "skip", re: /\b(it|test|describe|context|suite)\.(skip|fixme)\b/, why: "skip marker added to a test" },
@@ -91,21 +91,32 @@ export function addedLines(diffText) {
   const out = [];
   let path = null;
   let next = 0;
+  let oldLeft = 0; // lines still owed by the current hunk; while > 0 a leading
+  let newLeft = 0; // "+++ " or "--- " is content, not a file header
   for (const raw of diffText.split("\n")) {
-    if (raw.startsWith("+++ ")) {
+    const inHunk = oldLeft > 0 || newLeft > 0;
+    if (!inHunk && raw.startsWith("+++ ")) {
       const p = raw.slice(4).split("\t")[0].replace(/^"|"$/g, "");
       path = p === "/dev/null" ? null : p.replace(/^b\//, "");
       continue;
     }
-    if (raw.startsWith("--- ") || raw.startsWith("diff --git")) continue;
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
-    if (hunk) {
-      next = Number(hunk[1]);
+    if (!inHunk && (raw.startsWith("--- ") || raw.startsWith("diff --git"))) continue;
+    const hunk = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(raw);
+    if (!inHunk && hunk) {
+      oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
+      next = Number(hunk[2]);
+      newLeft = hunk[3] === undefined ? 1 : Number(hunk[3]);
       continue;
     }
-    if (path === null) continue;
     if (raw.startsWith("+")) {
-      out.push({ path, line: next, text: raw.slice(1) });
+      if (newLeft > 0) newLeft -= 1;
+      if (path !== null) out.push({ path, line: next, text: raw.slice(1) });
+      next += 1;
+    } else if (raw.startsWith("-")) {
+      if (oldLeft > 0) oldLeft -= 1;
+    } else if (raw.startsWith(" ")) {
+      if (oldLeft > 0) oldLeft -= 1;
+      if (newLeft > 0) newLeft -= 1;
       next += 1;
     }
   }
@@ -152,6 +163,10 @@ export function scan(diffText) {
   return { findings, waived, files: files.size };
 }
 
+// Workflow-command escaping (GitHub Actions): paths come from untrusted diff text.
+const escData = (v) => String(v).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+const escProp = (v) => escData(v).replace(/:/g, "%3A").replace(/,/g, "%2C");
+
 function dieUsage(msg) {
   console.error(`flaky-guard: ${msg}`);
   process.exit(2);
@@ -188,7 +203,7 @@ function readDiff(o) {
     }
   }
   try {
-    return execFileSync("git", ["diff", "-U0", "--no-color", "--no-renames", `${o.base}...${o.head}`, "--"], {
+    return execFileSync("git", ["-c", "core.quotePath=false", "diff", "-U0", "--no-color", "--no-renames", `${o.base}...${o.head}`, "--"], {
       encoding: "utf8",
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: GIT_MAX_BUFFER,
@@ -215,7 +230,7 @@ function main(argv) {
   }
   if (process.env.GITHUB_ACTIONS === "true") {
     for (const f of findings.slice(0, MAX_ANNOTATIONS)) {
-      console.log(`::warning file=${f.path},line=${f.line},title=flaky-guard ${f.id}::${f.why}`);
+      console.log(`::warning file=${escProp(f.path)},line=${f.line},title=${escProp(`flaky-guard ${f.id}`)}::${escData(f.why)}`);
     }
   }
   process.exit(o.strict && findings.length ? 1 : 0);

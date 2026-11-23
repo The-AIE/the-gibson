@@ -1,0 +1,12 @@
+diff --git a/tests/e.test.js b/tests/e.test.js
+--- a/tests/e.test.js
++++ b/tests/e.test.js
+@@ -0,0 +1,3 @@
+++ set -x
++await sleep(500);
++setTimeout(() => done(), 1000);
+diff --git a/tests/a:b,c.test.js b/tests/a:b,c.test.js
+--- a/tests/a:b,c.test.js
++++ b/tests/a:b,c.test.js
+@@ -0,0 +1 @@
++await sleep(9);
