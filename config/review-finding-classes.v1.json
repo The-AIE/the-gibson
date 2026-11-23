@@ -5,6 +5,7 @@
   "kinds": {
     "blocker": { "blocking": true, "description": "Must be fixed before merge. Requires a `trigger:` line naming a concrete input, state or call sequence reachable in the diff and the wrong outcome it produces." },
     "note": { "blocking": false, "description": "Observation without a reachable trigger. Never blocks." },
+    "pre-existing": { "blocking": false, "description": "A real defect that predates the diff and is not made worse by it. Filed so it is tracked, never charged to the author and never a blocker; name the file and line where it already lives." },
     "rule-candidate": { "blocking": false, "description": "A pattern no configured deterministic tool covers. Filed so a rule can be proposed; never a blocker." }
   },
   "defaultKind": "blocker",
