@@ -1,0 +1,62 @@
+diff --git a/scripts/tests/a.test.sh b/scripts/tests/a.test.sh
+--- a/scripts/tests/a.test.sh
++++ b/scripts/tests/a.test.sh
+@@ -9,0 +10 @@ ok
++  sleep 2
+diff --git a/web/app.test.ts b/web/app.test.ts
+--- a/web/app.test.ts
++++ b/web/app.test.ts
+@@ -4,0 +5,2 @@ describe
++it.skip("renders the cart", () => {});
++await new Promise((r) => setTimeout(r, 500));
+diff --git a/playwright.config.ts b/playwright.config.ts
+--- a/playwright.config.ts
++++ b/playwright.config.ts
+@@ -2,0 +3 @@
++  retries: 2,
+diff --git a/tests/test_x.py b/tests/test_x.py
+--- a/tests/test_x.py
++++ b/tests/test_x.py
+@@ -0,0 +1,4 @@
++@pytest.mark.skip(reason="later")
++def test_x():
++    assert True
++    time.sleep(1)
+diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -0,0 +1 @@
++await sleep(100);
+diff --git a/tests/NOTES.md b/tests/NOTES.md
+--- a/tests/NOTES.md
++++ b/tests/NOTES.md
+@@ -0,0 +1 @@
++sleep 5 is what we used to do
+diff --git a/scripts/tests/fixtures/x/foo.test.sh b/scripts/tests/fixtures/x/foo.test.sh
+--- a/scripts/tests/fixtures/x/foo.test.sh
++++ b/scripts/tests/fixtures/x/foo.test.sh
+@@ -0,0 +1 @@
++sleep 3
+diff --git a/tests/w.test.js b/tests/w.test.js
+--- a/tests/w.test.js
++++ b/tests/w.test.js
+@@ -0,0 +1,3 @@
++// flaky-guard: allow waits for the 2s upstream debounce
++await sleep(2500);
++await sleep(100);
+diff --git a/tests/n.test.js b/tests/n.test.js
+--- a/tests/n.test.js
++++ b/tests/n.test.js
+@@ -0,0 +1 @@
++await sleep(10); // flaky-guard: allow ok
+diff --git a/tests/old.test.sh b/tests/old.test.sh
+--- a/tests/old.test.sh
++++ b/tests/old.test.sh
+@@ -3 +2,0 @@
+-  sleep 9
+diff --git a/tests/gone.test.sh b/tests/gone.test.sh
+deleted file mode 100644
+--- a/tests/gone.test.sh
++++ /dev/null
+@@ -1 +0,0 @@
+-sleep 4
