@@ -31,7 +31,12 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 # Fake gh: `repo view` names a repo, `pr view` replays $GH_FIXTURE.
 case "$1 $2" in
   "repo view") echo "acme/app" ;;
-  "pr view") cat "$GH_FIXTURE" ;;
+  "pr view")
+    if [[ "${GH_PR_VIEW_EXIT:-0}" != "0" ]]; then
+      exit "$GH_PR_VIEW_EXIT"
+    fi
+    cat "$GH_FIXTURE"
+    ;;
   *) exit 1 ;;
 esac
 FAKE
@@ -825,13 +830,34 @@ contains "says fail closed / re-review" "$out" "stale head"
 contains "names current head prefix" "$out" "bbbbbbb"
 
 echo "L-033 · infra red is not product red"
+# AC3: STARTUP_FAILURE alone stays the admin path. Later unedited assertions
+# (--json verdict, --launched) read this same f_infra, so it must stay a pure
+# infra red. The old security FAILURE + steps:[] entry that shared this
+# fixture is tightened below (exit 1), not deleted.
 f_infra=$(fixture infra '.statusCheckRollup = [
-  {"__typename": "CheckRun", "name": "gate", "conclusion": "STARTUP_FAILURE", "steps": []},
-  {"__typename": "CheckRun", "name": "security", "conclusion": "FAILURE", "steps": []}]')
+  {"__typename": "CheckRun", "name": "gate", "conclusion": "STARTUP_FAILURE", "steps": []}]')
 out=$(run "$f_infra"); rc=$?
 check "exit 4 (ADMIN-CANDIDATE)" "$rc" "4"
 contains "names the infra signature" "$out" "startup_failure / no steps / no runner"
 contains "forbids claiming green" "$out" "Never report it as remote green"
+
+# AC8: security FAILURE with steps:[] used to expect exit 4. Tightened to
+# exit 1. The check is kept; only the expected code changed.
+f_security_empty=$(fixture security_empty_steps '.statusCheckRollup = [
+  {"__typename": "CheckRun", "name": "security", "conclusion": "FAILURE", "steps": []}]')
+out=$(run "$f_security_empty"); rc=$?
+check "security FAILURE steps:[] is BLOCKED" "$rc" "1"
+contains "names security as product red" "$out" "security"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "security FAILURE steps:[] must not be ADMIN-CANDIDATE"
+else
+  ok "security FAILURE steps:[] is not ADMIN-CANDIDATE"
+fi
+if echo "$out" | grep -F "startup_failure / no steps / no runner" >/dev/null; then
+  bad "security FAILURE steps:[] must not use the infra signature"
+else
+  ok "security FAILURE steps:[] is not the infra signature"
+fi
 
 f_product=$(fixture product '.statusCheckRollup = [
   {"__typename": "CheckRun", "name": "gate", "conclusion": "FAILURE", "steps": [{"name": "test"}]}]')
@@ -888,6 +914,288 @@ out=$(GH_FIXTURE="$f_infra" "$PREFLIGHT" 1 --repo acme/app --json 2>&1)
 check "verdict field" "$(echo "$out" | jq -r .verdict)" "ADMIN-CANDIDATE"
 check "blockers empty" "$(echo "$out" | jq -r '.blockers | length')" "0"
 check "admin_reasons populated" "$(echo "$out" | jq -r '.admin_reasons | length')" "1"
+
+# pins L-122
+echo "L-122 · StatusContext failures are never infrastructure"
+# AC1/AC2: green baseline (APPROVED, current head) plus one failing status.
+# Live shape uses lowercase state=failure. Description is the policy text.
+f_rev=$(fixture review_evidence_identity '.statusCheckRollup += [{
+  "__typename": "StatusContext",
+  "context": "review-evidence",
+  "state": "failure",
+  "description": "identity-unresolved: mrhinkle:owner-unattested"
+}]')
+out=$(run "$f_rev"); rc=$?
+check "review-evidence StatusContext exits 1" "$rc" "1"
+contains "names review-evidence" "$out" "review-evidence"
+contains "verdict BLOCKED" "$out" "BLOCKED"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "review-evidence must not be ADMIN-CANDIDATE"
+else
+  ok "review-evidence is not ADMIN-CANDIDATE"
+fi
+if echo "$out" | grep -F "startup_failure / no steps / no runner" >/dev/null; then
+  bad "review-evidence must not use the infra signature"
+else
+  ok "review-evidence does not use the infra signature"
+fi
+if echo "$out" | grep -F "READY" >/dev/null; then
+  bad "review-evidence must not be READY"
+else
+  ok "review-evidence is not READY"
+fi
+out=$(GH_FIXTURE="$f_rev" "$PREFLIGHT" 1 --repo acme/app --json 2>&1); rc=$?
+check "review-evidence json exit 1" "$rc" "1"
+check "review-evidence json verdict" "$(echo "$out" | jq -r .verdict)" "BLOCKED"
+check "review-evidence json admin_reasons empty" "$(echo "$out" | jq -r '.admin_reasons | length')" "0"
+
+# AC1 second fixture: not a special case of the string review-evidence.
+f_custom=$(fixture ci_custom '.statusCheckRollup += [{
+  "__typename": "StatusContext",
+  "context": "ci/custom",
+  "state": "ERROR"
+}]')
+out=$(run "$f_custom"); rc=$?
+check "ci/custom StatusContext exits 1" "$rc" "1"
+contains "names ci/custom" "$out" "ci/custom"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "ci/custom must not be ADMIN-CANDIDATE"
+else
+  ok "ci/custom is not ADMIN-CANDIDATE"
+fi
+if echo "$out" | grep -F "startup_failure / no steps / no runner" >/dev/null; then
+  bad "ci/custom must not use the infra signature"
+else
+  ok "ci/custom does not use the infra signature"
+fi
+
+# Status identified by state + context, even without __typename.
+f_notypename=$(fixture status_no_typename '.statusCheckRollup += [{
+  "context": "review-evidence",
+  "state": "FAILURE",
+  "description": "identity-unresolved: mrhinkle:owner-unattested"
+}]')
+out=$(run "$f_notypename"); rc=$?
+check "StatusContext without typename exits 1" "$rc" "1"
+contains "names review-evidence without typename" "$out" "review-evidence"
+if echo "$out" | grep -F "unrecognized required-check shape" >/dev/null; then
+  bad "state+context without typename is a StatusContext, not an unknown shape"
+else
+  ok "state+context without typename is a StatusContext"
+fi
+
+# Refinement 3: steps absent, empty, or present never make a status infra.
+for shape in absent empty present; do
+  f_shape=$(fixture "status_steps_${shape}" \
+    --arg shape "$shape" \
+    '.statusCheckRollup += [({__typename:"StatusContext", context:"review-evidence", state:"FAILURE"}
+      | if $shape == "empty" then .steps = []
+        elif $shape == "present" then .steps = [{name:"ignored"}]
+        else . end)]')
+  out=$(run "$f_shape"); rc=$?
+  check "StatusContext steps:${shape} exits 1" "$rc" "1"
+  if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+    bad "StatusContext steps:${shape} must not be ADMIN-CANDIDATE"
+  else
+    ok "StatusContext steps:${shape} is not ADMIN-CANDIDATE"
+  fi
+done
+
+# A successful status beside the green baseline stays READY.
+f_status_ok=$(fixture status_success '.statusCheckRollup += [{
+  "__typename": "StatusContext",
+  "context": "review-evidence",
+  "state": "SUCCESS"
+}]')
+out=$(run "$f_status_ok"); rc=$?
+check "successful StatusContext stays READY" "$rc" "0"
+
+f_status_pending=$(fixture status_pending '.statusCheckRollup = [{
+  "__typename": "StatusContext",
+  "context": "review-evidence",
+  "state": "PENDING"
+}]')
+out=$(run "$f_status_pending"); rc=$?
+check "pending StatusContext blocks" "$rc" "1"
+contains "pending status still running" "$out" "still running"
+
+echo "L-122 · STARTUP_FAILURE ignores the steps field"
+f_startup_absent=$(fixture startup_steps_absent '.statusCheckRollup = [{
+  "__typename": "CheckRun", "name": "gate", "conclusion": "STARTUP_FAILURE"
+}]')
+out=$(run "$f_startup_absent"); rc=$?
+check "STARTUP_FAILURE with steps absent exits 4" "$rc" "4"
+contains "absent-steps startup names the infra signature" "$out" "startup_failure / no steps / no runner"
+
+f_startup_present=$(fixture startup_steps_present '.statusCheckRollup = [{
+  "__typename": "CheckRun", "name": "gate", "conclusion": "STARTUP_FAILURE",
+  "steps": [{"name": "boot"}]
+}]')
+out=$(run "$f_startup_present"); rc=$?
+check "STARTUP_FAILURE with steps present exits 4" "$rc" "4"
+
+f_startup_lower=$(fixture startup_lower '.statusCheckRollup = [{
+  "__typename": "CheckRun", "name": "gate", "conclusion": "startup_failure"
+}]')
+out=$(run "$f_startup_lower"); rc=$?
+check "lowercase startup_failure exits 4" "$rc" "4"
+
+echo "L-122 · failed CheckRun is product red for every steps shape"
+for conclusion in FAILURE ERROR TIMED_OUT CANCELLED; do
+  for shape in absent empty present; do
+    f_ac4=$(fixture "ac4_${conclusion}_${shape}" \
+      --arg conclusion "$conclusion" \
+      --arg shape "$shape" \
+      '.statusCheckRollup = [({__typename:"CheckRun", name:"gate", conclusion:$conclusion}
+        | if $shape == "empty" then .steps = []
+          elif $shape == "present" then .steps = [{name:"ran"}]
+          else . end)]')
+    out=$(run "$f_ac4"); rc=$?
+    check "CheckRun ${conclusion} steps:${shape} exits 1" "$rc" "1"
+    contains "CheckRun ${conclusion} steps:${shape} names gate" "$out" "gate"
+    contains "CheckRun ${conclusion} steps:${shape} says fix the code" "$out" "fix the code"
+    if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+      bad "CheckRun ${conclusion} steps:${shape} must not be ADMIN-CANDIDATE"
+    else
+      ok "CheckRun ${conclusion} steps:${shape} is not ADMIN-CANDIDATE"
+    fi
+    if echo "$out" | grep -F "startup_failure / no steps / no runner" >/dev/null; then
+      bad "CheckRun ${conclusion} steps:${shape} must not use the infra signature"
+    else
+      ok "CheckRun ${conclusion} steps:${shape} is not the infra signature"
+    fi
+  done
+done
+
+# No typename, conclusion present, steps absent: still a failed CheckRun.
+f_cr_notypename=$(fixture checkrun_no_typename '.statusCheckRollup = [{
+  "name": "gate", "conclusion": "FAILURE"
+}]')
+out=$(run "$f_cr_notypename"); rc=$?
+check "CheckRun without typename and without steps exits 1" "$rc" "1"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "typeless failed CheckRun must not be ADMIN-CANDIDATE"
+else
+  ok "typeless failed CheckRun is not ADMIN-CANDIDATE"
+fi
+
+echo "L-122 · mixed infra and product red never offers an admin path"
+f_mixed=$(fixture mixed_startup_and_security '.statusCheckRollup = [
+  {"__typename": "CheckRun", "name": "gate", "conclusion": "STARTUP_FAILURE", "steps": []},
+  {"__typename": "CheckRun", "name": "security", "conclusion": "FAILURE", "steps": []}
+]')
+out=$(run "$f_mixed"); rc=$?
+check "mixed CheckRun exits 1" "$rc" "1"
+contains "mixed CheckRun names gate" "$out" "gate"
+contains "mixed CheckRun names security" "$out" "security"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "mixed CheckRun must not be ADMIN-CANDIDATE"
+else
+  ok "mixed CheckRun is not ADMIN-CANDIDATE"
+fi
+out=$(GH_FIXTURE="$f_mixed" "$PREFLIGHT" 1 --repo acme/app --json 2>&1); rc=$?
+check "mixed CheckRun json exit 1" "$rc" "1"
+check "mixed CheckRun json verdict" "$(echo "$out" | jq -r .verdict)" "BLOCKED"
+check "mixed CheckRun json admin_reasons empty" "$(echo "$out" | jq -r '.admin_reasons | length')" "0"
+mixed_blob=$(echo "$out" | jq -r '.blockers | join(" ")')
+contains "mixed CheckRun json names gate" "$mixed_blob" "gate"
+contains "mixed CheckRun json names security" "$mixed_blob" "security"
+
+f_mixed_status=$(fixture mixed_startup_and_status '.statusCheckRollup = [
+  {"__typename": "CheckRun", "name": "gate", "conclusion": "STARTUP_FAILURE", "steps": []},
+  {"__typename": "StatusContext", "context": "review-evidence", "state": "FAILURE",
+   "description": "identity-unresolved: mrhinkle:owner-unattested"}
+]')
+out=$(run "$f_mixed_status"); rc=$?
+check "mixed status exits 1" "$rc" "1"
+contains "mixed status names gate" "$out" "gate"
+contains "mixed status names review-evidence" "$out" "review-evidence"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "mixed status must not be ADMIN-CANDIDATE"
+else
+  ok "mixed status is not ADMIN-CANDIDATE"
+fi
+out=$(GH_FIXTURE="$f_mixed_status" "$PREFLIGHT" 1 --repo acme/app --json 2>&1); rc=$?
+check "mixed status json exit 1" "$rc" "1"
+check "mixed status json admin_reasons empty" "$(echo "$out" | jq -r '.admin_reasons | length')" "0"
+
+echo "L-122 · unrecognized required-check shapes fail closed"
+f_mystery=$(fixture mystery_failure '.statusCheckRollup += [{
+  "__typename": "Mystery", "name": "weird-check", "state": "FAILURE"
+}]')
+out=$(run "$f_mystery"); rc=$?
+check "Mystery FAILURE exits 1" "$rc" "1"
+contains "names unrecognized weird-check" "$out" "unrecognized required-check shape: weird-check"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "Mystery FAILURE must not be ADMIN-CANDIDATE"
+else
+  ok "Mystery FAILURE is not ADMIN-CANDIDATE"
+fi
+out=$(GH_FIXTURE="$f_mystery" "$PREFLIGHT" 1 --repo acme/app --json 2>&1); rc=$?
+check "Mystery json exit 1" "$rc" "1"
+check "Mystery json admin_reasons empty" "$(echo "$out" | jq -r '.admin_reasons | length')" "0"
+
+f_mystery_ok=$(fixture mystery_success '.statusCheckRollup += [{
+  "__typename": "Mystery", "name": "weird-ok", "state": "SUCCESS"
+}]')
+out=$(run "$f_mystery_ok"); rc=$?
+check "Mystery SUCCESS still exits 1" "$rc" "1"
+contains "names unrecognized weird-ok" "$out" "unrecognized required-check shape: weird-ok"
+
+f_shapeless=$(fixture shapeless '.statusCheckRollup += [{"name": "shapeless-check"}]')
+out=$(run "$f_shapeless"); rc=$?
+check "entry with neither conclusion nor state exits 1" "$rc" "1"
+contains "names unrecognized shapeless-check" "$out" "unrecognized required-check shape: shapeless-check"
+
+f_null_entry=$(fixture null_entry '.statusCheckRollup += [null]')
+out=$(run "$f_null_entry"); rc=$?
+check "null rollup entry exits 1" "$rc" "1"
+contains "names unrecognized null entry" "$out" "unrecognized required-check shape: check"
+
+echo "L-122 · evidence read fails closed before a verdict"
+# gh non-zero keeps the existing die path.
+out=$(GH_FIXTURE="$f_rev" GH_PR_VIEW_EXIT=1 "$PREFLIGHT" 1 --repo acme/app 2>&1); rc=$?
+check "gh non-zero exits 2" "$rc" "2"
+contains "gh non-zero could not read" "$out" "release-preflight.sh: ERROR: could not read acme/app#1"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then bad "gh non-zero must not classify ADMIN-CANDIDATE"; else ok "gh non-zero does not classify"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "gh non-zero must not classify READY"; else ok "gh non-zero is not READY"; fi
+
+# A payload that is not JSON never reaches section 3. The review-evidence
+# extractor already dies (exit 2) on the jq failure. AC10 forbids moving that
+# check. It must still not classify.
+printf '%s\n' 'not-json' > "$ROOT/not-json.txt"
+out=$(GH_FIXTURE="$ROOT/not-json.txt" "$PREFLIGHT" 1 --repo acme/app 2>&1); rc=$?
+check "non-JSON exits 2" "$rc" "2"
+contains "non-JSON fails closed" "$out" "jq failed extracting malformed review evidence (fail closed)"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then bad "non-JSON must not classify ADMIN-CANDIDATE"; else ok "non-JSON does not classify"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "non-JSON must not classify READY"; else ok "non-JSON is not READY"; fi
+
+# Binding refinement 1: a readable non-array rollup is an evidence-read
+# failure (exit 2), not a verdict. AC6's exit 1 for this one case is tightened.
+f_obj=$(fixture rollup_object '.statusCheckRollup = {"context":"review-evidence","state":"FAILURE"}')
+out=$(run "$f_obj"); rc=$?
+check "object rollup exits 2" "$rc" "2"
+contains "object rollup could not read" "$out" "release-preflight.sh: ERROR: could not read acme/app#1"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then bad "object rollup must not be ADMIN-CANDIDATE"; else ok "object rollup is not a verdict"; fi
+
+f_null_rollup=$(fixture rollup_null '.statusCheckRollup = null')
+out=$(run "$f_null_rollup"); rc=$?
+check "null rollup exits 2" "$rc" "2"
+contains "null rollup could not read" "$out" "could not read acme/app#1"
+
+f_str_rollup=$(fixture rollup_string '.statusCheckRollup = "nope"')
+out=$(run "$f_str_rollup"); rc=$?
+check "string rollup exits 2" "$rc" "2"
+
+# A top-level JSON array is not a pull-request object. The review extractor
+# rejects it (exit 2) before section 3 can phrase `could not read`. Same
+# AC10 limit as non-JSON. A JSON object with a non-array rollup is the
+# section-3 case and uses `could not read` (covered above).
+printf '%s\n' '[]' > "$ROOT/json-array.txt"
+out=$(GH_FIXTURE="$ROOT/json-array.txt" "$PREFLIGHT" 1 --repo acme/app 2>&1); rc=$?
+check "top-level JSON array exits 2" "$rc" "2"
+contains "top-level array fails closed" "$out" "jq failed extracting malformed review evidence (fail closed)"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then bad "top-level array must not classify"; else ok "top-level array does not classify"; fi
 
 echo
 echo "release-preflight.test.sh: $PASS passed, $FAIL failed"

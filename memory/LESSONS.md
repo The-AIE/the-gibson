@@ -2220,3 +2220,15 @@ By 2026-10-08 the development loop had the coordinator coordinating, the approve
 **Occurred:** 2026-10-03
 **Ingested:** 2026-10-03
 **Tags:** #merge-gate #intake
+
+## L-122 · 2026-09-06 · statuscontext-missing-steps-called-infra
+**What happened:** `scripts/release-preflight.sh` mapped every required-check rollup entry with no `.steps` array to `steps=0`, then treated that as the L-033 GitHub Actions infrastructure signature and offered Tier A/B `ADMIN-CANDIDATE`. A `StatusContext` never has steps, and `gh pr view --json statusCheckRollup` does not supply `.steps` for `CheckRun` entries either. A live preflight of PR #237 classified required `review-evidence=FAILURE` (an identity-unresolved policy status) as infrastructure. The same rule classified a required `sensors` CheckRun that had run a step and exited 1 (PR #369) as infrastructure. Missing data was treated as proof that nothing ran.
+**Root cause:** The classifier defaulted an absent `.steps` field to an empty list and then treated length zero as the infra signature. The field the script actually reads is not a step list, so the zero-step test was true for every failure that was not already `STARTUP_FAILURE`.
+**Harness fix:** Section 3 now treats a CheckRun as infrastructure only when its conclusion is `STARTUP_FAILURE`. A failing StatusContext (state and context, no conclusion) is always a blocking failure, whatever `.steps` looks like. Any other failed CheckRun conclusion is product red whether `.steps` is missing, empty, or populated. A JSON object whose rollup is not an array exits 2 (`could not read`) and does not classify. A payload that is not a JSON object is already rejected by the review-evidence extractor (exit 2) before section 3; that earlier string is unchanged. An unrecognized shape exits 1 naming `unrecognized required-check shape: <name>`. Mixed infrastructure and product or policy failures name every blocking check and leave `admin_reasons` empty. Limit: this slice does not read run or job evidence, so a non-`STARTUP_FAILURE` conclusion is never reclassified as infrastructure even if a jobs read would show no runner. Pinned by `scripts/tests/release-preflight.test.sh`.
+**Status:** fixed (pinned by scripts/tests/release-preflight.test.sh)
+**Evidence:** https://github.com/The-AIE/the-gibson/issues/365
+**Proof:** 3ecd7448ccee4255740f0909c861e3ef9c616a5b scripts/tests/release-preflight.test.sh scripts/tests
+**Reverted attempt:** unknown
+**Occurred:** 2026-09-06
+**Ingested:** 2026-11-25
+**Tags:** #ci #github-actions #release #fail-closed #preflight
