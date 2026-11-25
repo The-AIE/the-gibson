@@ -270,12 +270,15 @@ else
 fi
 # AC5 (#384): one evaluator reads literal step-level if: strings from a workflow
 # path and simulates checkout, audit, self-gate, and backlog. Omitted step-level
-# if: is implicit success(). An earlier reporter failure does not suppress a later
-# eligible reporter. Any executed step that fails without continue-on-error makes
-# the simulated job failure. Unsupported expressions and duplicate named reporters
-# fail closed. This file does not call git merge-base.
+# if: is implicit success(). An if: with no status-check function also gets that
+# implicit success(); !cancelled() counts as cancelled() and overrides it. An
+# earlier reporter failure does not suppress a later eligible reporter. An
+# executed step that fails without continue-on-error fails the simulated job,
+# unless the run is cancelled, which takes precedence. Unsupported expressions
+# and duplicate named reporters fail closed. This file does not call git merge-base.
 echo "# AC5 reporter eligibility"
 AC5_TEMPS=()
+AC5_LAST_TEMP=""
 ac5_cleanup() {
   rm -f "$PLANT" "$PLANT2" "$PLANT3"
   if [[ ${#AC5_TEMPS[@]} -gt 0 ]]; then
@@ -284,11 +287,13 @@ ac5_cleanup() {
 }
 trap ac5_cleanup EXIT
 
+# Direct call only. $(ac5_new_temp) is a subshell, so AC5_TEMPS+= would be lost
+# and the EXIT trap would leak the mutant copy.
 ac5_new_temp() {
   local f
   f=$(mktemp "${TMPDIR:-/tmp}/sensor-health-wf.XXXXXX")
   AC5_TEMPS+=("$f")
-  printf '%s\n' "$f"
+  AC5_LAST_TEMP=$f
 }
 
 ac5_eval() {
@@ -404,16 +409,21 @@ function parseExpr(raw) {
   if (parts.some((part) => part.length === 0)) return { error: "empty-atom" };
   if (parts.length === 1 && parts[0] === "success()") return { kind: "success" };
   const atoms = [];
+  let hasStatus = false;
   for (const part of parts) {
-    if (part === "!cancelled()") atoms.push({ op: "not-cancelled" });
-    else if (part === "success()") atoms.push({ op: "success" });
-    else {
+    if (part === "!cancelled()") {
+      atoms.push({ op: "not-cancelled" });
+      hasStatus = true;
+    } else if (part === "success()") {
+      atoms.push({ op: "success" });
+      hasStatus = true;
+    } else {
       const outcome = part.match(/^steps\.([A-Za-z_][A-Za-z0-9_-]*)\.outcome == '([^']*)'$/);
       if (!outcome) return { error: `unsupported-atom:${part}` };
       atoms.push({ op: "outcome", id: outcome[1], value: outcome[2] });
     }
   }
-  return { kind: "and", atoms };
+  return { kind: "and", atoms, hasStatus };
 }
 
 for (const step of steps) {
@@ -437,6 +447,8 @@ if (checkout.id !== "checkout") fail(`checkout-id ${checkout.id || "missing"}`);
 function truth(expr, ctx) {
   const succeeded = !ctx.cancelled && !ctx.previousHardFailure;
   if (expr.kind === "implicit-success" || expr.kind === "success") return succeeded;
+  // No status-check function: GitHub applies implicit success() before the atoms.
+  if (!expr.hasStatus && !succeeded) return false;
   for (const atom of expr.atoms) {
     if (atom.op === "not-cancelled" && ctx.cancelled) return false;
     if (atom.op === "success" && !succeeded) return false;
@@ -467,8 +479,9 @@ function simulate(cancelAfter, results) {
     if (trace[role] === "missing") fail(`untraced ${role}`);
   }
   let job = "success";
-  if (ctx.jobFailed) job = "failure";
-  else if (ctx.cancelled) job = "cancelled";
+  // Ordinary cancellation outranks an earlier step failure.
+  if (ctx.cancelled) job = "cancelled";
+  else if (ctx.jobFailed) job = "failure";
   return { trace, job };
 }
 
@@ -568,7 +581,7 @@ AC5_MATRIX=(
   "ac5-matrix self-gate-fails self-gate=run backlog=run job=failure"
   "ac5-matrix checkout-fails self-gate=skip backlog=skip job=failure"
   "ac5-matrix cancelled-after-checkout self-gate=skip backlog=skip job=cancelled"
-  "ac5-matrix cancelled-after-audit-failure self-gate=skip backlog=skip job=failure"
+  "ac5-matrix cancelled-after-audit-failure self-gate=skip backlog=skip job=cancelled"
 )
 for line in "${AC5_MATRIX[@]}"; do
   if ac5_has "$live_out" "$line"; then
@@ -653,7 +666,8 @@ ac5_mutate() {
 ac5_reject_mutant() {
   local name="$1" want="$2"
   local f out rc
-  f=$(ac5_new_temp)
+  ac5_new_temp
+  f=$AC5_LAST_TEMP
   if ! ac5_mutate "$name" "$LIVE_WF" "$f"; then
     bad "mutant $name was not generated from the live workflow"
     return
@@ -710,13 +724,14 @@ ac5_reject_mutant() {
   fi
 }
 
-ac5_reject_mutant 'remove !cancelled()' 'ac5-matrix cancelled-after-checkout self-gate=run backlog=skip job=cancelled'
+ac5_reject_mutant 'remove !cancelled()' 'ac5-matrix audit-fails self-gate=skip backlog=run job=failure'
 ac5_reject_mutant 'remove checkout clause' 'ac5-matrix checkout-fails self-gate=run backlog=skip job=failure'
 ac5_reject_mutant 'success()' 'ac5-matrix audit-fails self-gate=skip backlog=run job=failure'
 ac5_reject_mutant "always() && steps.checkout.outcome == 'success'" 'unsupported'
 ac5_reject_mutant 'audit continue-on-error' 'ac5-matrix audit-fails self-gate=run backlog=run job=success'
 
-dup_wf=$(ac5_new_temp)
+ac5_new_temp
+dup_wf=$AC5_LAST_TEMP
 if ! cat "$LIVE_WF" >"$dup_wf"; then
   bad "could not copy live workflow for duplicate reporter"
 else
@@ -736,7 +751,8 @@ YAML
   fi
 fi
 
-runblock_wf=$(ac5_new_temp)
+ac5_new_temp
+runblock_wf=$AC5_LAST_TEMP
 if ! awk '
   BEGIN { c = 0 }
   {
