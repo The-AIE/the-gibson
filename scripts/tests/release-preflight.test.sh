@@ -1038,7 +1038,18 @@ f_startup_lower=$(fixture startup_lower '.statusCheckRollup = [{
   "__typename": "CheckRun", "name": "gate", "conclusion": "startup_failure"
 }]')
 out=$(run "$f_startup_lower"); rc=$?
-check "lowercase startup_failure exits 4" "$rc" "4"
+check "lowercase startup_failure exits 1" "$rc" "1"
+contains "lowercase startup_failure is an unrecognized conclusion" "$out" "unrecognized required-check state: gate=startup_failure"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "lowercase startup_failure must not be ADMIN-CANDIDATE"
+else
+  ok "lowercase startup_failure is not ADMIN-CANDIDATE"
+fi
+if echo "$out" | grep -F "READY" >/dev/null; then
+  bad "lowercase startup_failure must not be READY"
+else
+  ok "lowercase startup_failure is not READY"
+fi
 
 echo "L-122 · failed CheckRun is product red for every steps shape"
 for conclusion in FAILURE ERROR TIMED_OUT CANCELLED; do
@@ -1196,6 +1207,129 @@ out=$(GH_FIXTURE="$ROOT/json-array.txt" "$PREFLIGHT" 1 --repo acme/app 2>&1); rc
 check "top-level JSON array exits 2" "$rc" "2"
 contains "top-level array fails closed" "$out" "jq failed extracting malformed review evidence (fail closed)"
 if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then bad "top-level array must not classify"; else ok "top-level array does not classify"; fi
+
+echo "L-122 · allow-list: unknown, missing, typeless, and empty rollup fail closed"
+# Codex round at c062262. Each fixture is the case that used to fall through
+# to READY or to ADMIN-CANDIDATE. Exact strings, no case folding.
+f_typeless_startup=$(fixture typeless_startup '.statusCheckRollup = [{
+  "name": "gate", "conclusion": "STARTUP_FAILURE"
+}]')
+out=$(run "$f_typeless_startup"); rc=$?
+check "typeless STARTUP_FAILURE exits 1" "$rc" "1"
+contains "typeless STARTUP_FAILURE names gate" "$out" "gate"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "typeless STARTUP_FAILURE must not be ADMIN-CANDIDATE"
+else
+  ok "typeless STARTUP_FAILURE is not ADMIN-CANDIDATE"
+fi
+if echo "$out" | grep -F "startup_failure / no steps / no runner" >/dev/null; then
+  bad "typeless STARTUP_FAILURE must not use the infra signature"
+else
+  ok "typeless STARTUP_FAILURE is not the infra signature"
+fi
+if echo "$out" | grep -F "READY" >/dev/null; then
+  bad "typeless STARTUP_FAILURE must not be READY"
+else
+  ok "typeless STARTUP_FAILURE is not READY"
+fi
+
+f_weird=$(fixture weird_checkrun '.statusCheckRollup = [{
+  "__typename": "CheckRun", "name": "gate", "conclusion": "WEIRD"
+}]')
+out=$(run "$f_weird"); rc=$?
+check "WEIRD CheckRun exits 1" "$rc" "1"
+contains "WEIRD CheckRun names the unrecognized conclusion" "$out" "unrecognized required-check state: gate=WEIRD"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "WEIRD CheckRun must not be ADMIN-CANDIDATE"
+else
+  ok "WEIRD CheckRun is not ADMIN-CANDIDATE"
+fi
+if echo "$out" | grep -F "READY" >/dev/null; then
+  bad "WEIRD CheckRun must not be READY"
+else
+  ok "WEIRD CheckRun is not READY"
+fi
+
+f_bogus=$(fixture bogus_status '.statusCheckRollup = [{
+  "__typename": "StatusContext", "context": "ci/custom", "state": "BOGUS"
+}]')
+out=$(run "$f_bogus"); rc=$?
+check "BOGUS StatusContext exits 1" "$rc" "1"
+contains "BOGUS StatusContext names the unrecognized state" "$out" "unrecognized required-check state: ci/custom=BOGUS"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "BOGUS StatusContext must not be ADMIN-CANDIDATE"
+else
+  ok "BOGUS StatusContext is not ADMIN-CANDIDATE"
+fi
+if echo "$out" | grep -F "READY" >/dev/null; then
+  bad "BOGUS StatusContext must not be READY"
+else
+  ok "BOGUS StatusContext is not READY"
+fi
+
+f_missing_state=$(fixture missing_state '.statusCheckRollup = [{
+  "__typename": "StatusContext", "context": "ci/custom"
+}]')
+out=$(run "$f_missing_state"); rc=$?
+check "missing StatusContext state exits 1" "$rc" "1"
+contains "missing state names the unrecognized state" "$out" "unrecognized required-check state: ci/custom=missing"
+if echo "$out" | grep -F "unrecognized required-check shape" >/dev/null; then
+  bad "missing state is an unrecognized state, not an unrecognized shape"
+else
+  ok "missing state is not an unrecognized shape"
+fi
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "missing state must not be ADMIN-CANDIDATE"
+else
+  ok "missing state is not ADMIN-CANDIDATE"
+fi
+if echo "$out" | grep -F "READY" >/dev/null; then
+  bad "missing state must not be READY"
+else
+  ok "missing state is not READY"
+fi
+
+f_empty_rollup=$(fixture empty_rollup '.statusCheckRollup = []')
+out=$(run "$f_empty_rollup"); rc=$?
+check "empty rollup exits 1" "$rc" "1"
+contains "empty rollup names no required-check evidence" "$out" "no required-check evidence"
+if echo "$out" | grep -F "ADMIN-CANDIDATE" >/dev/null; then
+  bad "empty rollup must not be ADMIN-CANDIDATE"
+else
+  ok "empty rollup is not ADMIN-CANDIDATE"
+fi
+if echo "$out" | grep -F "READY" >/dev/null; then
+  bad "empty rollup must not be READY"
+else
+  ok "empty rollup is not READY"
+fi
+
+echo "L-122 · passing and pending allow-lists"
+for conclusion in SUCCESS NEUTRAL SKIPPED; do
+  f_allow=$(fixture "allow_pass_${conclusion}" --arg conclusion "$conclusion" \
+    '.statusCheckRollup = [{__typename:"CheckRun", name:"gate", conclusion:$conclusion}]')
+  out=$(run "$f_allow"); rc=$?
+  check "CheckRun ${conclusion} stays READY" "$rc" "0"
+done
+for conclusion in PENDING IN_PROGRESS QUEUED; do
+  f_allow=$(fixture "allow_pend_${conclusion}" --arg conclusion "$conclusion" \
+    '.statusCheckRollup = [{__typename:"CheckRun", name:"gate", conclusion:$conclusion}]')
+  out=$(run "$f_allow"); rc=$?
+  check "CheckRun conclusion ${conclusion} exits 1" "$rc" "1"
+  contains "CheckRun conclusion ${conclusion} still running" "$out" "still running"
+done
+f_allow_status=$(fixture allow_pending_status '.statusCheckRollup = [{
+  "__typename": "CheckRun", "name": "gate", "status": "IN_PROGRESS", "conclusion": null
+}]')
+out=$(run "$f_allow_status"); rc=$?
+check "CheckRun status IN_PROGRESS with no conclusion exits 1" "$rc" "1"
+contains "CheckRun status IN_PROGRESS still running" "$out" "still running"
+f_expected=$(fixture status_expected '.statusCheckRollup = [{
+  "__typename": "StatusContext", "context": "ci/custom", "state": "EXPECTED"
+}]')
+out=$(run "$f_expected"); rc=$?
+check "StatusContext EXPECTED exits 1" "$rc" "1"
+contains "StatusContext EXPECTED still running" "$out" "still running"
 
 echo
 echo "release-preflight.test.sh: $PASS passed, $FAIL failed"
