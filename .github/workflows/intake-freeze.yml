@@ -3,16 +3,19 @@
 # and the morning brief. The enforcement is fleet-tooling/bin/intake-admit.sh, which lane-check runs
 # before any claim and which freezes issues opened after the freeze began even if this never ran.
 # Exception: an issue labelled bug + blocks-product is admitted.
-# Canonical copy: mrhinkle/fleet-tooling/.github/workflows/intake-freeze.yml. Keep every copy identical.
+# Canonical copy: mrhinkle/fleet-tooling/.github/workflows/intake-freeze.yml. This copy differs in one
+# way: the write permission is scoped to the job, because this repo's ci-conventions sensor requires
+# workflow-level permissions to be read-only.
 name: intake-freeze
 on:
   issues:
     types: [opened]
-permissions:
-  issues: write
+permissions: {}
 jobs:
   label:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
     timeout-minutes: 2
     steps:
       - name: Label the new issue frozen-2026-11
