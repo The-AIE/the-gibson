@@ -1,0 +1,35 @@
+name: Lesson proof
+
+# Advisory replay of closed-lesson proofs (#570).
+# The job stays green. It does not set a commit status and does not post a comment.
+# Reviewer: this workflow file is new. Diff it first.
+#
+# sensor-health grades only the scheduled heartbeat. Pull-request runs are
+# advisory and can be absent on a quiet day; grading those would mark this
+# workflow idle. The heartbeat runs the same report-only command.
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "29 6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lesson-proof-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lesson-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Report lesson proofs
+        run: node scripts/lesson-proof.mjs
