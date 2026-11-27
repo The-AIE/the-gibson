@@ -19,12 +19,14 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
       - name: Audit sensors and upsert report issue #212
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: node scripts/sensor-health.mjs --post
       - name: Self-gate false-red and feedback-time budgets (config/self-gate-health.v1.json)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -36,6 +38,7 @@ jobs:
       # owns renderIssueBody). BACKLOG_HEALTH_FIXTURE / BACKLOG_HEALTH_NOW
       # are test seams and unset in production.
       - name: Classify backlog health and comment on #212
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
