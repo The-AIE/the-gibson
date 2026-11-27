@@ -79,7 +79,8 @@ export function timerHasNumericDelay(text) {
       }
       if (args === 2) delay += ch;
     }
-    if (/^\s*\d/.test(delay)) return true;
+    // A block comment may sit before the number: setTimeout(tick, /* debounce */ 250).
+    if (/^\s*(\/\*.*?\*\/\s*)*\d/.test(delay)) return true;
   }
   return false;
 }

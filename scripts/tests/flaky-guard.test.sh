@@ -112,10 +112,10 @@ node -e '
   const want = [
     "scripts/tests/loop.test.sh:1:retry", "scripts/tests/loop.test.sh:2:retry", "scripts/tests/loop.test.sh:3:retry",
     "scripts/tests/loop.test.sh:4:retry", "scripts/tests/loop.test.sh:5:retry",
-    "tests/timer.test.js:2:sleep", "tests/timer.test.js:5:sleep",
+    "tests/timer.test.js:2:sleep", "tests/timer.test.js:5:sleep", "tests/timer.test.js:6:sleep",
   ].sort();
   if (JSON.stringify(got) !== JSON.stringify(want)) { console.error("got", got); process.exit(1); }
-' "$(run --diff "$LOOPS" --format json 2>&1)" && ok "until/while loops around pytest, vitest, jest and npm test are caught; a number inside the timer callback is not a delay" || bad "loop/timer findings differ"
+' "$(run --diff "$LOOPS" --format json 2>&1)" && ok "until/while loops around pytest, vitest, jest and npm test are caught; a number inside the timer callback is not a delay; a delay after a block comment is" || bad "loop/timer findings differ"
 run --diff "$LOOPS" --strict >/dev/null 2>&1; rc=$?
 [[ $rc -eq 1 ]] && ok "--strict fails on the rerun loops" || bad "strict rc=$rc"
 

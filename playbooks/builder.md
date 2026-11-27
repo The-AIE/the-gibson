@@ -166,7 +166,7 @@ in the PR body (Law 4). Quarantine: when the target is Gibson itself, use the
 suites, so in any other target use the quarantine that repo's test runner or
 `AGENTS.md` documents, with the same issue link. Deletion: the local gate in step 4
 runs before the PR exists and does not read the PR body, so give it the same line,
-`GIBSON_TEST_INTEGRITY_TEXT='Test-integrity: removed <n> for <reason>' scripts/gate.sh`
+`GIBSON_TEST_INTEGRITY_TEXT='Test-integrity: removed <n> for <reason>' <path-to-gibson>/scripts/gate.sh`
 (or `--waiver-text`). Before you push, check your own diff:
 
 ```bash
