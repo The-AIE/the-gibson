@@ -288,19 +288,76 @@ jobs:
       # takes longer than this is RED. Lower it as suites get faster; raising
       # it is a loosening and needs owner sign-off (AGENTS.md self-modification).
       - name: Run every sensor
+        id: full_sensors
         if: steps.classify.outputs.mode != 'docs'
         env:
           GIBSON_GATE_WALL_BUDGET: "900"
+          GIBSON_SUITE_REPORT_PATH: ${{ runner.temp }}/ci-suite-results.json
+          GIBSON_SUITE_REPORT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          GIBSON_SUITE_REPORT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash scripts/tests/run-all.sh --no-quarantine
 
       - name: Run authority sensors (docs-only change)
+        id: authority_sensors
         if: steps.classify.outputs.mode == 'docs'
+        env:
+          GIBSON_SUITE_REPORT_PATH: ${{ runner.temp }}/ci-suite-results.json
+          GIBSON_SUITE_REPORT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          GIBSON_SUITE_REPORT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash scripts/tests/run-all.sh --no-quarantine --only contract-authority,policy-manifest,laws-sensors,convention-sensors,architecture-fitness
 
       # #164: generated-view drift. Same sensors job, no new required context.
       # Exit 1 on block drift, stale digest, bad markers, or unreadable inputs.
       - name: Policy view drift
+        id: policy_drift
         run: node scripts/policy-manifest.mjs check-drift
+
+      # Evidence only: compare a hypothetical exact selection to this one run.
+      # A planner/report failure never changes which required checks execute.
+      - name: Compare shadow suite selection (advisory)
+        if: always()
+        continue-on-error: true
+        env:
+          SELECTION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          SELECTION_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          SENSOR_OUTCOME: ${{ steps.full_sensors.outcome == 'skipped' && steps.authority_sensors.outcome || steps.full_sensors.outcome }}
+          POLICY_OUTCOME: ${{ steps.policy_drift.outcome }}
+        run: |
+          echo "::notice::Suite selection is advisory; every required sensor keeps its existing coverage"
+          echo "### Shadow evidence persistence" >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          if [[ -f "$RUNNER_TEMP/ci-suite-results.json" ]] && [[ $(wc -c < "$RUNNER_TEMP/ci-suite-results.json") -gt 131072 ]]; then
+            printf '%s\n' '{"schema":"gibson.ci-suite-selection/v1","assessment":"UNKNOWN","completeness":{"valid":false,"errors":["full report exceeds persistence limit"]}}' > "$RUNNER_TEMP/ci-suite-selection.json"
+            status=1
+          elif node scripts/ci-suite-selection.mjs compare --report "$RUNNER_TEMP/ci-suite-results.json" \
+            --base "$SELECTION_BASE" --head "$SELECTION_HEAD" \
+            --gate-outcome "$SENSOR_OUTCOME" --policy-outcome "$POLICY_OUTCOME" \
+            --output "$RUNNER_TEMP/ci-suite-selection.json" --summary "$GITHUB_STEP_SUMMARY"; then
+            status=0
+          else
+            status=$?
+          fi
+          # Keep complete, bounded JSON in both durable job logs and summary.
+          # Never emit a truncated report as if it were complete evidence.
+          for name in ci-suite-results.json ci-suite-selection.json; do
+            file="$RUNNER_TEMP/$name"
+            if [[ -s "$file" ]] && [[ $(wc -c < "$file") -le 131072 ]]; then
+              printf '\nGIBSON_CI_SHADOW_JSON_BEGIN %s\n' "$name"
+              cat "$file"
+              printf '\nGIBSON_CI_SHADOW_JSON_END %s\n' "$name"
+              {
+                printf '<details><summary>%s</summary>\n\n```json\n' "$name"
+                cat "$file"
+                printf '\n```\n</details>\n'
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::warning::UNKNOWN/incomplete shadow evidence: $name missing, empty, or larger than 128 KiB"
+              echo "GIBSON_CI_SHADOW_JSON_UNAVAILABLE $name assessment=UNKNOWN"
+              echo "**UNKNOWN/incomplete evidence:** $name missing, empty, or larger than 128 KiB; no complete comparison claim." >> "$GITHUB_STEP_SUMMARY"
+              status=1
+            fi
+          done
+          exit "$status"
 
       # Advisory: the burn-down view. Shows what the quarantine is hiding
       # without failing the build, so the list stays visible instead of
