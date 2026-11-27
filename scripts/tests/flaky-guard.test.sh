@@ -104,6 +104,21 @@ node -e '
 out=$(GITHUB_ACTIONS=true node "$SENSOR" --diff "$EDGE" 2>&1)
 [[ "$out" == *"::warning file=tests/a%3Ab%2Cc.test.js,line=1,"* ]] && ok "annotation properties are escaped (no workflow-command injection)" || bad "annotation not escaped: $out"
 
+# --- rerun loops around direct test commands; timer delay vs callback argument
+LOOPS="$FX/loops.diff"
+node -e '
+  const j = JSON.parse(process.argv[1]);
+  const got = j.findings.map((f) => `${f.path}:${f.line}:${f.id}`).sort();
+  const want = [
+    "scripts/tests/loop.test.sh:1:retry", "scripts/tests/loop.test.sh:2:retry", "scripts/tests/loop.test.sh:3:retry",
+    "scripts/tests/loop.test.sh:4:retry", "scripts/tests/loop.test.sh:5:retry",
+    "tests/timer.test.js:2:sleep", "tests/timer.test.js:5:sleep",
+  ].sort();
+  if (JSON.stringify(got) !== JSON.stringify(want)) { console.error("got", got); process.exit(1); }
+' "$(run --diff "$LOOPS" --format json 2>&1)" && ok "until/while loops around pytest, vitest, jest and npm test are caught; a number inside the timer callback is not a delay" || bad "loop/timer findings differ"
+run --diff "$LOOPS" --strict >/dev/null 2>&1; rc=$?
+[[ $rc -eq 1 ]] && ok "--strict fails on the rerun loops" || bad "strict rc=$rc"
+
 # --- mutation: knock out the skip patterns; the exact-finding check must go red
 sed 's/(it|test|describe|context|suite)/(NEVER)/' "$SENSOR" >"$TMP/mutant.mjs"
 mj=$(env -u GITHUB_ACTIONS node "$TMP/mutant.mjs" --diff "$MIXED" --format json 2>&1)

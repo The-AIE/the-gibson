@@ -46,12 +46,52 @@ const MAX_ANNOTATIONS = 50;
 const SNIPPET_MAX = 120;
 const MIN_REASON = 8;
 
-// Closed pattern list. Extending it is a reviewed change to this file.
+/**
+ * True when a `setTimeout(` call on this line has a numeric literal as its
+ * DELAY (second top-level argument). A number passed to a call inside the
+ * callback, as in `setTimeout(() => record(value, 42))`, is not a delay.
+ * Nesting and string literals are tracked so their commas are not counted.
+ */
+export function timerHasNumericDelay(text) {
+  const call = /\bsetTimeout\(/g;
+  let m;
+  while ((m = call.exec(text)) !== null) {
+    let depth = 0;
+    let quote = null;
+    let args = 1;
+    let delay = "";
+    for (let i = call.lastIndex; i < text.length; i++) {
+      const ch = text[i];
+      if (quote) {
+        if (ch === "\\") i += 1;
+        else if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'" || ch === "`") {
+        quote = ch;
+      } else if (ch === "(" || ch === "[" || ch === "{") {
+        depth += 1;
+      } else if (ch === ")" || ch === "]" || ch === "}") {
+        if (depth === 0) break;
+        depth -= 1;
+      } else if (ch === "," && depth === 0) {
+        args += 1;
+        if (args > 2) break;
+        continue;
+      }
+      if (args === 2) delay += ch;
+    }
+    if (/^\s*\d/.test(delay)) return true;
+  }
+  return false;
+}
+
+// Closed pattern list. An entry carries a `re`, or a `match(text)` function
+// where a regular expression cannot tell arguments apart. Extending it is a
+// reviewed change to this file.
 export const PATTERNS = [
   { id: "sleep", re: /(^|[\s;&|(`])sleep\s+(\d|\$)/, why: "fixed shell sleep in a test" },
   { id: "sleep", re: /\btime\.[Ss]leep\(/, why: "fixed sleep in a test" },
   { id: "sleep", re: /\bThread\.sleep\(/, why: "fixed sleep in a test" },
-  { id: "sleep", re: /\bsetTimeout\(.*,\s*\d+/, why: "timer used as a sleep in a test" },
+  { id: "sleep", match: timerHasNumericDelay, why: "timer used as a sleep in a test" },
   { id: "sleep", re: /\bawait\s+(sleep|delay|wait)\(\s*\d+/, why: "fixed wait in a test" },
   { id: "sleep", re: /\b(waitForTimeout|cy\.wait)\(\s*\d+/, why: "fixed wait in a test" },
   { id: "skip", re: /\b(it|test|describe|context|suite)\.(skip|fixme)\b/, why: "skip marker added to a test" },
@@ -64,7 +104,7 @@ export const PATTERNS = [
   { id: "retry", re: /\bretries\s*:\s*[1-9]/, why: "retry-until-green device" },
   { id: "retry", re: /--(retries|reruns)(=|\s)\s*[1-9]|\brerunfailures\b/, why: "retry-until-green device" },
   { id: "retry", re: /@flaky\b|\bpytest\.mark\.flaky\b|\bflaky\(/, why: "test marked flaky instead of fixed" },
-  { id: "retry", re: /\b(until|while\s+!?)\s*(bash\s+\S*|npm\s+(run\s+)?|npx\s+|pnpm\s+|yarn\s+|pytest|vitest|jest|go\s+)test/, why: "rerun loop around a test command" },
+  { id: "retry", re: /\b(until|while\s+!?)\s*((bash\s+\S*|npm\s+(run\s+)?|npx\s+|pnpm\s+|yarn\s+|go\s+)test|((npx|pnpm|yarn)\s+)?(pytest|vitest|jest)\b)/, why: "rerun loop around a test command" },
 ];
 
 const WAIVER = /flaky-guard:\s*allow(\s+(\S[^\n]*))?/;
@@ -151,7 +191,8 @@ export function scan(diffText) {
       findings.push({ path: a.path, line: a.line, id: "waiver-no-reason", why: `waiver needs a reason of at least ${MIN_REASON} characters`, text: snippet(a.text) });
       files.add(a.path);
     }
-    const hit = PATTERNS.find((p) => p.re.test(a.text.replace(WAIVER, "")));
+    const probe = a.text.replace(WAIVER, "");
+    const hit = PATTERNS.find((p) => (p.match ? p.match(probe) : p.re.test(probe)));
     if (!hit) continue;
     if (reasoned) {
       waived += 1;

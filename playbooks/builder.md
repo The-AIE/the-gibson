@@ -160,9 +160,14 @@ yours to inherit or hide behind.
 A flaky test is a bug to find, not noise to route around. Do **not** skip it, add a
 sleep, or rerun and retry until it passes: that teaches the fleet to rerun instead of
 fix. Find the root cause and fix it. If you cannot, quarantine the suite with an issue
-link (the `QUARANTINE` block in `scripts/tests/run-all.sh`), or delete the test with a
-visible `Test-integrity: removed <n> for <reason>` line in the PR body (Law 4). Before
-you push, check your own diff:
+link, or delete the test with a visible `Test-integrity: removed <n> for <reason>` line
+in the PR body (Law 4). Quarantine: when the target is Gibson itself, use the
+`QUARANTINE` block in `scripts/tests/run-all.sh`; that block covers only Gibson's own
+suites, so in any other target use the quarantine that repo's test runner or
+`AGENTS.md` documents, with the same issue link. Deletion: the local gate in step 4
+runs before the PR exists and does not read the PR body, so give it the same line,
+`GIBSON_TEST_INTEGRITY_TEXT='Test-integrity: removed <n> for <reason>' scripts/gate.sh`
+(or `--waiver-text`). Before you push, check your own diff:
 
 ```bash
 node <path-to-gibson>/scripts/flaky-guard.mjs --base origin/main

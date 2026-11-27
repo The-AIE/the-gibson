@@ -1,0 +1,19 @@
+diff --git a/scripts/tests/loop.test.sh b/scripts/tests/loop.test.sh
+--- a/scripts/tests/loop.test.sh
++++ b/scripts/tests/loop.test.sh
+@@ -0,0 +1,6 @@
++until pytest; do :; done
++until vitest run; do :; done
++while ! jest; do :; done
++until npm test; do :; done
++until npx jest --ci; do :; done
++until pytester; do :; done
+diff --git a/tests/timer.test.js b/tests/timer.test.js
+--- a/tests/timer.test.js
++++ b/tests/timer.test.js
+@@ -0,0 +1,5 @@
++setTimeout(() => record(value, 42));
++setTimeout(() => record(value, 42), 250);
++setTimeout(tick, delayMs);
++setTimeout(() => log("a, 5"), wait);
++setTimeout(function () { return [1, 2]; }, 10);
