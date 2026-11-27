@@ -1,7 +1,7 @@
 # Gibson reviewer role — Goose recipe mirror
 # Source of truth: playbooks/reviewer.md — do not fork doctrine text here.
 # playbook: playbooks/reviewer.md
-# playbook-sha256: 9a6aed90aec402b4661fb3ce1e902a284091fc8f0d164ed396c64af0bdb3add8
+# playbook-sha256: ac0e246e9c4fc7e9810d923c9c039aa8544d6f7ea489f518e87b538ad6615179
 #
 # Goose schema version (version field below) is the official Recipe type
 # version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe
