@@ -36,9 +36,24 @@ WHAT IT DOES
        or reviewDecision=APPROVED. Ordinary comments without a terminal VERDICT
        are not evidence. A SHA-bound verdict must match the current PR head —
        absent/null head fails closed.
-    3. Required checks. Distinguishes a product red (a step failed) from GitHub
-       Actions infrastructure (startup_failure / no steps / no runner), which
-       re-runs identically and is usually concurrent across open PRs.
+    3. Required checks. A StatusContext whose state is exactly FAILURE or
+       ERROR is always product or policy red. A CheckRun is GitHub Actions
+       infrastructure only when __typename is exactly CheckRun and conclusion
+       is exactly STARTUP_FAILURE — no case folding (L-033). A missing
+       __typename never takes the admin path. Any other failed CheckRun
+       conclusion (FAILURE, ERROR, TIMED_OUT, CANCELLED) is product red
+       whether .steps is missing, empty, or populated. Passing and pending
+       are allow-lists. A CheckRun passes only on SUCCESS, NEUTRAL, or
+       SKIPPED, and is pending only on PENDING, IN_PROGRESS, or QUEUED
+       (conclusion, or status when conclusion is absent). A StatusContext
+       passes only on SUCCESS and is pending only on PENDING or EXPECTED.
+       Anything else, including a missing state, exits 1 as
+       "unrecognized required-check state: <name>=<value>". An empty rollup
+       exits 1 as "no required-check evidence". This slice does not read
+       run/job evidence and does not look up branch-protection contexts, so
+       missing .steps is unknown, never "zero steps ran". Unreadable JSON,
+       or a rollup that is not an array, exits 2 and is not a verdict. An
+       unrecognized shape fails closed (exit 1).
     4. Tier. tier-c never gets an admin path (Law 7); it merges only on the
        G12 floor (one independent approval at the exact head plus required checks, D-015).
 
@@ -489,30 +504,137 @@ else
 fi
 
 # --- 3. required checks, product red vs GHA infra (L-033) ----------------
-CHECK_SUMMARY=$(echo "$PR_JSON" | jq -r '
-  [ .statusCheckRollup[]? | select(.__typename == "CheckRun" or .conclusion != null or .state != null) ]
-  | map({name: (.name // .context // "check"),
-         conclusion: ((.conclusion // .state // "") | ascii_upcase),
-         steps: ((.steps? // []) | length)})')
-FAILED=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.conclusion | test("FAIL|ERROR|TIMED_OUT|STARTUP_FAILURE|CANCELLED"))]')
-PENDING=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.conclusion == "" or .conclusion == "PENDING" or .conclusion == "IN_PROGRESS" or .conclusion == "QUEUED")] | length')
-FAILED_N=$(echo "$FAILED" | jq -r 'length')
-
-if [[ "$PENDING" -gt 0 ]]; then
-  BLOCKERS+=("$PENDING required check(s) still running — wait, do not merge into a pending gate")
+# Limit: this slice does not read run or job evidence, and it does not look
+# up the repo's branch-protection required contexts. A CheckRun is
+# infrastructure only when __typename is exactly CheckRun and conclusion is
+# exactly STARTUP_FAILURE. No case folding: startup_failure is an unrecognized
+# conclusion. A missing __typename may still be inferred as a CheckRun or
+# StatusContext for BLOCKING, and never for the admin path. Missing, empty,
+# or populated .steps is never read as "zero steps ran". Classification is an
+# allow-list, not a deny-list:
+#   CheckRun pass:    SUCCESS, NEUTRAL, SKIPPED
+#   CheckRun pending: PENDING, IN_PROGRESS, QUEUED
+#                     (conclusion, or status when conclusion is absent)
+#   CheckRun fail:    FAILURE, ERROR, TIMED_OUT, CANCELLED
+#   Status pass:      SUCCESS
+#   Status pending:   PENDING, EXPECTED
+#   Status fail:      FAILURE, ERROR
+# Anything else, including a missing state, is
+# "unrecognized required-check state: <name>=<value>" (exit 1). An empty
+# rollup array is "no required-check evidence" (exit 1), not READY. Invalid
+# JSON or a non-array statusCheckRollup exits 2 (could not read) and never
+# becomes a verdict. A payload that is not a JSON object is already rejected
+# by the review-evidence extractor (exit 2) before this block; that string is
+# not rewritten here. An unrecognized shape fails closed (exit 1): a false
+# ADMIN-CANDIDATE can authorize merging a red PR, and a false BLOCKED only
+# delays release.
+if ! echo "$PR_JSON" | jq -e 'type == "object" and (.statusCheckRollup | type == "array")' >/dev/null 2>&1; then
+  die "could not read $REPO#$PR"
 fi
+ROLLUP_N=$(echo "$PR_JSON" | jq -r '.statusCheckRollup | length') || die "could not read $REPO#$PR"
+if [[ "$ROLLUP_N" -eq 0 ]]; then
+  # No other section checks that required contexts are present. An empty
+  # array is valid JSON and used to fall through to READY.
+  BLOCKERS+=("no required-check evidence")
+else
+  CHECK_SUMMARY=$(echo "$PR_JSON" | jq -c '
+    def is_str: type == "string" and length > 0;
+    def in_set($xs): . as $v | ($xs | index($v)) != null;
+    def shown:
+      if type == "string" and length > 0 then . else "missing" end;
+    def nm: .name // .context // "check";
+    def class_checkrun:
+      . as $e
+      | (if ($e.conclusion | is_str) then $e.conclusion else "" end) as $cv
+      | (if ($e.status | is_str) then $e.status else "" end) as $sv
+      | if ($e.__typename == "CheckRun" and $cv == "STARTUP_FAILURE") then
+          {class:"infra", name:($e | nm), value:$cv}
+        elif $cv == "STARTUP_FAILURE" then
+          {class:"startup_untyped", name:($e | nm), value:$cv}
+        elif ($cv | in_set(["SUCCESS","NEUTRAL","SKIPPED"])) then
+          {class:"pass", name:($e | nm), value:$cv}
+        elif ($cv | in_set(["FAILURE","ERROR","TIMED_OUT","CANCELLED"])) then
+          {class:"fail_check", name:($e | nm), value:$cv}
+        elif ($cv | in_set(["PENDING","IN_PROGRESS","QUEUED"])) then
+          {class:"pending", name:($e | nm), value:$cv}
+        elif ($cv == "" and ($sv | in_set(["PENDING","IN_PROGRESS","QUEUED"]))) then
+          {class:"pending", name:($e | nm), value:$sv}
+        else
+          {class:"badstate", name:($e | nm), value:($e.conclusion | shown)}
+        end;
+    def class_status:
+      . as $e
+      | (if ($e.state | is_str) then $e.state else "" end) as $sv
+      | if ($sv | in_set(["SUCCESS"])) then
+          {class:"pass", name:($e.context // $e.name // "check"), value:$sv}
+        elif ($sv | in_set(["PENDING","EXPECTED"])) then
+          {class:"pending", name:($e.context // $e.name // "check"), value:$sv}
+        elif ($sv | in_set(["FAILURE","ERROR"])) then
+          {class:"fail_status", name:($e.context // $e.name // "check"), value:$sv}
+        else
+          {class:"badstate", name:($e.context // $e.name // "check"), value:($e.state | shown)}
+        end;
+    [ .statusCheckRollup[]
+      | if type != "object" then
+          {class:"unrecognized", name:"check", value:""}
+        elif (.__typename != null and .__typename != "CheckRun" and .__typename != "StatusContext") then
+          {class:"unrecognized", name:(.name // .context // "check"), value:""}
+        elif .__typename == "StatusContext" then
+          if (.conclusion | is_str) then
+            {class:"unrecognized", name:(.context // .name // "check"), value:""}
+          elif ((.state | is_str) or (.context | is_str) or (.name | is_str)) then
+            class_status
+          else
+            {class:"unrecognized", name:"check", value:""}
+          end
+        elif .__typename == "CheckRun" then
+          class_checkrun
+        elif .__typename == null and ((.conclusion | is_str) | not) and (.state | is_str) and (.context | is_str) then
+          class_status
+        elif .__typename == null and (.conclusion | is_str) then
+          class_checkrun
+        else
+          {class:"unrecognized", name:(.name // .context // "check"), value:""}
+        end
+    ]') || die "could not read $REPO#$PR"
+  PENDING=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.class == "pending")] | length') || die "could not read $REPO#$PR"
+  PRODUCT=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.class == "fail_check") | .name] | join(", ")') || die "could not read $REPO#$PR"
+  STATUS_NAMES=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.class == "fail_status") | .name] | join(", ")') || die "could not read $REPO#$PR"
+  INFRA_NAMES=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.class == "infra") | .name] | join(", ")') || die "could not read $REPO#$PR"
+  INFRA_N=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.class == "infra")] | length') || die "could not read $REPO#$PR"
+  UNTYPED=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.class == "startup_untyped") | .name] | join(", ")') || die "could not read $REPO#$PR"
+  UNREC_N=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.class == "unrecognized")] | length') || die "could not read $REPO#$PR"
+  BAD_N=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.class == "badstate")] | length') || die "could not read $REPO#$PR"
 
-if [[ "$FAILED_N" -gt 0 ]]; then
-  # Infra signature: startup_failure, or a "failure" with zero steps — nothing
-  # ran, so there is no product signal in it (L-033).
-  INFRA_N=$(echo "$FAILED" | jq -r '[.[] | select(.conclusion == "STARTUP_FAILURE" or .steps == 0)] | length')
-  PRODUCT=$(echo "$FAILED" | jq -r '[.[] | select(.conclusion != "STARTUP_FAILURE" and .steps > 0) | .name] | join(", ")')
+  if [[ "$PENDING" -gt 0 ]]; then
+    BLOCKERS+=("$PENDING required check(s) still running — wait, do not merge into a pending gate")
+  fi
   if [[ -n "$PRODUCT" ]]; then
     BLOCKERS+=("product-red required check(s): $PRODUCT — a step actually failed; fix the code")
   fi
-  if [[ "$INFRA_N" -gt 0 && -z "$PRODUCT" ]]; then
-    INFRA_NAMES=$(echo "$FAILED" | jq -r '[.[] | select(.conclusion == "STARTUP_FAILURE" or .steps == 0) | .name] | join(", ")')
+  if [[ -n "$STATUS_NAMES" ]]; then
+    BLOCKERS+=("blocking required status: $STATUS_NAMES")
+  fi
+  if [[ -n "$UNTYPED" ]]; then
+    # Inferred CheckRun (no __typename) whose conclusion is STARTUP_FAILURE.
+    # Blocking only — never the admin path.
+    BLOCKERS+=("blocking required check(s): $UNTYPED")
+  fi
+  unrec_names=$(echo "$CHECK_SUMMARY" | jq -r '.[] | select(.class == "unrecognized") | .name') || die "could not read $REPO#$PR"
+  while IFS= read -r unrec_name; do
+    [[ -z "$unrec_name" ]] && continue
+    BLOCKERS+=("unrecognized required-check shape: $unrec_name")
+  done <<< "$unrec_names"
+  bad_lines=$(echo "$CHECK_SUMMARY" | jq -r '.[] | select(.class == "badstate") | "unrecognized required-check state: \(.name)=\(.value)"') || die "could not read $REPO#$PR"
+  while IFS= read -r bad_line; do
+    [[ -z "$bad_line" ]] && continue
+    BLOCKERS+=("$bad_line")
+  done <<< "$bad_lines"
+  # Exit 4 only when every failing entry is a typed STARTUP_FAILURE CheckRun.
+  if [[ "$INFRA_N" -gt 0 && -z "$PRODUCT" && -z "$STATUS_NAMES" && -z "$UNTYPED" && "$UNREC_N" -eq 0 && "$BAD_N" -eq 0 && "$PENDING" -eq 0 ]]; then
     ADMIN_REASONS+=("L-033: $INFRA_N required check(s) failed with the GitHub Actions infra signature (startup_failure / no steps / no runner): $INFRA_NAMES. Re-run once; if it repeats identically — especially concurrently on other open PRs — it is infra, not product. Never report it as remote green.")
+  elif [[ -n "$INFRA_NAMES" ]]; then
+    BLOCKERS+=("blocking required check(s): $INFRA_NAMES")
   fi
 fi
 
