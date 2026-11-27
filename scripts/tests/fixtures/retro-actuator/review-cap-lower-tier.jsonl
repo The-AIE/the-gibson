@@ -1,0 +1,1 @@
+{"kind":"review-cap","repo":"The-AIE/the-gibson","attempt_id":"rb","head_sha":"cccccccccccccccccccccccccccccccccccccccc","detector_version":"det-1","detector_health":"healthy","observed_at":"2026-01-01T00:00:00Z","raw_signature":"Error: assert foo.ts:88 expected 1 run_id=987654321 sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa at 2026-10-25T12:00:00Z","tier":"b","review_rounds":3}

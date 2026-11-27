@@ -27,6 +27,12 @@
       "windowDays": 8
     },
     {
+      "path": ".github/workflows/retro-actuator.yml",
+      "mode": "freshness",
+      "events": ["schedule"],
+      "windowDays": 8
+    },
+    {
       "path": ".github/workflows/review-ready.yml",
       "mode": "freshness",
       "events": ["schedule"],

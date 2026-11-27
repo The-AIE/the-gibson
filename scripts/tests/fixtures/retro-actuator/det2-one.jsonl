@@ -1,0 +1,1 @@
+{"kind":"ci-failure","repo":"The-AIE/the-gibson","attempt_id":"z1","head_sha":"ffffffffffffffffffffffffffffffffffffffff","detector_version":"det-2","detector_health":"healthy","observed_at":"2026-01-02T00:00:00Z","raw_signature":"Error: assert qux.ts:4 expected 9"}

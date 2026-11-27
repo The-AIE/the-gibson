@@ -1,0 +1,2 @@
+{"kind":"ci-failure","repo":"The-AIE/the-gibson","attempt_id":"d1","head_sha":"dddddddddddddddddddddddddddddddddddddddd","detector_version":"det-1","detector_health":"healthy","observed_at":"2026-01-01T00:00:00Z","raw_signature":"Error: assert bar.ts:10 expected 2"}
+{"kind":"ci-failure","repo":"The-AIE/the-gibson","attempt_id":"d2","head_sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","detector_version":"det-1","detector_health":"healthy","observed_at":"2026-01-01T00:00:01Z","raw_signature":"Error: assert bar.ts:12 expected 2"}
