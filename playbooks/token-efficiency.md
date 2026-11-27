@@ -112,7 +112,8 @@ REPO_SLUG=owner/name       # safe placeholder — replace with the target's orig
   --reviewers codex,claude \
   --out "$REPO/gibson/second-opinion.md"
 
-# 4) Green gate before each commit (compares to the branch-point baseline).
+# 4) Full green gate before push (compares to the branch-point baseline).
+# Record affected checks for local commits; use the full gate if uncertain.
 (cd "$REPO" && "$GIBSON/scripts/gate.sh")
 
 # 5) Record one measured iteration (aggregate tokens optional — omit if unknown)
@@ -291,7 +292,7 @@ These are scripts and CI — not prompts ([docs/15](../docs/15-model-economics.m
 | Check | Command / location |
 |---|---|
 | Claims / WIP | `(cd "$REPO" && "$GIBSON/scripts/claims-status.sh")` — CWD must be the target |
-| Green gate | `(cd "$REPO" && "$GIBSON/scripts/gate-baseline.sh")` once at branch point (before write-capable loop), then `(cd "$REPO" && "$GIBSON/scripts/gate.sh")` before commits |
+| Green gate | `(cd "$REPO" && "$GIBSON/scripts/gate-baseline.sh")` once at the trusted branch point before changes; never recapture after changes. Run `(cd "$REPO" && "$GIBSON/scripts/gate.sh")` against that baseline before push and at the PR head, or before a local commit when affected checks are uncertain. |
 | Loop state schema | `"$GIBSON/scripts/validate-loop-state.sh" "$REPO/gibson/loop-state.md"` |
 | Injection / deceptive Unicode | `"$GIBSON/scripts/injection-scan.sh"` (pass paths under the agent-ingested tree) |
 | Cross-vendor review dispatch | `"$GIBSON/scripts/second-opinion.sh" --repo "$REPO"` (still a model, but **read-only** and not self) |
@@ -317,9 +318,11 @@ Cache hits never replace **exact-head** verification after new commits.
 
 ## 8. Quality invariants (non-negotiable)
 
-1. **Green gate** before every commit, run from the **target worktree** after a
-   branch-point baseline (`gate-baseline.sh` then `gate.sh` —
-   [docs/06](../docs/06-quality-gates.md)).
+1. **Affected checks** before local commits; **full green gate** before push and
+   at the PR head, from the **target worktree** after a branch-point baseline.
+   Uncertain selection requires the full `gate.sh` against the existing trusted
+   branch-point baseline. Run `gate-baseline.sh` only at that trusted branch point
+   before changes; never rerun it afterward ([docs/06](../docs/06-quality-gates.md)).
 2. **Exact-head CI:** required checks must run on the PR's current head SHA.
    A missing check is not a pass ([docs/20](../docs/20-multi-model-orchestration.md)
    ProductApp lesson). Fail closed — do **not** grep human-readable

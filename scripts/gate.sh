@@ -217,12 +217,13 @@ RISKS
   - Does not modify source; may create caches/build artifacts.
 
 USAGE
-  gate.sh [--baseline FILE] [--no-baseline-ok]
+  gate.sh [--baseline FILE] [--no-baseline-ok] [--tooling-base REF]
           [--waiver-text STR | --waiver-file FILE]
   gate.sh --help
 
   --baseline FILE     path to baseline JSON (default: .gibson-baseline.json)
   --no-baseline-ok    if baseline missing, only require all steps exit 0
+  --tooling-base REF  trusted tooling-policy base (default: origin/main)
   --waiver-text STR   inert waiver text (usually the PR body)
   --waiver-file FILE  read inert waiver text from FILE
 
@@ -241,6 +242,7 @@ EOF
 }
 
 BASELINE=".gibson-baseline.json"
+TOOLING_BASE="origin/main"
 NO_BASELINE_OK=0
 WAIVER_TEXT="${GIBSON_TEST_INTEGRITY_TEXT:-}"
 WAIVER_FILE=""
@@ -248,6 +250,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --baseline) BASELINE="${2:?}"; shift 2 ;;
+    --tooling-base) TOOLING_BASE="${2:?}"; shift 2 ;;
     --no-baseline-ok) NO_BASELINE_OK=1; shift ;;
     --waiver-text) WAIVER_TEXT="${2-}"; shift 2 ;;
     --waiver-file) WAIVER_FILE="${2:?}"; shift 2 ;;
@@ -641,6 +644,13 @@ run_configured_child() {
   # Isolation boundary: eval only inside the subshell, never the parent.
   ( eval "$1" )
 }
+
+# Version commands are branch-controlled too: run only after the baseline
+# authority snapshot, then check that they did not change it.
+command -v node >/dev/null || die "node is required for tooling readiness; install Node.js and make node available on PATH."
+node "$SCRIPT_DIR/gibson-verify.mjs" doctor --repo "$PWD" --base "$TOOLING_BASE" --tooling-only --require-proof ||
+  die "required tooling readiness failed; run gibson-verify.mjs prove after bootstrap/repair"
+verify_baseline_authority "after tooling readiness" || true
 
 GEN=$(resolve_cmd generate GIBSON_GENERATE generate)
 if [[ -n "$GEN" ]]; then

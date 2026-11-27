@@ -9381,12 +9381,12 @@ node -e '
 const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
-if (!t.includes("every commit must pass the green gate.")) {
+if (!t.includes("record affected checks for each, with the full gate before push.")) {
   throw new Error("missing builder green-gate body");
 }
 t=t.replace(
-  "every commit must pass the green gate.",
-  "every commit must pass the green gate. The builder may skip the green gate."
+  "record affected checks for each, with the full gate before push.",
+  "record affected checks for each, with the full gate before push. The builder may skip the green gate."
 );
 fs.writeFileSync(p,t);
 ' "$SANDBOX/playbooks/builder.md"

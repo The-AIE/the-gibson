@@ -42,9 +42,17 @@ Machine-readable companion: `.agents/gate.json` (same commands, parseable).
 <test>          # e.g. npx vitest run
 <build>         # e.g. npm run build
 ```
-All of these must pass before any **product** commit, with **zero new failures versus the
-branch point**. Pre-existing failures are recorded, not inherited and not hidden.
+Before local product commits, record checks affected by the change; uncertainty
+requires the full gate. All commands above must pass before pushing and at the PR
+head, with **zero new failures versus the branch point**. Preserve existing required
+CI/pre-push checks until test selection is independently validated. Pre-existing
+failures are recorded, not inherited and not hidden.
 Pure memory-only commits are exempt (see Shared agent memory above).
+
+The `tooling` section in `.agents/gate.json` declares language/surface profiles,
+separate formatting checks, exact tool versions, tracked configuration and source
+scope, and positive/negative controls. Tooling proof can survive product-only
+commits; the product gate result still belongs to the current head.
 
 ### Ground rules for machine contributors
 1. **Never mutate the shared checkout.** One task = one branch = one git

@@ -1,7 +1,7 @@
 # Gibson builder role — Goose recipe mirror
 # Source of truth: playbooks/builder.md — do not fork doctrine text here.
 # playbook: playbooks/builder.md
-# playbook-sha256: 98f57884f44456361b766550b68f3e51598563538147f83ddf397b7b62c4214f
+# playbook-sha256: 10e69309b92b8421170faa4006543f9fefcf4ff10e17f8fcbd94ff715eb7469d
 #
 # Goose schema version (version field below) is the official Recipe type
 # version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe
@@ -48,13 +48,14 @@ instructions: |
      (records branch-point baseline; Law 4 / claim.sh / playbooks/builder.md).
      Do not mutate without a verified baseline.
 
-  Do the claimed work only. Before every commit, the operator (or you via shell)
-  must run {{ gibson }}/scripts/gate.sh with zero new failures vs branch point (Law 4).
+  Do the claimed work only. Record affected checks before local commits; uncertain
+  selection requires the full gate. Before push and at the PR head, run
+  {{ gibson }}/scripts/gate.sh with zero new failures vs branch point (Law 4).
   Never grade your own homework (Law 5) — hand off for review when the claim is ready.
 
   Enforcement (Laws 2/3/4 — #35; no Goose binary required):
   - Before any mutation: {{ gibson }}/adapters/goose/enforce.sh pre-edit --repo {{ repo }} --issue {{ issue }}
-  - Before every commit: {{ gibson }}/adapters/goose/enforce.sh pre-commit --repo {{ repo }} --issue {{ issue }}
+  - Before publication/push (existing wrapper API retained): {{ gibson }}/adapters/goose/enforce.sh pre-commit --repo {{ repo }} --issue {{ issue }}
   - Permission tiers: {{ gibson }}/adapters/goose/permission-map.yaml (Never allow force-push/secrets/prod destroy)
 
   After the session ends (success or halt), stamp the run for the audit trail:

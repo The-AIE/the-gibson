@@ -1,8 +1,19 @@
 {
-  "$comment": "Copy to <target-repo>/.agents/gate.json. Vendor-neutral: any harness may read it. Empty string = step does not apply. Extra top-level keys are ignored, so the gate may also live under a \"gate\" object alongside other agent config.",
+  "$comment": "Copy to <target-repo>/.agents/gate.json. Empty string = gate step does not apply. Commands may also live under a gate object. Complete every tooling profile per docs/13 before adoption; use an explicit not_applicable reason only for absent surfaces. Empty profiles deliberately fail readiness.",
   "generate": "",
   "typecheck": "npx tsc --noEmit",
   "lint": "npm run lint",
   "test": "npx vitest run",
-  "build": "npm run build"
+  "build": "npm run build",
+  "tooling": {
+    "schema": "gibson.tooling/v1",
+    "mode": "required",
+    "profiles": {
+      "javascript": {},
+      "python": {},
+      "shell": {},
+      "actions": {},
+      "formatting": {}
+    }
+  }
 }
