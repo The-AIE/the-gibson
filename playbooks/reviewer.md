@@ -44,7 +44,14 @@ complete introduced range, including inherited commits, at the current head.
 3. A blocker cites file:line or an unmet acceptance criterion, a reachable
    trigger and its wrong outcome. Nits, speculation, optional improvements
    and rule candidates are notes. A real defect remains a blocker regardless
-   of its severity label. Do not duplicate findings already enforced by a
+   of its severity label, with one exception: a defect that already exists on
+   the base, and that no changed line reaches or makes worse, is
+   `kind: pre-existing` and never blocks. Give its `trigger:` and a `base:`
+   line with the evidence that it predates the diff and that no changed line
+   reaches it. If the diff adds a path into an old defect or widens its
+   effect, it is a blocker, not pre-existing. The linter checks only that
+   both lines are present; whether the diff reaches the defect is your
+   judgment. Do not duplicate findings already enforced by a
    deterministic check that actually ran on this head.
 4. Combine actionable findings into one response. After corrections, inspect
    the delta and its effect on the full introduced range. Carry unresolved

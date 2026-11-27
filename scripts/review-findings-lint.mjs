@@ -4,9 +4,13 @@
  *
  * WHAT IT DOES
  *   Parses a review body and reports: a blocking finding without a `trigger:`
- *   line, a finding without `class:`, an unknown class, an unknown kind, and a
+ *   line, a finding missing a field its kind requires (a `pre-existing` finding
+ *   needs `trigger:` and `base:` evidence, #758), a finding without `class:`, an unknown class, an unknown kind, and a
  *   missing or non-final VERDICT line. Vocabularies come from
- *   config/review-finding-classes.v1.json.
+ *   config/review-finding-classes.v1.json. A malformed `requires` list in that
+ *   file is a config error: reported once, exit 2, whatever the review contains.
+ *   The linter checks that required lines are present. It cannot check that a
+ *   `pre-existing` defect is unreached by the diff; that stays reviewer judgment.
  *
  * WHY
  *   A finding with no reachable trigger is speculation, and a finding with no
@@ -15,7 +19,7 @@
  * RISKS
  *   - Report-only. Not wired into any merge gate by #401.
  *   - Heuristic markdown parse: findings are top-level `- ` bullets under the
- *     `### Findings` heading; `kind:`/`class:`/`trigger:` are continuation lines.
+ *     `### Findings` heading; `kind:`/`class:`/`trigger:`/`base:` are continuation lines.
  *
  * USAGE
  *   node scripts/review-findings-lint.mjs --file review.md
@@ -34,14 +38,22 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CLASSES = resolve(HERE, "../config/review-finding-classes.v1.json");
 const VERDICT_RE = /^VERDICT:\s*(APPROVE|REQUEST_CHANGES)\s*$/;
-const FIELD_RE = /^\s*(kind|class|trigger):\s*(.*?)\s*$/i;
+// Fields a kind may demand through `requires` in the vocabulary file, with the
+// wording used in a report. This is the one list: FIELD_RE is built from it.
+const REQUIRABLE = { trigger: "trigger", base: "base evidence" };
+const FIELD_RE = new RegExp(
+  `^\\s*(kind|class|${Object.keys(REQUIRABLE).join("|")}):\\s*(.*?)\\s*$`,
+  "i",
+);
 
 function help() {
   console.log(`review-findings-lint.mjs — lint reviewer findings (#401)
 
 WHAT IT DOES
   Checks each finding under "### Findings": blocking finding has a trigger,
-  every finding has a known class and an explicit known kind, VERDICT is the last line.
+  a finding carries every field its kind requires (pre-existing: trigger and
+  base evidence), every finding has a known class and an explicit known kind,
+  VERDICT is the last line.
 
 WHY
   Findings with no trigger are speculation; findings with no class cannot be
@@ -56,7 +68,7 @@ USAGE
 
 EXAMPLES
   node scripts/review-findings-lint.mjs --file review.md; echo $?
-  # 0 = clean, 1 = findings reported, 2 = usage / unreadable input
+  # 0 = clean, 1 = findings reported, 2 = usage / unreadable input or config
 `);
 }
 
@@ -82,6 +94,25 @@ export function parseFindings(body) {
   return items.filter((it) => !/^(none|no findings)\.?$/i.test(it.text));
 }
 
+// Errors in the vocabulary file itself, independent of any review body.
+export function validateVocab(vocab) {
+  const errors = [];
+  for (const [name, def] of Object.entries(vocab?.kinds ?? {})) {
+    const requires = def?.requires;
+    if (requires === undefined) continue;
+    if (!Array.isArray(requires)) {
+      errors.push(`kind '${name}' has an invalid requires list in the vocabulary`);
+      continue;
+    }
+    for (const field of requires) {
+      if (!Object.hasOwn(REQUIRABLE, field)) {
+        errors.push(`kind '${name}' requires unknown field '${field}'`);
+      }
+    }
+  }
+  return errors;
+}
+
 export function lint(body, vocab) {
   const problems = [];
   const kinds = vocab.kinds;
@@ -94,8 +125,16 @@ export function lint(body, vocab) {
     if (!kinds[kind]) problems.push(`${where}: unknown kind '${kind}'`);
     if (!cls) problems.push(`${where}: finding without class`);
     else if (!classes[cls]) problems.push(`${where}: unknown class '${cls}'`);
-    if (kinds[kind]?.blocking && !(it.fields.trigger || "").length) {
-      problems.push(`${where}: blocking finding without trigger`);
+    // One required-field set per finding: a blocking kind always needs a
+    // trigger, and a kind may list more in `requires`. A field in both is
+    // reported once. Vocabulary errors are validateVocab's job, not a finding's.
+    const def = kinds[kind];
+    const required = new Set(def?.blocking ? ["trigger"] : []);
+    for (const field of Array.isArray(def?.requires) ? def.requires : []) required.add(field);
+    for (const field of required) {
+      if (!Object.hasOwn(REQUIRABLE, field) || (it.fields[field] || "").length) continue;
+      const subject = def.blocking && field === "trigger" ? "blocking" : kind;
+      problems.push(`${where}: ${subject} finding without ${REQUIRABLE[field]}`);
     }
   }
   const nonEmpty = body.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
@@ -126,6 +165,11 @@ function main() {
     body = readFileSync(file ?? 0, "utf8");
   } catch (err) {
     console.error(`review-findings-lint: ${err.message}`);
+    process.exit(2);
+  }
+  const vocabErrors = validateVocab(vocab);
+  if (vocabErrors.length > 0) {
+    for (const e of vocabErrors) console.error(`review-findings-lint: ${classesPath}: ${e}`);
     process.exit(2);
   }
   const problems = lint(body, vocab);
