@@ -4,7 +4,8 @@
  *
  * WHAT IT DOES
  *   Parses a review body and reports: a blocking finding without a `trigger:`
- *   line, a finding without `class:`, an unknown class, an unknown kind, and a
+ *   line, a finding missing a field its kind requires (a `pre-existing` finding
+ *   needs `trigger:` and `base:` evidence, #758), a finding without `class:`, an unknown class, an unknown kind, and a
  *   missing or non-final VERDICT line. Vocabularies come from
  *   config/review-finding-classes.v1.json.
  *
@@ -15,7 +16,7 @@
  * RISKS
  *   - Report-only. Not wired into any merge gate by #401.
  *   - Heuristic markdown parse: findings are top-level `- ` bullets under the
- *     `### Findings` heading; `kind:`/`class:`/`trigger:` are continuation lines.
+ *     `### Findings` heading; `kind:`/`class:`/`trigger:`/`base:` are continuation lines.
  *
  * USAGE
  *   node scripts/review-findings-lint.mjs --file review.md
@@ -34,14 +35,18 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CLASSES = resolve(HERE, "../config/review-finding-classes.v1.json");
 const VERDICT_RE = /^VERDICT:\s*(APPROVE|REQUEST_CHANGES)\s*$/;
-const FIELD_RE = /^\s*(kind|class|trigger):\s*(.*?)\s*$/i;
+const FIELD_RE = /^\s*(kind|class|trigger|base):\s*(.*?)\s*$/i;
+// Fields a kind may demand through `requires` in the vocabulary file.
+const REQUIRABLE = { trigger: "trigger", base: "base evidence" };
 
 function help() {
   console.log(`review-findings-lint.mjs — lint reviewer findings (#401)
 
 WHAT IT DOES
   Checks each finding under "### Findings": blocking finding has a trigger,
-  every finding has a known class and an explicit known kind, VERDICT is the last line.
+  a finding carries every field its kind requires (pre-existing: trigger and
+  base evidence), every finding has a known class and an explicit known kind,
+  VERDICT is the last line.
 
 WHY
   Findings with no trigger are speculation; findings with no class cannot be
@@ -96,6 +101,17 @@ export function lint(body, vocab) {
     else if (!classes[cls]) problems.push(`${where}: unknown class '${cls}'`);
     if (kinds[kind]?.blocking && !(it.fields.trigger || "").length) {
       problems.push(`${where}: blocking finding without trigger`);
+    }
+    const requires = kinds[kind]?.requires;
+    if (requires !== undefined && !Array.isArray(requires)) {
+      problems.push(`${where}: kind '${kind}' has an invalid requires list in the vocabulary`);
+    }
+    for (const field of Array.isArray(requires) ? requires : []) {
+      if (!Object.hasOwn(REQUIRABLE, field)) {
+        problems.push(`${where}: kind '${kind}' requires unknown field '${field}'`);
+      } else if (!(it.fields[field] || "").length) {
+        problems.push(`${where}: ${kind} finding without ${REQUIRABLE[field]}`);
+      }
     }
   }
   const nonEmpty = body.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);

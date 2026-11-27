@@ -1,11 +1,11 @@
 {
   "schema": "gibson.review-finding-classes/v1",
   "authority": "report-only",
-  "description": "Closed vocabularies for reviewer findings (#401). A finding carries one `kind:` and one `class:` line. scripts/review-findings-lint.mjs reads this file; extending a vocabulary is a reviewed change to this file, not a reviewer improvisation.",
+  "description": "Closed vocabularies for reviewer findings (#401). A finding carries one `kind:` and one `class:` line. A kind may list `requires`: field lines (`trigger`, `base`) a finding of that kind must carry. scripts/review-findings-lint.mjs reads this file; extending a vocabulary is a reviewed change to this file, not a reviewer improvisation.",
   "kinds": {
     "blocker": { "blocking": true, "description": "Must be fixed before merge. Requires a `trigger:` line naming a concrete input, state or call sequence reachable in the diff and the wrong outcome it produces." },
     "note": { "blocking": false, "description": "Observation without a reachable trigger. Never blocks." },
-    "pre-existing": { "blocking": false, "description": "A real defect that predates the diff and is not made worse by it. Filed so it is tracked, never charged to the author and never a blocker; name the file and line where it already lives." },
+    "pre-existing": { "blocking": false, "requires": ["trigger", "base"], "description": "A real defect that predates the diff and is not made worse by it. Filed so it is tracked, never charged to the author and never a blocker. Requires a `trigger:` line like a blocker, and a `base:` line giving the evidence that the defect already exists on the base revision (the file and line there, or the base commit where it reproduces)." },
     "rule-candidate": { "blocking": false, "description": "A pattern no configured deterministic tool covers. Filed so a rule can be proposed; never a blocker." }
   },
   "defaultKind": "blocker",

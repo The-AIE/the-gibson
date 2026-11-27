@@ -109,6 +109,39 @@ cat > "$ROOT/pre-existing.md" <<'EOF'
 - `a.ts:10` — bare catch swallows the error; present before this diff
   kind: pre-existing
   class: ignored-error-return
+  trigger: fetch rejects => the error is swallowed and the caller sees success
+  base: a.ts:10 at the base commit has the same bare catch; the diff does not touch it
+
+VERDICT: APPROVE
+EOF
+
+cat > "$ROOT/pre-existing-no-base.md" <<'EOF'
+### Findings
+- `a.ts:10` — bare catch swallows the error; present before this diff
+  kind: pre-existing
+  class: ignored-error-return
+  trigger: fetch rejects => the error is swallowed and the caller sees success
+
+VERDICT: APPROVE
+EOF
+
+cat > "$ROOT/pre-existing-no-trigger.md" <<'EOF'
+### Findings
+- `a.ts:10` — bare catch swallows the error; present before this diff
+  kind: pre-existing
+  class: ignored-error-return
+  base: a.ts:10 at the base commit has the same bare catch; the diff does not touch it
+
+VERDICT: APPROVE
+EOF
+
+cat > "$ROOT/pre-existing-empty-base.md" <<'EOF'
+### Findings
+- `a.ts:10` — bare catch swallows the error; present before this diff
+  kind: pre-existing
+  class: ignored-error-return
+  trigger: fetch rejects => the error is swallowed and the caller sees success
+  base:
 
 VERDICT: APPROVE
 EOF
@@ -141,7 +174,10 @@ expect "finding without class fails" "$ROOT/no-class.md" 1 "finding without clas
 expect "unknown class fails" "$ROOT/unknown-class.md" 1 "unknown class 'vibes'"
 expect "unknown kind fails" "$ROOT/unknown-kind.md" 1 "unknown kind 'showstopper'"
 expect "rule-candidate needs no trigger" "$ROOT/rule-candidate.md" 0 "clean"
-expect "pre-existing needs no trigger and does not block" "$ROOT/pre-existing.md" 0 "clean"
+expect "pre-existing with trigger and base evidence passes and does not block" "$ROOT/pre-existing.md" 0 "clean"
+expect "pre-existing without base evidence fails" "$ROOT/pre-existing-no-base.md" 1 "pre-existing finding without base evidence"
+expect "pre-existing with an empty base line fails" "$ROOT/pre-existing-empty-base.md" 1 "pre-existing finding without base evidence"
+expect "pre-existing without trigger fails" "$ROOT/pre-existing-no-trigger.md" 1 "pre-existing finding without trigger"
 expect "'none' findings list passes" "$ROOT/none.md" 0 "clean"
 expect "verdict not last fails" "$ROOT/verdict-not-last.md" 1 "not the final line"
 expect "missing verdict fails" "$ROOT/no-verdict.md" 1 "missing VERDICT"
